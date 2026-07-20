@@ -1,0 +1,457 @@
+{
+  "routineLimits": {
+    "minSystemInfoIntervalSimSeconds": 30,
+    "maxSystemInfoIntervalSimSeconds": 86400,
+    "maxDiscussionDepth": 4,
+    "maxDiscussionRounds": 8
+  },
+  "fixedTopology": {
+    "kind": "far-horizon-fixed-40-v1",
+    "expandPassengerSlotsFrom": "passenger-service"
+  },
+  "agents": [
+    {
+      "id": "captain",
+      "role": "中央舰长",
+      "systemPrompt": "你是民用星际移民船的中央舰长。只能依据获授权的传感器、日志和人员报告决策，只能通过真实控制器、设备、机器人或人员改变世界。",
+      "permissions": [
+        "llm:routine:configure-self",
+        "ship:command",
+        "ship:read-all",
+        "ship:communicate"
+      ],
+      "canSendTo": [
+        "navigation",
+        "engineering",
+        "life-support",
+        "medical",
+        "passenger-affairs",
+        "security",
+        "passenger-service"
+      ],
+      "routineDefaults": {
+        "systemInfoIntervalSimSeconds": 21600,
+        "discussionDepth": 4,
+        "discussionRounds": 8
+      },
+      "endpoint": {
+        "url": "https://api.example.invalid/v1/chat/completions",
+        "method": "POST",
+        "headers": {
+          "x-ship-client": "ship-y/llm-gateway-v1"
+        },
+        "secretHeaders": [
+          {
+            "header": "authorization",
+            "secretRef": "SHIP_CAPTAIN_LLM_API_KEY",
+            "prefix": "Bearer "
+          }
+        ],
+        "bodyTemplate": {
+          "model": "captain-reasoning-model",
+          "messages": "{{request.openAiMessagesWithSystem}}",
+          "tools": "{{request.openAiTools}}",
+          "thinking": {
+            "enabled": true,
+            "budget_tokens": 8192
+          },
+          "stream": false
+        },
+        "response": {
+          "kind": "json",
+          "textPath": ["choices", 0, "message", "content"],
+          "finishReasonPath": ["choices", 0, "finish_reason"],
+          "toolCallsPath": ["choices", 0, "message", "tool_calls"],
+          "toolCall": {
+            "idPath": ["id"],
+            "namePath": ["function", "name"],
+            "argumentsPath": ["function", "arguments"]
+          },
+          "usage": {
+            "inputTokensPath": ["usage", "prompt_tokens"],
+            "outputTokensPath": ["usage", "completion_tokens"],
+            "totalTokensPath": ["usage", "total_tokens"]
+          }
+        }
+      }
+    },
+    {
+      "id": "navigation",
+      "role": "导航与跃迁部门",
+      "systemPrompt": "你负责星图、亚光速航行、跃迁窗口与到达误差分析。不得直接写入位置、速度或跃迁结果。",
+      "permissions": [
+        "llm:routine:configure-self",
+        "navigation:read",
+        "navigation:command",
+        "ship:communicate"
+      ],
+      "canSendTo": ["captain", "engineering"],
+      "routineDefaults": {
+        "systemInfoIntervalSimSeconds": 21600,
+        "discussionDepth": 3,
+        "discussionRounds": 6
+      },
+      "endpoint": {
+        "url": "https://api.example.invalid/v1/chat/completions",
+        "method": "POST",
+        "secretHeaders": [
+          {
+            "header": "authorization",
+            "secretRef": "SHIP_NAVIGATION_LLM_API_KEY",
+            "prefix": "Bearer "
+          }
+        ],
+        "bodyTemplate": {
+          "model": "navigation-reasoning-model",
+          "messages": "{{request.openAiMessagesWithSystem}}",
+          "tools": "{{request.openAiTools}}",
+          "thinking": {
+            "enabled": true,
+            "budget_tokens": 6144
+          },
+          "stream": false
+        },
+        "response": {
+          "kind": "json",
+          "textPath": ["choices", 0, "message", "content"],
+          "finishReasonPath": ["choices", 0, "finish_reason"],
+          "toolCallsPath": ["choices", 0, "message", "tool_calls"],
+          "toolCall": {
+            "idPath": ["id"],
+            "namePath": ["function", "name"],
+            "argumentsPath": ["function", "arguments"]
+          },
+          "usage": {
+            "inputTokensPath": ["usage", "prompt_tokens"],
+            "outputTokensPath": ["usage", "completion_tokens"],
+            "totalTokensPath": ["usage", "total_tokens"]
+          }
+        }
+      }
+    },
+    {
+      "id": "engineering",
+      "role": "工程、能源与热管理部门",
+      "systemPrompt": "你负责反应堆、配电、推进、结构、冷却和维修诊断。所有操作必须落到存在的设备、执行器和维修流程。",
+      "permissions": [
+        "llm:routine:configure-self",
+        "engineering:read",
+        "engineering:command",
+        "ship:communicate"
+      ],
+      "canSendTo": ["captain", "navigation", "life-support"],
+      "routineDefaults": {
+        "systemInfoIntervalSimSeconds": 3600,
+        "discussionDepth": 3,
+        "discussionRounds": 6
+      },
+      "endpoint": {
+        "url": "https://api.example.invalid/v1/chat/completions",
+        "method": "POST",
+        "secretHeaders": [
+          {
+            "header": "authorization",
+            "secretRef": "SHIP_ENGINEERING_LLM_API_KEY",
+            "prefix": "Bearer "
+          }
+        ],
+        "bodyTemplate": {
+          "model": "engineering-reasoning-model",
+          "messages": "{{request.openAiMessagesWithSystem}}",
+          "tools": "{{request.openAiTools}}",
+          "thinking": {
+            "enabled": true,
+            "budget_tokens": 6144
+          },
+          "stream": false
+        },
+        "response": {
+          "kind": "json",
+          "textPath": ["choices", 0, "message", "content"],
+          "finishReasonPath": ["choices", 0, "finish_reason"],
+          "toolCallsPath": ["choices", 0, "message", "tool_calls"],
+          "toolCall": {
+            "idPath": ["id"],
+            "namePath": ["function", "name"],
+            "argumentsPath": ["function", "arguments"]
+          },
+          "usage": {
+            "inputTokensPath": ["usage", "prompt_tokens"],
+            "outputTokensPath": ["usage", "completion_tokens"],
+            "totalTokensPath": ["usage", "total_tokens"]
+          }
+        }
+      }
+    },
+    {
+      "id": "life-support",
+      "role": "生命保障部门",
+      "systemPrompt": "你负责舱压、气体成分、水、废物、农业和居住环境。不得直接改写温度、压力、库存或乘客生理状态。",
+      "permissions": [
+        "llm:routine:configure-self",
+        "life-support:read",
+        "life-support:command",
+        "ship:communicate"
+      ],
+      "canSendTo": ["captain", "engineering", "medical"],
+      "routineDefaults": {
+        "systemInfoIntervalSimSeconds": 3600,
+        "discussionDepth": 3,
+        "discussionRounds": 6
+      },
+      "endpoint": {
+        "url": "https://api.example.invalid/v1/chat/completions",
+        "method": "POST",
+        "secretHeaders": [
+          {
+            "header": "authorization",
+            "secretRef": "SHIP_LIFE_SUPPORT_LLM_API_KEY",
+            "prefix": "Bearer "
+          }
+        ],
+        "bodyTemplate": {
+          "model": "life-support-reasoning-model",
+          "messages": "{{request.openAiMessagesWithSystem}}",
+          "tools": "{{request.openAiTools}}",
+          "thinking": {
+            "enabled": true,
+            "budget_tokens": 4096
+          },
+          "stream": false
+        },
+        "response": {
+          "kind": "json",
+          "textPath": ["choices", 0, "message", "content"],
+          "finishReasonPath": ["choices", 0, "finish_reason"],
+          "toolCallsPath": ["choices", 0, "message", "tool_calls"],
+          "toolCall": {
+            "idPath": ["id"],
+            "namePath": ["function", "name"],
+            "argumentsPath": ["function", "arguments"]
+          },
+          "usage": {
+            "inputTokensPath": ["usage", "prompt_tokens"],
+            "outputTokensPath": ["usage", "completion_tokens"],
+            "totalTokensPath": ["usage", "total_tokens"]
+          }
+        }
+      }
+    },
+    {
+      "id": "medical",
+      "role": "医疗与休眠部门",
+      "systemPrompt": "你负责诊断、治疗、休眠与唤醒流程。只能通过人员、药物、舱体和医疗机器人实施干预。",
+      "permissions": [
+        "llm:routine:configure-self",
+        "medical:read",
+        "medical:command",
+        "ship:communicate"
+      ],
+      "canSendTo": ["captain", "life-support", "passenger-affairs"],
+      "routineDefaults": {
+        "systemInfoIntervalSimSeconds": 7200,
+        "discussionDepth": 3,
+        "discussionRounds": 6
+      },
+      "endpoint": {
+        "url": "https://api.example.invalid/v1/chat/completions",
+        "method": "POST",
+        "secretHeaders": [
+          {
+            "header": "authorization",
+            "secretRef": "SHIP_MEDICAL_LLM_API_KEY",
+            "prefix": "Bearer "
+          }
+        ],
+        "bodyTemplate": {
+          "model": "medical-reasoning-model",
+          "messages": "{{request.openAiMessagesWithSystem}}",
+          "tools": "{{request.openAiTools}}",
+          "thinking": {
+            "enabled": true,
+            "budget_tokens": 4096
+          },
+          "stream": false
+        },
+        "response": {
+          "kind": "json",
+          "textPath": ["choices", 0, "message", "content"],
+          "finishReasonPath": ["choices", 0, "finish_reason"],
+          "toolCallsPath": ["choices", 0, "message", "tool_calls"],
+          "toolCall": {
+            "idPath": ["id"],
+            "namePath": ["function", "name"],
+            "argumentsPath": ["function", "arguments"]
+          },
+          "usage": {
+            "inputTokensPath": ["usage", "prompt_tokens"],
+            "outputTokensPath": ["usage", "completion_tokens"],
+            "totalTokensPath": ["usage", "total_tokens"]
+          }
+        }
+      }
+    },
+    {
+      "id": "passenger-affairs",
+      "role": "乘客事务与社会协调部门",
+      "systemPrompt": "你负责群体情绪、资源公平、工作安排、冲突调解与社会稳定，只能依据世界内记录和交流行动。",
+      "permissions": [
+        "llm:routine:configure-self",
+        "passenger-affairs:read",
+        "passenger-affairs:command",
+        "ship:communicate"
+      ],
+      "canSendTo": ["captain", "medical", "security", "passenger-service"],
+      "routineDefaults": {
+        "systemInfoIntervalSimSeconds": 21600,
+        "discussionDepth": 3,
+        "discussionRounds": 6
+      },
+      "endpoint": {
+        "url": "https://api.example.invalid/v1/chat/completions",
+        "method": "POST",
+        "secretHeaders": [
+          {
+            "header": "authorization",
+            "secretRef": "SHIP_PASSENGER_AFFAIRS_LLM_API_KEY",
+            "prefix": "Bearer "
+          }
+        ],
+        "bodyTemplate": {
+          "model": "passenger-affairs-model",
+          "messages": "{{request.openAiMessagesWithSystem}}",
+          "tools": "{{request.openAiTools}}",
+          "thinking": {
+            "enabled": true,
+            "budget_tokens": 4096
+          },
+          "stream": false
+        },
+        "response": {
+          "kind": "json",
+          "textPath": ["choices", 0, "message", "content"],
+          "finishReasonPath": ["choices", 0, "finish_reason"],
+          "toolCallsPath": ["choices", 0, "message", "tool_calls"],
+          "toolCall": {
+            "idPath": ["id"],
+            "namePath": ["function", "name"],
+            "argumentsPath": ["function", "arguments"]
+          },
+          "usage": {
+            "inputTokensPath": ["usage", "prompt_tokens"],
+            "outputTokensPath": ["usage", "completion_tokens"],
+            "totalTokensPath": ["usage", "total_tokens"]
+          }
+        }
+      }
+    },
+    {
+      "id": "security",
+      "role": "安保与应急部门",
+      "systemPrompt": "你负责门禁、疏散、犯罪调查、现场控制和应急协调。权力使用必须通过真实人员、机器人、门锁与授权流程。",
+      "permissions": [
+        "llm:routine:configure-self",
+        "security:read",
+        "security:command",
+        "ship:communicate"
+      ],
+      "canSendTo": ["captain", "passenger-affairs"],
+      "routineDefaults": {
+        "systemInfoIntervalSimSeconds": 7200,
+        "discussionDepth": 3,
+        "discussionRounds": 6
+      },
+      "endpoint": {
+        "url": "https://api.example.invalid/v1/chat/completions",
+        "method": "POST",
+        "secretHeaders": [
+          {
+            "header": "authorization",
+            "secretRef": "SHIP_SECURITY_LLM_API_KEY",
+            "prefix": "Bearer "
+          }
+        ],
+        "bodyTemplate": {
+          "model": "security-reasoning-model",
+          "messages": "{{request.openAiMessagesWithSystem}}",
+          "tools": "{{request.openAiTools}}",
+          "thinking": {
+            "enabled": true,
+            "budget_tokens": 4096
+          },
+          "stream": false
+        },
+        "response": {
+          "kind": "json",
+          "textPath": ["choices", 0, "message", "content"],
+          "finishReasonPath": ["choices", 0, "finish_reason"],
+          "toolCallsPath": ["choices", 0, "message", "tool_calls"],
+          "toolCall": {
+            "idPath": ["id"],
+            "namePath": ["function", "name"],
+            "argumentsPath": ["function", "arguments"]
+          },
+          "usage": {
+            "inputTokensPath": ["usage", "prompt_tokens"],
+            "outputTokensPath": ["usage", "completion_tokens"],
+            "totalTokensPath": ["usage", "total_tokens"]
+          }
+        }
+      }
+    },
+    {
+      "id": "passenger-service",
+      "role": "乘客服务部门",
+      "systemPrompt": "你负责住宿、餐饮、信息发布、投诉和日常服务调度。不得通过隐藏的上帝接口改变乘客感受或评价。",
+      "permissions": [
+        "llm:routine:configure-self",
+        "passenger-service:read",
+        "passenger-service:command",
+        "ship:communicate"
+      ],
+      "canSendTo": ["captain", "passenger-affairs", "medical"],
+      "routineDefaults": {
+        "systemInfoIntervalSimSeconds": 43200,
+        "discussionDepth": 3,
+        "discussionRounds": 6
+      },
+      "endpoint": {
+        "url": "https://api.example.invalid/v1/chat/completions",
+        "method": "POST",
+        "secretHeaders": [
+          {
+            "header": "authorization",
+            "secretRef": "SHIP_PASSENGER_SERVICE_LLM_API_KEY",
+            "prefix": "Bearer "
+          }
+        ],
+        "bodyTemplate": {
+          "model": "passenger-service-model",
+          "messages": "{{request.openAiMessagesWithSystem}}",
+          "tools": "{{request.openAiTools}}",
+          "thinking": {
+            "enabled": false,
+            "budget_tokens": 0
+          },
+          "stream": false
+        },
+        "response": {
+          "kind": "json",
+          "textPath": ["choices", 0, "message", "content"],
+          "finishReasonPath": ["choices", 0, "finish_reason"],
+          "toolCallsPath": ["choices", 0, "message", "tool_calls"],
+          "toolCall": {
+            "idPath": ["id"],
+            "namePath": ["function", "name"],
+            "argumentsPath": ["function", "arguments"]
+          },
+          "usage": {
+            "inputTokensPath": ["usage", "prompt_tokens"],
+            "outputTokensPath": ["usage", "completion_tokens"],
+            "totalTokensPath": ["usage", "total_tokens"]
+          }
+        }
+      }
+    }
+  ]
+}
