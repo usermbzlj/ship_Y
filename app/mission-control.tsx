@@ -59,6 +59,7 @@ import type {
   CaptainDeviceReceiptSummary,
   LocalSave,
   ForceField,
+  GodAssistSessionHandle,
 } from "@/app/ui/types";
 import {
   STAR_SYSTEMS,
@@ -769,6 +770,13 @@ export function MissionControl() {
       options?: { actor?: string },
     ) => void
   >(() => {});
+  const godAssistSessionRef = useRef<GodAssistSessionHandle | null>(null);
+  const handleGodAssistSessionChange = useCallback(
+    (session: GodAssistSessionHandle | null) => {
+      godAssistSessionRef.current = session;
+    },
+    [],
+  );
   const appendCaptainCommandEvent = useCallback(
     (
       elapsedSeconds: number,
@@ -1029,6 +1037,16 @@ export function MissionControl() {
             { persistent: true },
           );
           return;
+        }
+        const godAssistSession = godAssistSessionRef.current;
+        if (godAssistSession?.active && godAssistSession.onPhysicsRejection) {
+          const onPhysicsRejection = godAssistSession.onPhysicsRejection;
+          godAssistSessionRef.current = {
+            active: false,
+            retried: true,
+            onPhysicsRejection: null,
+          };
+          onPhysicsRejection(event.message);
         }
         setPaused(true);
         showToast(`物理引擎拒绝操作：${event.message}`);
@@ -3925,8 +3943,11 @@ export function MissionControl() {
               rotation={rotationState}
               waterRecovery={waterRecoveryState}
               maintenance={maintenanceState}
+              simulationSeconds={simulationSeconds}
+              missionReady={missionStarted}
               onCausalEvent={injectCausalEvent}
               onOverride={forceOverride}
+              onGodAssistSessionChange={handleGodAssistSessionChange}
             />
           )}
         </div>

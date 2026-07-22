@@ -11,6 +11,7 @@ const secretNames = [
   "SHIP_PASSENGER_AFFAIRS_LLM_API_KEY",
   "SHIP_SECURITY_LLM_API_KEY",
   "SHIP_PASSENGER_SERVICE_LLM_API_KEY",
+  "SHIP_GOD_ASSIST_LLM_API_KEY",
 ];
 
 delete process.env.LLM_CONFIG_JSON;
@@ -105,6 +106,35 @@ function routeTestConfiguration() {
         idPath: ["id"],
         namePath: ["function", "name"],
         argumentsPath: ["function", "arguments"],
+      },
+    },
+  };
+  configuration.playerAssistants = {
+    godAssistant: {
+      endpoint: {
+        url: "https://provider.route.test/v1/god-assist",
+        secretHeaders: [
+          {
+            header: "authorization",
+            secretRef: "SHIP_ROUTE_GOD_ASSIST_TEST_API_KEY",
+            prefix: "Bearer ",
+          },
+        ],
+        bodyTemplate: {
+          model: "god-assist-route-test",
+          messages: "{{request.openAiMessagesWithSystem}}",
+          tools: "{{request.openAiTools}}",
+        },
+        response: {
+          kind: "json",
+          textPath: ["choices", 0, "message", "content"],
+          toolCallsPath: ["choices", 0, "message", "tool_calls"],
+          toolCall: {
+            idPath: ["id"],
+            namePath: ["function", "name"],
+            argumentsPath: ["function", "arguments"],
+          },
+        },
       },
     },
   };
@@ -604,5 +634,97 @@ test("routine consume route accepts only the model-issued one-shot IDs", async (
     globalThis.fetch = originalFetch;
     delete process.env.LLM_CONFIG_JSON;
     delete process.env.SHIP_ROUTE_TEST_API_KEY;
+  }
+});
+
+test("god-assist returns parsed intervention plan without expanding fixed topology", async () => {
+  const originalFetch = globalThis.fetch;
+  process.env.LLM_CONFIG_JSON = JSON.stringify(routeTestConfiguration());
+  process.env.SHIP_ROUTE_GOD_ASSIST_TEST_API_KEY = "god-assist-route-secret";
+  let outboundBody = "";
+  globalThis.fetch = async (input, init) => {
+    assert.equal(
+      String(input),
+      "https://provider.route.test/v1/god-assist",
+    );
+    assert.equal(
+      new Headers(init?.headers).get("authorization"),
+      "Bearer god-assist-route-secret",
+    );
+    outboundBody = String(init?.body);
+    return Response.json({
+      choices: [
+        {
+          message: {
+            content: "",
+            tool_calls: [
+              {
+                id: "god-route-tool-1",
+                function: {
+                  name: "apply_intervention_plan",
+                  arguments: JSON.stringify({
+                    summary: "抬升聚变发电",
+                    steps: [
+                      {
+                        kind: "force-override",
+                        fieldId: "generation",
+                        value: 650_000,
+                        label: "聚变总发电",
+                      },
+                    ],
+                  }),
+                },
+              },
+            ],
+          },
+          finish_reason: "tool_calls",
+        },
+      ],
+      usage: {
+        prompt_tokens: 11,
+        completion_tokens: 7,
+        total_tokens: 18,
+      },
+    });
+  };
+
+  try {
+    const response = await request("/api/llm/invoke", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        intent: "god-assist",
+        messages: [
+          {
+            role: "user",
+            content: "把聚变总发电拉到 650 MW",
+          },
+        ],
+        worldContext: {
+          power: { generationKw: 420_000 },
+        },
+        previousRejection: "上次发电值超出母线闭合上限",
+      }),
+    });
+    assert.equal(response.status, 200);
+    const result = (await response.json()).result;
+    assert.equal(result.agentId, "god-assistant");
+    assert.equal(result.plan.summary, "抬升聚变发电");
+    assert.deepEqual(result.plan.steps, [
+      {
+        kind: "force-override",
+        fieldId: "generation",
+        value: 650_000,
+        label: "聚变总发电",
+      },
+    ]);
+    assert.match(outboundBody, /只读观测摘要/);
+    assert.match(outboundBody, /420000/);
+    assert.match(outboundBody, /上次发电值超出母线闭合上限/);
+    assert.doesNotMatch(outboundBody, /agentId|fromAgentId/);
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete process.env.LLM_CONFIG_JSON;
+    delete process.env.SHIP_ROUTE_GOD_ASSIST_TEST_API_KEY;
   }
 });

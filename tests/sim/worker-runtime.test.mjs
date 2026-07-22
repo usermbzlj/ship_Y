@@ -909,7 +909,53 @@ test("maintenance consumes parts, blocks without workshop power, and repairs a r
   assert.deepEqual(restored.payload.maintenance, repaired.payload.maintenance);
 });
 
-test("electrical Force and reactor trips act on the physical six-reactor network", () => {
+test("electrical Force after multi-hour coupling still reconciles both buses", () => {
+  initialize("init-electrical-force-after-coupling");
+  for (let index = 0; index < 8; index += 1) {
+    const stepped = dispatch({
+      type: "step",
+      requestId: `force-step-${index}`,
+      realSeconds: 1,
+      timeScale: 3_600,
+    });
+    assert.equal(stepped.type, "stepped", stepped.message);
+  }
+  const forced = dispatch({
+    type: "intervene",
+    requestId: "force-generation-after-coupling",
+    request: {
+      actor: "player:god-mode",
+      reason: "regression generation force after coupling",
+      operations: [
+        {
+          operation: "set",
+          path: "power.generationKw",
+          value: 650_000,
+        },
+      ],
+      declaredBalance: {
+        massKg: 0,
+        energyJ: 0,
+        linearMomentumKgMPerSecond: [0, 0, 0],
+        angularMomentumKgM2PerSecond: [0, 0, 0],
+        note: "external boundary control",
+      },
+      metadata: {
+        mode: "direct-force",
+        fieldId: "generation",
+        sourceKnownToAi: false,
+      },
+    },
+  });
+  assert.equal(forced.type, "intervention", forced.message);
+  assert.equal(forced.payload.state.power.generationKw, 650_000);
+  assert.equal(
+    forced.payload.electrical.truth.generationPowerKw,
+    650_000,
+  );
+});
+
+test("electrical generation force and fusion trip update authoritative state", () => {
   const ready = initialize("init-electrical-authority");
   assert.equal(ready.payload.state.power.generationKw, 842_000);
   const forced = dispatch({

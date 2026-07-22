@@ -14,6 +14,8 @@ import type {
 } from "../types";
 import { FORCE_FIELDS } from "../constants";
 import { StatusPill } from "../components/status-pill";
+import { GodAssistPanel } from "../components/god-assist-panel";
+import type { GodAssistSessionHandle } from "../types";
 
 export function GodView({
   state,
@@ -24,8 +26,11 @@ export function GodView({
   rotation,
   waterRecovery,
   maintenance,
+  simulationSeconds,
+  missionReady,
   onCausalEvent,
   onOverride,
+  onGodAssistSessionChange,
 }: {
   state: ShipState | null;
   compartments: CompartmentTelemetry | null;
@@ -35,8 +40,11 @@ export function GodView({
   rotation: RotationTelemetry | null;
   waterRecovery: WaterRecoveryTelemetry | null;
   maintenance: MaintenanceTelemetry | null;
+  simulationSeconds: number;
+  missionReady: boolean;
   onCausalEvent: (eventId: string, label: string) => void;
   onOverride: (field: ForceField, value: number) => void;
+  onGodAssistSessionChange: (session: GodAssistSessionHandle | null) => void;
 }) {
   const [fieldId, setFieldId] = useState<string>(FORCE_FIELDS[0].id);
   const [pendingConfirm, setPendingConfirm] = useState<
@@ -68,6 +76,21 @@ export function GodView({
       onOverride(field, pendingConfirm.value);
     }
     setPendingConfirm(null);
+  };
+
+  const worldContext = {
+    simulationSeconds,
+    pressureKPa: state ? state.atmosphere.pressurePa / 1_000 : null,
+    activeBreaches: compartments?.activeBreaches ?? null,
+    generationMw: electrical
+      ? electrical.truth.generationPowerKw / 1_000
+      : null,
+    unservedMw: electrical
+      ? electrical.truth.unservedPowerKw / 1_000
+      : null,
+    hottestNodeK: cooling?.truth.hottestNodeTemperatureK ?? null,
+    potableWaterKg: waterRecovery?.truth.summary.potableKg ?? null,
+    activeMaintenanceTasks: maintenance?.activeTasks.length ?? null,
   };
 
   return (
@@ -313,6 +336,13 @@ export function GodView({
           <strong>仅观测 · 禁止覆写</strong>
         </div>
       </div>
+      <GodAssistPanel
+        missionReady={missionReady}
+        worldContext={worldContext}
+        onCausalEvent={onCausalEvent}
+        onOverride={onOverride}
+        onSessionChange={onGodAssistSessionChange}
+      />
     </section>
   );
 }

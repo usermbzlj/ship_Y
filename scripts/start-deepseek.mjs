@@ -88,24 +88,41 @@ function maxTokensForAgent(agentId) {
   return 700;
 }
 
+function configureEndpoint(endpoint, { baseUrl, apiKey, model, thinking }, maxTokens) {
+  endpoint.url = `${baseUrl}/chat/completions`;
+  endpoint.bodyTemplate.model = model;
+  endpoint.bodyTemplate.thinking = { type: thinking };
+  endpoint.bodyTemplate.max_tokens = maxTokens;
+
+  if (thinking === "enabled") {
+    endpoint.bodyTemplate.reasoning_effort = "high";
+  } else {
+    delete endpoint.bodyTemplate.reasoning_effort;
+  }
+
+  endpoint.requestTimeoutMs = 120000;
+
+  for (const secretHeader of endpoint.secretHeaders ?? []) {
+    process.env[secretHeader.secretRef] = apiKey;
+  }
+}
+
 function configureAgents(configuration, { baseUrl, apiKey, model, thinking }) {
   for (const agent of configuration.agents) {
-    agent.endpoint.url = `${baseUrl}/chat/completions`;
-    agent.endpoint.bodyTemplate.model = model;
-    agent.endpoint.bodyTemplate.thinking = { type: thinking };
-    agent.endpoint.bodyTemplate.max_tokens = maxTokensForAgent(agent.id);
+    configureEndpoint(
+      agent.endpoint,
+      { baseUrl, apiKey, model, thinking },
+      maxTokensForAgent(agent.id),
+    );
+  }
 
-    if (thinking === "enabled") {
-      agent.endpoint.bodyTemplate.reasoning_effort = "high";
-    } else {
-      delete agent.endpoint.bodyTemplate.reasoning_effort;
-    }
-
-    agent.endpoint.requestTimeoutMs = 120000;
-
-    for (const secretHeader of agent.endpoint.secretHeaders ?? []) {
-      process.env[secretHeader.secretRef] = apiKey;
-    }
+  const godAssistant = configuration.playerAssistants?.godAssistant;
+  if (godAssistant?.endpoint) {
+    configureEndpoint(
+      godAssistant.endpoint,
+      { baseUrl, apiKey, model, thinking },
+      900,
+    );
   }
 }
 

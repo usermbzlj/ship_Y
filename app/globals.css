@@ -1932,6 +1932,168 @@ textarea:focus-visible {
 
 .god-view {
   grid-template-columns: minmax(500px, 1.3fr) minmax(280px, 0.7fr);
+  grid-template-rows: auto auto;
+}
+
+.god-assist-panel {
+  grid-column: 1 / -1;
+  border-color: rgba(210, 96, 83, 0.22);
+}
+
+.god-assist-intro {
+  margin: 0;
+  padding: 14px 20px;
+  border-bottom: 1px solid rgba(210, 96, 83, 0.13);
+  color: #8f7d7a;
+  font-size: 10px;
+  line-height: 1.7;
+}
+
+.god-assist-status {
+  color: #9a7f7b;
+  font: 500 8px/1 var(--font-mono);
+  letter-spacing: 0.12em;
+}
+
+.god-assist-reply {
+  margin: 0 20px;
+  padding: 12px 0;
+  border-bottom: 1px solid rgba(210, 96, 83, 0.1);
+}
+
+.god-assist-reply span {
+  display: block;
+  margin-bottom: 6px;
+  color: #745f5d;
+  font: 500 7px/1 var(--font-mono);
+  letter-spacing: 0.08em;
+}
+
+.god-assist-reply p {
+  margin: 0;
+  color: #b39a96;
+  font-size: 10px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.god-assist-plan {
+  margin: 0 18px 12px;
+  padding: 12px 14px;
+  border: 1px solid rgba(210, 96, 83, 0.35);
+  background:
+    linear-gradient(135deg, rgba(210, 96, 83, 0.06), transparent 55%),
+    rgba(10, 8, 8, 0.88);
+}
+
+.god-assist-plan-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.god-assist-plan-heading strong {
+  color: #cfaaa5;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.god-assist-plan-heading small {
+  color: #7a6663;
+  font: 500 8px/1 var(--font-mono);
+}
+
+.god-assist-steps {
+  margin: 0;
+  padding-left: 18px;
+  color: #9f8884;
+  font-size: 9px;
+  line-height: 1.7;
+}
+
+.god-assist-plan-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.god-assist-plan-actions button,
+.god-assist-submit {
+  min-width: 72px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid rgba(210, 96, 83, 0.35);
+  color: #c5a09b;
+  background: rgba(210, 96, 83, 0.06);
+  font: 500 9px/1 var(--font-mono);
+  cursor: pointer;
+}
+
+.god-assist-plan-actions button:hover,
+.god-assist-submit:hover:not(:disabled) {
+  border-color: rgba(210, 96, 83, 0.6);
+  color: #e8c4be;
+  background: rgba(210, 96, 83, 0.12);
+}
+
+.god-assist-plan-actions button:disabled,
+.god-assist-submit:disabled {
+  border-color: #322e2e;
+  color: #5b5050;
+  background: #0b0d0e;
+  cursor: not-allowed;
+}
+
+.god-assist-hint {
+  margin: 0 20px 10px;
+  color: #a88882;
+  font-size: 9px;
+  line-height: 1.6;
+}
+
+.god-assist-error {
+  margin: 0 20px 10px;
+  color: #bb6c63;
+  font-size: 9px;
+  line-height: 1.6;
+}
+
+.god-assist-compose {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+  padding: 16px 20px 20px;
+}
+
+.god-assist-compose label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: #68787a;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+}
+
+.god-assist-compose textarea {
+  width: 100%;
+  min-height: 72px;
+  padding: 10px 11px;
+  border: 1px solid #334346;
+  border-radius: 0;
+  color: #b8c5c3;
+  background: #080d0f;
+  resize: vertical;
+  font: 500 10px/1.55 var(--font-mono);
+}
+
+.god-assist-submit {
+  height: 41px;
+  align-self: end;
+  letter-spacing: 0.1em;
 }
 
 .god-panel {
@@ -3182,6 +3344,19 @@ textarea:focus-visible {
   .systems-row,
   .intervention-grid,
   .observer-truth-strip,
+  .god-assist-compose {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .god-assist-compose {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .god-assist-submit {
+    width: 100%;
+  }
   .end-metrics {
     grid-template-columns: minmax(0, 1fr);
   }

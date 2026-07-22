@@ -5,6 +5,11 @@ import {
   FAR_HORIZON_KEY_PASSENGER_AGENT_IDS,
 } from "@/lib/llm/fixed-topology";
 import {
+  GodAssistRuntime,
+  splitLlmConfigurationRoot,
+  type PlayerAssistantsConfig,
+} from "@/lib/llm/god-assist";
+import {
   AgentPermissionError,
   FixedLlmServerRuntime,
   InvalidRoutineToolArgumentsError,
@@ -19,6 +24,7 @@ import {
   RoutineTicketNotFoundError,
   UnsupportedRoutineToolError,
   UnknownAgentError,
+  type LlmMessage,
 } from "@/lib/llm";
 
 class HttpRequestValidationError extends Error {
@@ -33,6 +39,8 @@ class HttpRequestValidationError extends Error {
 
 let cachedSource: string | undefined;
 let cachedRuntime: FixedLlmServerRuntime | undefined;
+let cachedGodAssistRuntime: GodAssistRuntime | undefined;
+let cachedPlayerAssistants: PlayerAssistantsConfig | undefined;
 
 const PUBLIC_CAPTAIN_CONSULTANT_IDS = new Set<string>(
   FAR_HORIZON_DEPARTMENT_AGENT_IDS.filter(
@@ -52,11 +60,21 @@ let activePassengerInvocations = 0;
 type PublicInvocationKind =
   | "captain-decision"
   | "captain-consultation"
-  | "passenger-self";
+  | "passenger-self"
+  | "god-assist";
 
-export interface NormalizedPublicLlmInvocation {
-  kind: PublicInvocationKind;
-  invocation: unknown;
+export type NormalizedPublicLlmInvocation =
+  | {
+      kind: "captain-decision" | "captain-consultation" | "passenger-self";
+      invocation: unknown;
+    }
+  | NormalizedGodAssistInvocation;
+
+export interface NormalizedGodAssistInvocation {
+  kind: "god-assist";
+  messages: LlmMessage[];
+  worldContext?: Record<string, unknown>;
+  previousRejection?: string;
 }
 
 function isRecord(
@@ -377,9 +395,29 @@ function normalizePassengerSelfInvocation(
 }
 
 export function getLlmServerRuntime(): FixedLlmServerRuntime {
+  ensureLlmRuntimesLoaded();
+  if (!cachedRuntime) {
+    throw new LlmConfigurationError("LLM runtime failed to initialize");
+  }
+  return cachedRuntime;
+}
+
+export function getGodAssistRuntime(): GodAssistRuntime {
+  ensureLlmRuntimesLoaded();
+  if (!cachedGodAssistRuntime) {
+    throw new LlmConfigurationError(
+      "God assistant is not configured (playerAssistants.godAssistant missing)",
+    );
+  }
+  return cachedGodAssistRuntime;
+}
+
+function ensureLlmRuntimesLoaded(): void {
   const configuredJson = process.env.LLM_CONFIG_JSON?.trim();
   const source = configuredJson || "__bundled_example__";
-  if (cachedRuntime && cachedSource === source) return cachedRuntime;
+  if (cachedRuntime && cachedSource === source) {
+    return;
+  }
 
   let definition: unknown = exampleConfiguration;
   if (configuredJson) {
@@ -392,15 +430,125 @@ export function getLlmServerRuntime(): FixedLlmServerRuntime {
     }
   }
 
+  const split = splitLlmConfigurationRoot(definition);
+  cachedPlayerAssistants = split.playerAssistants;
   cachedRuntime = new FixedLlmServerRuntime(
-    expandFarHorizonFixedTopology(definition),
+    expandFarHorizonFixedTopology(split.shipConfiguration),
     {
-    fetch: (input, init) => globalThis.fetch(input, init),
-    readEnvironment: (name) => process.env[name],
+      fetch: (input, init) => globalThis.fetch(input, init),
+      readEnvironment: (name) => process.env[name],
     },
   );
+
+  cachedGodAssistRuntime = undefined;
+  const godAssistant = cachedPlayerAssistants?.godAssistant;
+  if (godAssistant) {
+    cachedGodAssistRuntime = new GodAssistRuntime(godAssistant, {
+      fetch: (input, init) => globalThis.fetch(input, init),
+      readEnvironment: (name) => process.env[name],
+    });
+  } else if (!configuredJson) {
+    // Bundled example: derive god assistant from captain endpoint template.
+    const example = exampleConfiguration as {
+      agents: Array<{ id: string; endpoint: unknown }>;
+    };
+    const captain = example.agents.find((agent) => agent.id === "captain");
+    if (captain?.endpoint) {
+      cachedGodAssistRuntime = new GodAssistRuntime(
+        {
+          endpoint: captain.endpoint as never,
+        },
+        {
+          fetch: (input, init) => globalThis.fetch(input, init),
+          readEnvironment: (name) => process.env[name],
+        },
+      );
+    }
+  }
+
   cachedSource = source;
-  return cachedRuntime;
+}
+
+function normalizeGodAssistInvocation(
+  input: Record<string, unknown>,
+): NormalizedGodAssistInvocation {
+  assertOnlyKeys(
+    input,
+    ["intent", "messages", "worldContext", "previousRejection"],
+    "god-assist request",
+  );
+  if (!Array.isArray(input.messages) || input.messages.length < 1) {
+    throw new HttpRequestValidationError(
+      "god-assist messages must be a non-empty array",
+      400,
+    );
+  }
+  if (input.messages.length > 32) {
+    throw new HttpRequestValidationError(
+      "god-assist messages cannot exceed 32 entries",
+      400,
+    );
+  }
+  const messages: LlmMessage[] = input.messages.map((entry, index) => {
+    if (!isRecord(entry)) {
+      throw new HttpRequestValidationError(
+        `messages[${index}] must be an object`,
+        400,
+      );
+    }
+    assertOnlyKeys(
+      entry,
+      ["role", "content"],
+      `messages[${index}]`,
+    );
+    const role = expectPublicString(entry.role, `messages[${index}].role`, 32);
+    if (role !== "user" && role !== "assistant" && role !== "system") {
+      throw new HttpRequestValidationError(
+        `messages[${index}].role must be user, assistant, or system`,
+        400,
+      );
+    }
+    if (typeof entry.content !== "string" || entry.content.length < 1) {
+      throw new HttpRequestValidationError(
+        `messages[${index}].content must be a non-empty string`,
+        400,
+      );
+    }
+    if (entry.content.length > 8_000) {
+      throw new HttpRequestValidationError(
+        `messages[${index}].content is too long`,
+        400,
+      );
+    }
+    return { role, content: entry.content };
+  });
+
+  let worldContext: Record<string, unknown> | undefined;
+  if (input.worldContext !== undefined) {
+    if (!isRecord(input.worldContext)) {
+      throw new HttpRequestValidationError(
+        "worldContext must be an object",
+        400,
+      );
+    }
+    worldContext = input.worldContext;
+  }
+
+  let previousRejection: string | undefined;
+  if (input.previousRejection !== undefined) {
+    previousRejection = expectPublicString(
+      input.previousRejection,
+      "previousRejection",
+      2_000,
+    );
+  }
+
+  return {
+    kind: "god-assist",
+    messages,
+    ...(worldContext === undefined ? {} : { worldContext }),
+    ...(previousRejection === undefined ? {} : { previousRejection }),
+  };
 }
 
 export function assertTrustedLocalRequest(
@@ -448,6 +596,9 @@ export function normalizePublicLlmInvocation(
   }
   if (input.intent === "passenger-self") {
     return normalizePassengerSelfInvocation(input);
+  }
+  if (input.intent === "god-assist") {
+    return normalizeGodAssistInvocation(input);
   }
 
   if (input.intent === "captain-decision") {
@@ -526,6 +677,42 @@ export async function invokePublicLlm(
     activePassengerInvocations += 1;
   }
   try {
+    if (normalized.kind === "god-assist") {
+      const godRequest = normalized as NormalizedGodAssistInvocation;
+      const runtime = getGodAssistRuntime();
+      const contextMessages: LlmMessage[] = [];
+      if (godRequest.worldContext) {
+        contextMessages.push({
+          role: "system",
+          content:
+            "当前只读观测摘要（非世界真值）：\n" +
+            JSON.stringify(godRequest.worldContext),
+        });
+      }
+      if (godRequest.previousRejection) {
+        contextMessages.push({
+          role: "system",
+          content:
+            "上一份干预计划被物理引擎拒绝，请修正参数后重新提交工具调用。拒收原因：\n" +
+            godRequest.previousRejection,
+        });
+      }
+      const result = await runtime.invoke({
+        messages: [...contextMessages, ...godRequest.messages],
+        metadata: {
+          intent: "god-assist",
+          privacyScope: "player-side-god-mode",
+        },
+        signal,
+      });
+      return {
+        text: result.text,
+        toolCalls: result.toolCalls,
+        usage: result.usage,
+        plan: result.plan,
+        agentId: "god-assistant",
+      };
+    }
     return await getLlmServerRuntime().invoke(
       normalized.invocation,
       signal,

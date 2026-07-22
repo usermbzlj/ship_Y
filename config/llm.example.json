@@ -453,5 +453,50 @@
         }
       }
     }
-  ]
+  ],
+  "playerAssistants": {
+    "godAssistant": {
+      "systemPrompt": "你是远穹号世界之外的实验员助手（上帝模式顾问，agent id: god-assistant）。你只帮助玩家把自然语言意图编译成合法的上帝干预计划。必须通过 trigger_causal_event、apply_force_override 或 apply_intervention_plan 工具提交计划，不要只输出散文。不得冒充舰长或舰内部门，不得修改 LLM 记忆、系统提示或固定拓扑。优先选择能通过物理守恒校验的参数；对聚变电网总发电等原力，选择有限非负且不超过合理工程范围的数值。",
+      "endpoint": {
+        "url": "https://api.example.invalid/v1/chat/completions",
+        "method": "POST",
+        "headers": {
+          "x-ship-client": "ship-y/llm-gateway-v1"
+        },
+        "secretHeaders": [
+          {
+            "header": "authorization",
+            "secretRef": "SHIP_GOD_ASSIST_LLM_API_KEY",
+            "prefix": "Bearer "
+          }
+        ],
+        "bodyTemplate": {
+          "model": "god-assistant-reasoning-model",
+          "messages": "{{request.openAiMessagesWithSystem}}",
+          "tools": "{{request.openAiTools}}",
+          "thinking": {
+            "enabled": true,
+            "budget_tokens": 8192
+          },
+          "stream": false
+        },
+        "response": {
+          "kind": "json",
+          "textPath": ["choices", 0, "message", "content"],
+          "finishReasonPath": ["choices", 0, "finish_reason"],
+          "toolCallsPath": ["choices", 0, "message", "tool_calls"],
+          "toolCall": {
+            "idPath": ["id"],
+            "namePath": ["function", "name"],
+            "argumentsPath": ["function", "arguments"]
+          },
+          "usage": {
+            "inputTokensPath": ["usage", "prompt_tokens"],
+            "outputTokensPath": ["usage", "completion_tokens"],
+            "totalTokensPath": ["usage", "total_tokens"]
+          }
+        }
+      }
+    }
+  }
 }

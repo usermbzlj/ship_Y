@@ -10,6 +10,7 @@ import {
   ELECTRICAL_MICROSECONDS_PER_SECOND,
   FUSION_REACTOR_IDS,
   ShipElectricalNetwork,
+  assignTwoBusNetTransferPowerKwForRegressionTest,
   validateElectricalSnapshot,
 } from "../../lib/sim/electrical.ts";
 
@@ -90,6 +91,70 @@ test("external generation authority changes reactor outputs and remains auditabl
     ShipElectricalNetwork.restore(network.snapshot()).snapshot(),
     network.snapshot(),
   );
+});
+
+test("external generation force after stepped loads keeps bus local power balanced", () => {
+  const network = new ShipElectricalNetwork({
+    seed: "god-mode-force-after-step",
+  });
+  network.step(3_600);
+  const summary = network.applyExternalGenerationPower(
+    650_000,
+    "god-mode regression",
+  );
+
+  assert.equal(summary.generationPowerKw, 650_000);
+  for (const bus of network.listBuses()) {
+    const localPowerErrorKw =
+      bus.generationPowerKw +
+      bus.batteryPowerKw +
+      bus.netTransferPowerKw -
+      bus.servedPowerKw -
+      bus.curtailedPowerKw;
+    assert.ok(
+      Math.abs(localPowerErrorKw) <= 1e-6,
+      `${bus.id} local power must reconcile after forced generation`,
+    );
+  }
+});
+
+test("two-bus net transfer assignment survives curtailed-generation float split", () => {
+  const network = new ShipElectricalNetwork({
+    seed: "net-transfer-float-edge",
+  });
+  const busA = { ...network.getBus("bus-a") };
+  const busB = { ...network.getBus("bus-b") };
+  Object.assign(busA, {
+    generationPowerKw: 420_000,
+    servedPowerKw: 417_500,
+    curtailedPowerKw: 2_500,
+    batteryPowerKw: 0,
+    netTransferPowerKw: 0,
+  });
+  Object.assign(busB, {
+    generationPowerKw: 420_168,
+    servedPowerKw: 417_500,
+    curtailedPowerKw: 2_501,
+    batteryPowerKw: 0,
+    netTransferPowerKw: 0,
+  });
+
+  assignTwoBusNetTransferPowerKwForRegressionTest(busA, busB);
+
+  assert.equal(busA.netTransferPowerKw, 0);
+  assert.equal(busB.netTransferPowerKw, -167);
+  for (const bus of [busA, busB]) {
+    const localPowerErrorKw =
+      bus.generationPowerKw +
+      bus.batteryPowerKw +
+      bus.netTransferPowerKw -
+      bus.servedPowerKw -
+      bus.curtailedPowerKw;
+    assert.ok(
+      Math.abs(localPowerErrorKw) <= 1e-6,
+      `${bus.id} local power must reconcile after tie-flow assignment`,
+    );
+  }
 });
 
 test("controller demand fractions and per-load energy expose real downstream service", () => {

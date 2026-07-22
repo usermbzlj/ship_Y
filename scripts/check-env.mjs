@@ -15,6 +15,7 @@ const DEFAULT_SECRET_REFS = [
   "SHIP_PASSENGER_AFFAIRS_LLM_API_KEY",
   "SHIP_SECURITY_LLM_API_KEY",
   "SHIP_PASSENGER_SERVICE_LLM_API_KEY",
+  "SHIP_GOD_ASSIST_LLM_API_KEY",
 ];
 
 function parseVersion(version) {
@@ -104,8 +105,11 @@ function checkLocalConfigFile() {
   const model = config.agents?.[0]?.endpoint?.bodyTemplate?.model ?? "?";
   const thinking = config.agents?.[0]?.endpoint?.bodyTemplate?.thinking;
   const url = config.agents?.[0]?.endpoint?.url ?? "?";
+  const godAssistConfigured = Boolean(
+    config.playerAssistants?.godAssistant?.endpoint,
+  );
   console.log(
-    `config/llm.local.json: ok (agents=${config.agents?.length ?? "?"}, model=${model}, thinking=${JSON.stringify(thinking)}, host=${safeHost(url)})`,
+    `config/llm.local.json: ok (agents=${config.agents?.length ?? "?"}, model=${model}, thinking=${JSON.stringify(thinking)}, host=${safeHost(url)}, godAssistant=${godAssistConfigured ? "configured" : "missing"})`,
   );
   return config;
 }

@@ -83,6 +83,31 @@ foreach ($agent in $configuration.agents) {
   }
 }
 
+if ($configuration.playerAssistants -and $configuration.playerAssistants.godAssistant.endpoint) {
+  $godEndpoint = $configuration.playerAssistants.godAssistant.endpoint
+  $godEndpoint.url = "$baseUrl/chat/completions"
+  $godEndpoint.bodyTemplate.model = $Model
+  $godEndpoint.bodyTemplate.thinking = [pscustomobject]@{ type = $Thinking }
+  $godEndpoint.bodyTemplate |
+    Add-Member -NotePropertyName max_tokens -NotePropertyValue 900 -Force
+  if ($Thinking -eq "enabled") {
+    $godEndpoint.bodyTemplate |
+      Add-Member -NotePropertyName reasoning_effort -NotePropertyValue "high" -Force
+  } else {
+    $godEndpoint.bodyTemplate.PSObject.Properties.Remove("reasoning_effort")
+  }
+  $godEndpoint |
+    Add-Member -NotePropertyName requestTimeoutMs -NotePropertyValue 120000 -Force
+
+  foreach ($secretHeader in $godEndpoint.secretHeaders) {
+    [Environment]::SetEnvironmentVariable(
+      [string]$secretHeader.secretRef,
+      $apiKey,
+      [EnvironmentVariableTarget]::Process
+    )
+  }
+}
+
 $env:LLM_CONFIG_JSON = $configuration |
   ConvertTo-Json -Depth 100 -Compress
 # The Cloudflare Vite runtime is an isolated Worker environment. Opt in to

@@ -381,6 +381,12 @@ export function expandFarHorizonFixedTopology(
     );
   }
 
+  if (Object.hasOwn(input, "playerAssistants")) {
+    const { playerAssistants: _playerAssistants, ...shipConfiguration } =
+      input;
+    return expandFarHorizonFixedTopology(shipConfiguration);
+  }
+
   if (!Object.hasOwn(input, "fixedTopology")) {
     return finalizeFixedTopology(
       parseFixedAgentSystemDefinition(input),

@@ -95,6 +95,14 @@ export type LlmInvokeRoutePayload = {
   error?: { message?: string };
 };
 
+// ─── 上帝助手会话 ─────────────────────────────────────────────
+
+export type GodAssistSessionHandle = {
+  active: boolean;
+  retried: boolean;
+  onPhysicsRejection: ((message: string) => void) | null;
+};
+
 // ─── 舰长命令队列 ─────────────────────────────────────────────
 
 export type CaptainDeviceReceiptStatus =

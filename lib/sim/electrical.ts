@@ -977,6 +977,22 @@ function advanceReactorOutputs(
   }
 }
 
+function assignTwoBusNetTransferPowerKw(
+  first: ElectricalBus,
+  second: ElectricalBus,
+): void {
+  first.netTransferPowerKw =
+    first.servedPowerKw +
+    first.curtailedPowerKw -
+    first.generationPowerKw -
+    first.batteryPowerKw;
+  second.netTransferPowerKw =
+    second.servedPowerKw +
+    second.curtailedPowerKw -
+    second.generationPowerKw -
+    second.batteryPowerKw;
+}
+
 function dispatchPower(
   snapshot: ElectricalNetworkSnapshot,
   deltaHours: number,
@@ -1182,13 +1198,7 @@ function dispatchPower(
     } else {
       const first = findById(snapshot.buses, island[0], "electrical bus");
       const second = findById(snapshot.buses, island[1], "electrical bus");
-      first.netTransferPowerKw =
-        first.servedPowerKw +
-        first.curtailedPowerKw -
-        first.generationPowerKw -
-        first.batteryPowerKw;
-      second.netTransferPowerKw =
-        first.netTransferPowerKw === 0 ? 0 : -first.netTransferPowerKw;
+      assignTwoBusNetTransferPowerKw(first, second);
     }
   }
 
@@ -3331,4 +3341,12 @@ export class ShipElectricalNetwork {
     restored.stateValue = cloneData(parsed);
     return restored;
   }
+}
+
+/** @internal Regression hook for two-bus tie-flow assignment. */
+export function assignTwoBusNetTransferPowerKwForRegressionTest(
+  first: ElectricalBus,
+  second: ElectricalBus,
+): void {
+  assignTwoBusNetTransferPowerKw(first, second);
 }

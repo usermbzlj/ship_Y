@@ -50,6 +50,7 @@
 | 完整本地存档 | `app/mission-control.tsx`、`lib/sim/worker.ts`、`lib/llm/key-passenger-polling.ts` | 本地存档封装 `v18` 内含运行时快照 `v15` 和关键乘客轮询快照 `v2`；保存屏障先暂停新步进/调用并等待在途物理事务完成，再获取同一 Worker 安全点；权威世界恢复强制核对九域时钟、名册人口投影、空气处理捕集账、水库存/处理账、维修资源/任务账，以及电力→推进→热网、电力→环驱动、环反作用→导航和环耗散→热网账本，外层同时恢复关键乘客含舱区观测的 `published`/`pending`、调度、预算与私人 note；聚合核心/人员/舱室/冷却/电力/导航/旋转/水/维修分别为 `v6`/`v2`/`v3`/`v5`/`v4`/`v5`/`v1`/`v1`/`v1` |
 | 固定 LLM 基础 | `lib/llm/index.ts`、`lib/llm/fixed-topology.ts`、`lib/llm/key-passenger-polling.ts`、`lib/sim/passengers.ts`、`config/llm.example.json` | 唯一合法拓扑为 `8` 个部门 actor 加 `32` 个名册对齐的关键乘客槽位；生产路径调用舰长、按需部门顾问和清醒且到期的关键乘客，运行时不能创建、克隆、删除或临时提升代理 |
 | 云 API 网关 | `lib/llm/index.ts`、`app/api/llm` | 服务端密钥引用、自定义 JSON 请求体与 Thinking 字段、JSON/SSE/NDJSON 映射、持续重试、取消和用量；密钥端点 HTTPS/无密钥回环 HTTP 策略、URL 凭据与普通敏感头前置拒绝、每次尝试超时和响应总字节上限、三种响应的有界读取 |
+| 玩家侧上帝助手 | `lib/llm/god-assist.ts`、`app/ui/components/god-assist-panel.tsx`、`app/api/llm/_server.ts` | `playerAssistants.godAssistant` 独立于固定 `40` 节点拓扑；`POST /api/llm/invoke` + `intent: "god-assist"` 编译 NL 为因果/原力计划，玩家预览确认后执行；物理拒收时自动向 LLM 修订一次 |
 | 多 LLM 舰长闭环 | `app/mission-control.tsx`、`app/api/llm`、`lib/sim/worker.ts` | 任务开始、例行周期、跃迁就绪与关键报警会触发舰长，并按事件咨询相关固定部门；关键乘客以单并发私人轮询运行；等待时暂停模拟；合法舰长工具按每轮八条上限进入串行 Worker 队列并生成回执；模型可通过一次性票据调整自身例行周期 |
 | 自动化验证 | `tests/sim`、`tests/llm`、`tests/rendered-html.test.mjs` | 覆盖核心确定性、守恒、人员、六个权威物理域、九时钟 Worker 耦合、休眠供电暴露、热泵、火炬源能、旋转环动量/能量、水回收质量账、维修资源/阻塞/完成链、跨域恢复对账、命令权限/回滚、LLM 网关/路由、安全边界与生产页面 |
 
@@ -513,6 +514,7 @@ interface NetworkEdge<TState> {
 - 电压、频率、反应堆输出和电池状态的延迟/噪声/故障传感器；
 - 发电、逐负载需求/服务、储能和转换损耗的显式能量账本；
 - 冷却泵、生命保障、休眠 A/B 舱群、跃迁驱动、推进控制列车和两组居住环驱动实际读取各自负载的服务能量，未供电不会被聚合平均值掩盖。
+- 上帝原力字段 `generation`（聚变电网总发电）经 `applyExternalGenerationPower` 写入权威电力域；`tests/sim/electrical-force-regression.test.mjs` 覆盖多小时负载步进与母联开断后的各母线本地功率闭合，恢复时仍与聚合 `power.generationKw` 投影交叉核对。
 
 已服务负载会按负载 ID 和固定热化比例动态汇总成舰务热源，电池转换损耗另以 `electrical-loss` 分类进入热网；因此当前废热不再是与电网脱离的固定 UI 数字。它仍不模拟高频电磁暂态；未服务负载对尚未接线的设备和全部人员的完整后果、黑启动操作流程，以及把汇总舰务热进一步分配到每个局部设备节点仍需深化。
 
@@ -854,6 +856,8 @@ interface PauseState {
 持续重试与模拟暂停由调用协调器管理。现有 `LlmGateway` 已同时承担模板、解析、每尝试 deadline、响应字节上限和重试；默认请求超时 `120 s`、绝对上限 `600 s`，默认响应上限 `4 MiB`、绝对上限 `16 MiB`。中断、超时或超限的流不会把半截正文或工具参数交给世界。未来如需拆分“单次尝试”和“重试协调”，必须保留这些相同边界。
 
 所有公开 LLM 写路由还要求请求目标为 `localhost`、`127.0.0.1` 或 `::1`，浏览器 `Origin` 必须与请求同源，并拒绝跨站 `Sec-Fetch-Site`。`passenger-self` 不接受客户端自选代理或任意消息：服务端逐字段校验严格 DTO，只接受固定关键乘客 ID 和同一人的 `awake` 分档观测，随后强制构造 `fromAgentId: passenger-service`、`agentId: 目标乘客`、讨论深度/轮数均为 `1` 的调用；该类请求另有并发 `1` 的硬限制。
+
+**玩家侧上帝助手**（`playerAssistants.godAssistant`）走同一本地代理，但**不在**固定 `40` 节点舰内注册表内：配置解析时从舰内拓扑中剥离，由 `lib/llm/god-assist.ts` 单独注册 `god-assistant` 端点。浏览器经 `POST /api/llm/invoke` 提交 `intent: "god-assist"` 与用户消息（可附 `worldContext`、上次物理拒收原因）；服务端要求工具化计划输出，返回结构化 `GodAssistPlan` 供 UI 预览。它不参与舰长闭环、不暂停模拟、不持有舰内工具权限；玩家确认后仍走既有上帝干预 API 进入 Worker。物理拒收时 UI 最多自动重试一次 LLM 修订。
 
 ## 13. 存档、日志与迁移
 
