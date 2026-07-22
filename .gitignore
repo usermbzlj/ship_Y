@@ -40,6 +40,10 @@ yarn-error.log*
 
 # user-supplied local provider credentials
 /新建 文本文档.txt
+/deepseek-credentials.txt
+/*credentials*.txt
+/config/llm.local.json
+/config/*.local.json
 
 # vercel
 .vercel

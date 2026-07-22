@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -37,6 +37,37 @@ function meetsMinVersion(actual, minimum) {
   return true;
 }
 
+/** Load KEY=VALUE pairs from a dotenv file into process.env if unset. */
+function loadDotEnvFile(filePath) {
+  if (!existsSync(filePath)) {
+    return false;
+  }
+
+  const text = readFileSync(filePath, "utf8");
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) {
+      continue;
+    }
+    const separator = line.indexOf("=");
+    if (separator <= 0) {
+      continue;
+    }
+    const name = line.slice(0, separator).trim();
+    let value = line.slice(separator + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (!Object.prototype.hasOwnProperty.call(process.env, name)) {
+      process.env[name] = value;
+    }
+  }
+  return true;
+}
+
 function checkNodeVersion() {
   const version = parseVersion(process.version);
   const ok = meetsMinVersion(version, MIN_NODE_VERSION);
@@ -62,6 +93,31 @@ function loadExampleConfig() {
   return config;
 }
 
+function checkLocalConfigFile() {
+  const localPath = join(projectRoot, "config", "llm.local.json");
+  if (!existsSync(localPath)) {
+    console.log("config/llm.local.json: not found");
+    return null;
+  }
+
+  const config = JSON.parse(readFileSync(localPath, "utf8"));
+  const model = config.agents?.[0]?.endpoint?.bodyTemplate?.model ?? "?";
+  const thinking = config.agents?.[0]?.endpoint?.bodyTemplate?.thinking;
+  const url = config.agents?.[0]?.endpoint?.url ?? "?";
+  console.log(
+    `config/llm.local.json: ok (agents=${config.agents?.length ?? "?"}, model=${model}, thinking=${JSON.stringify(thinking)}, host=${safeHost(url)})`,
+  );
+  return config;
+}
+
+function safeHost(url) {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "invalid-url";
+  }
+}
+
 function checkLlmConfigJson() {
   const raw = process.env.LLM_CONFIG_JSON;
   if (!raw || raw.trim().length === 0) {
@@ -70,8 +126,10 @@ function checkLlmConfigJson() {
   }
 
   const config = JSON.parse(raw);
+  const model = config.agents?.[0]?.endpoint?.bodyTemplate?.model ?? "?";
+  const thinking = config.agents?.[0]?.endpoint?.bodyTemplate?.thinking;
   console.log(
-    `LLM_CONFIG_JSON: ok (agents=${Array.isArray(config.agents) ? config.agents.length : "?"})`,
+    `LLM_CONFIG_JSON: ok (agents=${Array.isArray(config.agents) ? config.agents.length : "?"}, model=${model}, thinking=${JSON.stringify(thinking)})`,
   );
   return true;
 }
@@ -90,15 +148,22 @@ function checkSecrets() {
 }
 
 function main() {
+  const envLocalPath = join(projectRoot, ".env.local");
+  const loadedEnvLocal = loadDotEnvFile(envLocalPath);
+  console.log(
+    `.env.local: ${loadedEnvLocal ? "loaded (secrets not printed)" : "not found"}`,
+  );
+
   const nodeOk = checkNodeVersion();
   loadExampleConfig();
+  checkLocalConfigFile();
   const llmConfigSet = checkLlmConfigJson();
   const secretResults = checkSecrets();
 
   const missingSecrets = secretResults.filter(({ present }) => !present).length;
   const allSecretsPresent = missingSecrets === 0;
   const physicsReady = nodeOk;
-  const aiReady = physicsReady && (llmConfigSet || allSecretsPresent);
+  const aiReady = physicsReady && llmConfigSet && allSecretsPresent;
 
   console.log("");
   console.log(`Ready for physics-only: ${physicsReady ? "yes" : "no"}`);
