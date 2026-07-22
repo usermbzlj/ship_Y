@@ -58,12 +58,6 @@ const PUBLIC_PASSENGER_CONCURRENCY_LIMIT = 1;
 let activePublicInvocations = 0;
 let activePassengerInvocations = 0;
 
-type PublicInvocationKind =
-  | "captain-decision"
-  | "captain-consultation"
-  | "passenger-self"
-  | "god-assist";
-
 export type NormalizedPublicLlmInvocation =
   | {
       kind: "captain-decision" | "captain-consultation" | "passenger-self";

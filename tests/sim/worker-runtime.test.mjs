@@ -15,7 +15,7 @@ function dispatch(command) {
 }
 
 function initialize(requestId = "init") {
-  return dispatch({
+  const ready = dispatch({
     type: "initialize",
     requestId,
     mission: {
@@ -28,22 +28,29 @@ function initialize(requestId = "init") {
       timeScale: 21_600,
     },
   });
+  assert.equal(ready.type, "ready");
+  assert.equal(ready.payload.timeControl.paused, true);
+  assert.deepEqual(ready.payload.timeControl.pauseTokens, ["ui"]);
+  const released = dispatch({
+    type: "set-time-control",
+    requestId: `${requestId}:release-ui`,
+    releasePauseTokens: ["ui"],
+  });
+  assert.equal(released.type, "ready", released.message);
+  assert.equal(released.payload.timeControl.paused, false);
+  return released;
 }
 
-function trackedClosedShipMass(state) {
-  const atmosphereMass =
-    Object.values(state.atmosphere.gasesKg).reduce(
-      (total, mass) => total + mass,
-      0,
-    ) +
-    state.atmosphere.capturedCarbonDioxideKg +
-    state.atmosphere.ventedGasKg;
-  const waterMass =
-    state.water.potableKg +
-    state.water.wastewaterKg +
-    state.water.reserveIceKg +
-    state.water.brineWasteKg;
-  return atmosphereMass + waterMass + state.consumables.foodDryKg;
+function releaseUiPause(requestId = "release-ui") {
+  return dispatch({
+    type: "set-time-control",
+    requestId,
+    releasePauseTokens: ["ui"],
+  });
+}
+
+function foodInventoryKg(state) {
+  return state.consumables.foodDryKg;
 }
 
 const micrometeoroidRequest = {
@@ -70,6 +77,65 @@ const micrometeoroidRequest = {
     sourceKnownToAi: false,
   },
 };
+
+test("time director pause tokens freeze stepping and enter the runtime snapshot", () => {
+  const ready = dispatch({
+    type: "initialize",
+    requestId: "init-time-control",
+    mission: {
+      origin: "太阳系",
+      destination: "鲸鱼座 τ",
+      directive: "保证乘员存续并安全抵达。",
+      seed: "time-control-test",
+      totalDistanceLightYears: 11.9,
+      totalLegs: 3,
+      timeScale: 3_600,
+    },
+  });
+  assert.equal(ready.type, "ready");
+  assert.equal(ready.payload.timeControl.paused, true);
+  assert.deepEqual(ready.payload.timeControl.pauseTokens, ["ui"]);
+
+  const frozen = dispatch({
+    type: "step",
+    requestId: "step-while-paused",
+    realSeconds: 1,
+    timeScale: 3_600,
+  });
+  assert.equal(frozen.type, "stepped", frozen.message);
+  assert.equal(frozen.payload.elapsedSeconds, 0);
+  assert.equal(frozen.payload.timeControl.paused, true);
+  assert.deepEqual(frozen.payload.proceduralEvents, []);
+
+  const released = dispatch({
+    type: "set-time-control",
+    requestId: "release-ui-for-advance",
+    releasePauseTokens: ["ui"],
+  });
+  assert.equal(released.type, "ready", released.message);
+  assert.equal(released.payload.timeControl.paused, false);
+
+  const advanced = dispatch({
+    type: "step",
+    requestId: "step-after-release",
+    realSeconds: 1,
+    timeScale: 3_600,
+  });
+  assert.equal(advanced.type, "stepped", advanced.message);
+  assert.equal(advanced.payload.elapsedSeconds, 3_600);
+  assert.equal(advanced.payload.timeControl.timeScale, 3_600);
+  assert.equal(advanced.payload.survival.rationFoodConsumedKg > 0, true);
+
+  const saved = dispatch({
+    type: "snapshot",
+    requestId: "time-control-snapshot",
+  });
+  assert.equal(saved.type, "snapshot");
+  assert.equal(saved.payload.snapshot.snapshotVersion, 16);
+  assert.equal(saved.payload.snapshot.timeDirector.timeScale, 3_600);
+  assert.deepEqual(saved.payload.snapshot.timeDirector.pauseTokens, []);
+  assert.ok(saved.payload.snapshot.timeDirector.totalSimSecondsAdvanced > 0);
+});
 
 test("worker couples 48 zones, population, aggregate state, and atomic saves", () => {
   const ready = initialize("init-coupling");
@@ -162,7 +228,9 @@ test("worker couples 48 zones, population, aggregate state, and atomic saves", (
       (person) => person.isKeyLlm && person.passengerId,
     ),
   );
-  const trackedMassBefore = trackedClosedShipMass(ready.payload.state);
+  const foodBefore = foodInventoryKg(ready.payload.state);
+  const foodConsumedBefore =
+    ready.payload.state.consumables.foodConsumedKgCumulative;
 
   const oxygenBefore = ready.payload.state.atmosphere.gasesKg.oxygen;
   const stepped = dispatch({
@@ -186,12 +254,24 @@ test("worker couples 48 zones, population, aggregate state, and atomic saves", (
         expectedOxygenConsumption
     ) < 1e-7,
   );
+  const foodDelta =
+    foodBefore - foodInventoryKg(stepped.payload.state);
+  const cumulativeDelta =
+    stepped.payload.state.consumables.foodConsumedKgCumulative -
+    foodConsumedBefore;
   assert.ok(
-    Math.abs(
-      trackedClosedShipMass(stepped.payload.state) -
-        trackedMassBefore
-    ) < 1e-6,
-    "metabolic, scrubber, water, and vent sinks must close the tracked mass balance",
+    Math.abs(foodDelta - stepped.payload.survival.rationFoodConsumedKg) <
+      1e-6,
+    "foodDryKg must decrease only by the survival ration path",
+  );
+  assert.ok(
+    Math.abs(cumulativeDelta - stepped.payload.survival.rationFoodConsumedKg) <
+      1e-6,
+    "foodConsumedKgCumulative must equal ration ledger (no metabolic double-debit)",
+  );
+  assert.ok(
+    stepped.payload.survival.rationFoodConsumedKg > 0,
+    "awake crew must draw a positive ration over six hours",
   );
 
   const saved = dispatch({
@@ -199,7 +279,13 @@ test("worker couples 48 zones, population, aggregate state, and atomic saves", (
     requestId: "snapshot-coupling",
   });
   assert.equal(saved.type, "snapshot");
-  assert.equal(saved.payload.snapshot.snapshotVersion, 15);
+  assert.equal(saved.payload.snapshot.snapshotVersion, 16);
+  assert.equal(saved.payload.snapshot.timeDirector.snapshotVersion, 1);
+  assert.equal(saved.payload.snapshot.proceduralWorld.snapshotVersion, 1);
+  assert.equal(saved.payload.snapshot.survival.snapshotVersion, 1);
+  assert.ok(
+    saved.payload.snapshot.survival.ledger.rationFoodConsumedKg > 0,
+  );
   assert.equal(saved.payload.snapshot.compartments.snapshotVersion, 3);
   assert.deepEqual(
     saved.payload.snapshot.compartments.airHandlers.map(
@@ -322,6 +408,8 @@ test("a split-step one-leg voyage closes both energy ledgers and reaches its fin
     },
   });
   assert.equal(ready.type, "ready", ready.message);
+  const unpaused = releaseUiPause("split-ledger-release-ui");
+  assert.equal(unpaused.type, "ready", unpaused.message);
   const firstMinute = dispatch({
     type: "step",
     requestId: "split-ledger-first-minute",

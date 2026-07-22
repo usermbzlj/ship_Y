@@ -17,7 +17,7 @@ export function ShipView({
   compartments,
   cooling,
   electrical,
-  rotation: _rotation,
+  rotation,
   waterRecovery,
   maintenance,
 }: {
@@ -58,6 +58,8 @@ export function ShipView({
     )?.value ?? null;
   const busAServedPowerKw = electricalReading("bus-a", "servedPowerKw");
   const busBServedPowerKw = electricalReading("bus-b", "servedPowerKw");
+  const ringA = rotation?.rings.find((ring) => ring.id === "ring-a") ?? null;
+  const ringB = rotation?.rings.find((ring) => ring.id === "ring-b") ?? null;
   const networks: Array<[string, string, number]> = state
     ? [
         [
@@ -121,6 +123,24 @@ export function ShipView({
             : "建立中",
           waterRecovery?.observed?.potableKgByRing?.b != null
             ? Math.min(100, (waterRecovery.observed.potableKgByRing.b / 2_000_000) * 100)
+            : 0,
+        ],
+        [
+          "居住环 A",
+          ringA?.artificialGravityG != null
+            ? `${ringA.artificialGravityG.toFixed(3)} g`
+            : "建立中",
+          ringA?.artificialGravityG != null
+            ? Math.min(100, Math.max(0, ringA.artificialGravityG * 100))
+            : 0,
+        ],
+        [
+          "居住环 B",
+          ringB?.artificialGravityG != null
+            ? `${ringB.artificialGravityG.toFixed(3)} g`
+            : "建立中",
+          ringB?.artificialGravityG != null
+            ? Math.min(100, Math.max(0, ringB.artificialGravityG * 100))
             : 0,
         ],
       ]

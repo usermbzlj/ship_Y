@@ -2140,6 +2140,21 @@ export class SimulationEngine {
     validateShipState(this.stateValue);
   }
 
+  /**
+   * Consume dry-food inventory for the survival ration path.
+   * Returns the amount actually removed (may be less than requested when stock is short).
+   */
+  consumeFoodRationKg(amountKg: number): number {
+    assertNonNegative(amountKg, "consumeFoodRationKg.amountKg");
+    const available = this.stateValue.consumables.foodDryKg;
+    const consumed = Math.min(available, amountKg);
+    this.stateValue.consumables.foodDryKg = available - consumed;
+    this.stateValue.consumables.foodConsumedKgCumulative += consumed;
+    this.stateValue.revision += 1;
+    validateShipState(this.stateValue);
+    return consumed;
+  }
+
   getState(): ShipState {
     return cloneData(this.stateValue);
   }

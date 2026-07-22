@@ -74,6 +74,12 @@ import type {
   MaintenanceSnapshot,
   MaintenanceTask,
 } from "./maintenance";
+import type { TimeDirectorSnapshot } from "./director";
+import type {
+  ProceduralWorldEvent,
+  ProceduralWorldSnapshot,
+} from "./procedural-world";
+import type { SurvivalSnapshot } from "./survival";
 
 export interface MissionInitialization {
   origin: string;
@@ -254,6 +260,13 @@ export type SimulationWorkerCommand =
       timeScale: number;
     }
   | {
+      type: "set-time-control";
+      requestId: string;
+      timeScale?: number;
+      acquirePauseTokens?: string[];
+      releasePauseTokens?: string[];
+    }
+  | {
       type: "intervene";
       requestId: string;
       request: ExternalInterventionRequest;
@@ -286,6 +299,22 @@ export type SimulationWorkerCommand =
       requestId: string;
     };
 
+export interface SimulationWorkerTimeControlTelemetry {
+  timeScale: number;
+  effectiveTimeScale: number;
+  paused: boolean;
+  pauseTokens: string[];
+  owedSimSeconds: number;
+  fidelityLocked: boolean;
+  droppedSimSecondsCumulative: number;
+}
+
+export interface SimulationWorkerSurvivalTelemetry {
+  rationFoodConsumedKg: number;
+  starvationExposurePersonSeconds: number;
+  foodDryKg: number;
+}
+
 export interface SimulationWorkerState {
   elapsedSeconds: number;
   state: ShipState;
@@ -299,6 +328,9 @@ export interface SimulationWorkerState {
   waterRecovery: WaterRecoveryTelemetry;
   maintenance: MaintenanceTelemetry;
   commandBus: CommandBusTelemetry;
+  timeControl: SimulationWorkerTimeControlTelemetry;
+  proceduralEvents: ProceduralWorldEvent[];
+  survival: SimulationWorkerSurvivalTelemetry;
 }
 
 export interface MaintenanceTelemetry {
@@ -369,7 +401,7 @@ export interface PassengerEnvironmentalExposureState {
 }
 
 export interface RuntimeSimulationSnapshot {
-  snapshotVersion: 15;
+  snapshotVersion: 16;
   highestDirective: string;
   engine: SimulationSnapshot;
   passengers: PassengerSimulationSnapshot;
@@ -383,6 +415,9 @@ export interface RuntimeSimulationSnapshot {
   commandBus: CommandBusSnapshot;
   passengerEnvironmentalExposures:
     PassengerEnvironmentalExposureState[];
+  timeDirector: TimeDirectorSnapshot;
+  proceduralWorld: ProceduralWorldSnapshot;
+  survival: SurvivalSnapshot;
 }
 
 export interface RotationSensorTelemetry {

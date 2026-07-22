@@ -199,3 +199,37 @@ test("God-mode inventory replacement is capacity-bound and stays auditable", () 
     /exceeds fixed tank capacity/,
   );
 });
+
+test("long many-step runs absorb float drift instead of tripping inventory closure", () => {
+  const network = new WaterRecoveryNetwork();
+  network.synchronizeAwakeOccupants({ a: 109, b: 109 });
+  for (let index = 0; index < 45_000; index += 1) {
+    network.step(1);
+  }
+  const summary = network.getSummary();
+  assertClose(summary.massClosureErrorKg, 0, 1e-12, "absorbed residual");
+  assert.ok(
+    Number.isFinite(network.snapshot().ledger.numericalResidualKg),
+    "numerical residual stays finite",
+  );
+});
+
+test("v1 water snapshots migrate and forged inventory still fails closure", () => {
+  const live = new WaterRecoveryNetwork();
+  live.synchronizeAwakeOccupants({ a: 40, b: 40 });
+  live.step(60);
+  const v1 = live.snapshot();
+  v1.snapshotVersion = 1;
+  delete v1.ledger.numericalResidualKg;
+  const restored = WaterRecoveryNetwork.restore(v1);
+  assert.equal(restored.snapshot().snapshotVersion, 2);
+  assert.equal(restored.snapshot().ledger.numericalResidualKg, 0);
+  assertClose(restored.getSummary().massClosureErrorKg, 0, 1e-12, "migrated");
+
+  const forged = restored.snapshot();
+  forged.loops[0].potableKg += 0.01;
+  assert.throws(
+    () => WaterRecoveryNetwork.restore(forged),
+    /inventory mass balance/,
+  );
+});

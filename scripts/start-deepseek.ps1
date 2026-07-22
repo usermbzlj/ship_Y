@@ -9,7 +9,7 @@ param(
   [ValidateSet("enabled", "disabled")]
   [string]$Thinking = "disabled",
   [ValidateSet("deepseek-v4-flash", "deepseek-v4-pro")]
-  [string]$Model = "deepseek-v4-flash"
+  [string]$Model = "deepseek-v4-pro"
 )
 
 $ErrorActionPreference = "Stop"

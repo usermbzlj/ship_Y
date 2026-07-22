@@ -15,7 +15,7 @@ function dispatch(command) {
 }
 
 function initialize() {
-  return dispatch({
+  const ready = dispatch({
     type: "initialize",
     requestId: "init-rotation-passenger-coupling",
     mission: {
@@ -28,6 +28,15 @@ function initialize() {
       timeScale: 3_600,
     },
   });
+  assert.equal(ready.type, "ready", ready.message);
+  const released = dispatch({
+    type: "set-time-control",
+    requestId: "init-rotation-passenger-coupling:release-ui",
+    releasePauseTokens: ["ui"],
+  });
+  assert.equal(released.type, "ready", released.message);
+  assert.equal(released.payload.timeControl.paused, false);
+  return released;
 }
 
 function stableZoneForCabin(cabinId) {

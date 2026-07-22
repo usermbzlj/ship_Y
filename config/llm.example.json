@@ -48,7 +48,7 @@
           }
         ],
         "bodyTemplate": {
-          "model": "captain-reasoning-model",
+          "model": "deepseek-v4-pro",
           "messages": "{{request.openAiMessagesWithSystem}}",
           "tools": "{{request.openAiTools}}",
           "thinking": {
@@ -136,7 +136,7 @@
           }
         ],
         "bodyTemplate": {
-          "model": "navigation-reasoning-model",
+          "model": "deepseek-v4-pro",
           "messages": "{{request.openAiMessagesWithSystem}}",
           "tools": "{{request.openAiTools}}",
           "thinking": {
@@ -225,7 +225,7 @@
           }
         ],
         "bodyTemplate": {
-          "model": "engineering-reasoning-model",
+          "model": "deepseek-v4-pro",
           "messages": "{{request.openAiMessagesWithSystem}}",
           "tools": "{{request.openAiTools}}",
           "thinking": {
@@ -314,7 +314,7 @@
           }
         ],
         "bodyTemplate": {
-          "model": "life-support-reasoning-model",
+          "model": "deepseek-v4-pro",
           "messages": "{{request.openAiMessagesWithSystem}}",
           "tools": "{{request.openAiTools}}",
           "thinking": {
@@ -403,7 +403,7 @@
           }
         ],
         "bodyTemplate": {
-          "model": "medical-reasoning-model",
+          "model": "deepseek-v4-pro",
           "messages": "{{request.openAiMessagesWithSystem}}",
           "tools": "{{request.openAiTools}}",
           "thinking": {
@@ -493,7 +493,7 @@
           }
         ],
         "bodyTemplate": {
-          "model": "passenger-affairs-model",
+          "model": "deepseek-v4-pro",
           "messages": "{{request.openAiMessagesWithSystem}}",
           "tools": "{{request.openAiTools}}",
           "thinking": {
@@ -581,7 +581,7 @@
           }
         ],
         "bodyTemplate": {
-          "model": "security-reasoning-model",
+          "model": "deepseek-v4-pro",
           "messages": "{{request.openAiMessagesWithSystem}}",
           "tools": "{{request.openAiTools}}",
           "thinking": {
@@ -670,7 +670,7 @@
           }
         ],
         "bodyTemplate": {
-          "model": "passenger-service-model",
+          "model": "deepseek-v4-pro",
           "messages": "{{request.openAiMessagesWithSystem}}",
           "tools": "{{request.openAiTools}}",
           "thinking": {
@@ -746,7 +746,7 @@
           }
         ],
         "bodyTemplate": {
-          "model": "god-assistant-reasoning-model",
+          "model": "deepseek-v4-pro",
           "messages": "{{request.openAiMessagesWithSystem}}",
           "tools": "{{request.openAiTools}}",
           "thinking": {

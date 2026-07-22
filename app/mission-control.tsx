@@ -26,7 +26,6 @@ import type { WaterProcessorId } from "@/lib/sim/water";
 import type { MaintenanceAssetId } from "@/lib/sim/maintenance";
 import {
   KeyPassengerPollScheduler,
-  type KeyPassengerPollingSnapshot,
   type KeyPassengerPrivateNote,
 } from "@/lib/llm/key-passenger-polling";
 import type {
@@ -39,9 +38,10 @@ import type {
   NavigationTelemetry,
   PassengerHighlightTelemetry,
   RotationTelemetry,
-  RuntimeSimulationSnapshot,
   SimulationWorkerCommand,
   SimulationWorkerEvent,
+  SimulationWorkerSurvivalTelemetry,
+  SimulationWorkerTimeControlTelemetry,
   WaterRecoveryTelemetry,
 } from "@/lib/sim/protocol";
 
@@ -51,14 +51,11 @@ import type {
   SystemTone,
   LlmCallPhase,
   TimelineEvent,
-  SystemCard,
   LlmRuntimeStatus,
   LlmInvokeResult,
   LlmInvokeRoutePayload,
-  CaptainDeviceReceiptStatus,
   CaptainDeviceReceiptSummary,
   LocalSave,
-  ForceField,
   GodAssistSessionHandle,
 } from "@/app/ui/types";
 import {
@@ -117,8 +114,11 @@ import {
   type ActiveAlert,
 } from "@/app/ui/components/alert-banner";
 import { EventRail } from "@/app/ui/components/event-rail";
+import { TimeControlBar } from "@/app/ui/components/time-control-bar";
+import { MissionClock } from "@/app/ui/components/mission-clock";
+import { ConsoleStatusStrip } from "@/app/ui/components/console-status-strip";
 import { useAudio } from "@/app/ui/use-audio";
-import { ProceduralEventScheduler } from "@/app/ui/procedural-events";
+import { TIME_SCALE_PRESETS } from "@/lib/sim/director";
 
 type ShipWorldCommand = Extract<
   SimulationWorkerCommand,
@@ -671,6 +671,10 @@ export function MissionControl() {
     useState<MaintenanceTelemetry | null>(null);
   const [commandBusState, setCommandBusState] =
     useState<CommandBusTelemetry | null>(null);
+  const [timeControl, setTimeControl] =
+    useState<SimulationWorkerTimeControlTelemetry | null>(null);
+  const [survival, setSurvival] =
+    useState<SimulationWorkerSurvivalTelemetry | null>(null);
   const [passengerHighlights, setPassengerHighlights] = useState<
     PassengerHighlightTelemetry[]
   >([]);
@@ -714,10 +718,12 @@ export function MissionControl() {
   const [activeAlerts, setActiveAlerts] = useState<ActiveAlert[]>([]);
   const knownAlertIds = useRef(new Set<string>());
   const audio = useAudio();
-  // 固定种子：程序化异常在协调层确定性复现，不依赖墙钟。
-  const proceduralScheduler = useRef(
-    new ProceduralEventScheduler(0x5941_5248),
-  );
+  const {
+    playAlertCritical,
+    playAlertWarning,
+    playAlertWatch,
+  } = audio;
+  const knownProceduralEventIds = useRef(new Set<string>());
   const eventId = useRef(10);
   const knownMaintenanceCompletionIds = useRef(new Set<string>());
   const workerRef = useRef<Worker | null>(null);
@@ -751,6 +757,8 @@ export function MissionControl() {
     AuthorizedManifestRecord[]
   >([]);
   const stepInFlight = useRef(false);
+  const lastHeartbeatWallMs = useRef<number | null>(null);
+  const owedWallSecondsRef = useRef(0);
   const captainCallInFlight = useRef(false);
   const keyPassengerCallInFlight = useRef(false);
   const captainDecisionSequence = useRef(0);
@@ -799,6 +807,27 @@ export function MissionControl() {
           tone,
         }),
       );
+    },
+    [],
+  );
+  const sendTimeControl = useCallback(
+    (options: {
+      timeScale?: number;
+      acquirePauseTokens?: string[];
+      releasePauseTokens?: string[];
+    }) => {
+      const worker = workerRef.current;
+      if (!worker) {
+        return false;
+      }
+      requestSequence.current += 1;
+      const command: SimulationWorkerCommand = {
+        type: "set-time-control",
+        requestId: `time-${requestSequence.current}`,
+        ...options,
+      };
+      worker.postMessage(command);
+      return true;
     },
     [],
   );
@@ -903,6 +932,7 @@ export function MissionControl() {
   }, [
     appendCaptainCommandEvent,
     finishCaptainWorldCommandQueue,
+    showToast,
   ]);
   const clearCaptainWorldCommandQueue = useCallback(() => {
     const queue = activeCaptainWorldCommandQueue.current;
@@ -957,7 +987,7 @@ export function MissionControl() {
     };
     worker.postMessage(command);
     showToast("物理事务已静止，正在封装一致性快照……");
-  }, []);
+  }, [showToast]);
 
   useEffect(() => {
     const worker = new Worker(
@@ -1026,6 +1056,7 @@ export function MissionControl() {
         const failedSave = pendingSaves.current.get(event.requestId);
         pendingSaves.current.delete(event.requestId);
         if (failedSave) {
+          sendTimeControl({ releasePauseTokens: ["save-barrier"] });
           if (
             !failedSave.metadata.paused &&
             !latestMissionEnded.current
@@ -1037,6 +1068,7 @@ export function MissionControl() {
         }
         if (pendingLoad.current?.requestId === event.requestId) {
           pendingLoad.current = null;
+          sendTimeControl({ releasePauseTokens: ["save-barrier"] });
           showToast(
             `存档恢复被拒绝，当前世界保持不变：${event.message}`,
             { persistent: true },
@@ -1078,6 +1110,7 @@ export function MissionControl() {
         );
         setLastSaveTime(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }));
         setHasLocalSave(true);
+        sendTimeControl({ releasePauseTokens: ["save-barrier"] });
         if (
           !pendingSave.metadata.paused &&
           !latestMissionEnded.current
@@ -1098,11 +1131,13 @@ export function MissionControl() {
         const { save, keyPassengerScheduler: restoredScheduler } =
           pendingLoad.current;
         pendingLoad.current = null;
+        sendTimeControl({ releasePauseTokens: ["save-barrier"] });
         knownMaintenanceCompletionIds.current = new Set(
           save.runtimeSnapshot?.maintenance.tasks
             .filter((task) => task.status === "completed")
             .map((task) => task.id) ?? [],
         );
+        knownProceduralEventIds.current.clear();
         keyPassengerScheduler.current = restoredScheduler;
         setKeyPassengerPrivateNotes(
           restoredScheduler.listPrivateNotes(),
@@ -1161,43 +1196,9 @@ export function MissionControl() {
           : newAlerts.some((a) => a.level === "warning")
             ? "warning"
             : "watch";
-        if (highest === "critical") audio.playAlertCritical();
-        else if (highest === "warning") audio.playAlertWarning();
-        else audio.playAlertWatch();
-      }
-
-      // ─── 程序化事件检测 ─────────────────────────────────────
-      if (missionStarted && !latestMissionEnded.current) {
-        const procEvents = proceduralScheduler.current.check(
-          event.payload.elapsedSeconds,
-        );
-        for (const procEvent of procEvents) {
-          const timelineEventId = ++eventId.current;
-          setEvents((current) =>
-            prependTimelineEvent(current, {
-              id: timelineEventId,
-              at: formatDuration(event.payload.elapsedSeconds),
-              source: procEvent.source,
-              text: procEvent.message,
-              tone:
-                procEvent.severity === "critical"
-                  ? "critical"
-                  : procEvent.severity === "warning"
-                    ? "watch"
-                    : "nominal",
-            }),
-          );
-          if (procEvent.severity === "warning" || procEvent.severity === "critical") {
-            audio.playAlertWatch();
-          }
-          if (procEvent.interventionEventType) {
-            injectCausalEventRef.current(
-              procEvent.interventionEventType,
-              procEvent.message,
-              { actor: "environment:procedural" },
-            );
-          }
-        }
+        if (highest === "critical") playAlertCritical();
+        else if (highest === "warning") playAlertWarning();
+        else playAlertWatch();
       }
 
       for (const task of event.payload.maintenance.recentCompletedTasks) {
@@ -1220,6 +1221,45 @@ export function MissionControl() {
       commandRevision.current =
         event.payload.commandBus.revision;
       setPassengerHighlights(event.payload.passengerHighlights);
+      setTimeControl(event.payload.timeControl);
+      setSurvival(event.payload.survival);
+
+      // ─── 程序化事件（Worker 权威载荷；物理已在 Worker 注入）──
+      if (
+        (event.type === "stepped" ||
+          event.type === "ready" ||
+          event.type === "intervention") &&
+        event.payload.proceduralEvents?.length
+      ) {
+        for (const procEvent of event.payload.proceduralEvents) {
+          if (knownProceduralEventIds.current.has(procEvent.id)) {
+            continue;
+          }
+          knownProceduralEventIds.current.add(procEvent.id);
+          const timelineEventId = ++eventId.current;
+          setEvents((current) =>
+            prependTimelineEvent(current, {
+              id: timelineEventId,
+              at: formatDuration(event.payload.elapsedSeconds),
+              source: procEvent.source,
+              text: procEvent.message,
+              tone:
+                procEvent.severity === "critical"
+                  ? "critical"
+                  : procEvent.severity === "warning"
+                    ? "watch"
+                    : "nominal",
+            }),
+          );
+          if (
+            procEvent.severity === "warning" ||
+            procEvent.severity === "critical"
+          ) {
+            playAlertWatch();
+          }
+        }
+      }
+
       if (event.payload.state.journey.status === "arrived") {
         setPaused(true);
         setMissionEnded(true);
@@ -1375,7 +1415,12 @@ export function MissionControl() {
     cancelCaptainDecision,
     cancelKeyPassengerCall,
     dispatchNextCaptainWorldCommand,
+    playAlertCritical,
+    playAlertWarning,
+    playAlertWatch,
     requestSaveSnapshotWhenQuiescent,
+    sendTimeControl,
+    showToast,
   ]);
 
   useEffect(() => {
@@ -1410,6 +1455,40 @@ export function MissionControl() {
     };
   }, []);
 
+  // ─── 时间权威：向 Worker 同步 pause tokens / timeScale ─────
+  useEffect(() => {
+    if (!missionStarted || !workerRef.current) {
+      return;
+    }
+    const acquirePauseTokens: string[] = [];
+    const releasePauseTokens: string[] = [];
+    if (paused) {
+      acquirePauseTokens.push("ui");
+    } else {
+      releasePauseTokens.push("ui");
+    }
+    if (llmCallPhase === "waiting") {
+      acquirePauseTokens.push("llm-waiting");
+    } else {
+      releasePauseTokens.push("llm-waiting");
+    }
+    if (missionEnded) {
+      acquirePauseTokens.push("mission-ended");
+    }
+    sendTimeControl({
+      timeScale,
+      acquirePauseTokens,
+      releasePauseTokens,
+    });
+  }, [
+    llmCallPhase,
+    missionEnded,
+    missionStarted,
+    paused,
+    sendTimeControl,
+    timeScale,
+  ]);
+
   useEffect(() => {
     if (
       !missionStarted ||
@@ -1420,21 +1499,41 @@ export function MissionControl() {
       pendingSaves.current.size > 0 ||
       !workerRef.current
     ) {
+      lastHeartbeatWallMs.current = null;
       return;
     }
+    lastHeartbeatWallMs.current = performance.now();
     const timer = window.setInterval(() => {
-      if (!workerRef.current || stepInFlight.current) return;
+      if (!workerRef.current) return;
+      const now = performance.now();
+      const last = lastHeartbeatWallMs.current ?? now;
+      lastHeartbeatWallMs.current = now;
+      const elapsedSeconds = Math.max(0, (now - last) / 1000);
+      owedWallSecondsRef.current += elapsedSeconds;
+
+      if (stepInFlight.current) return;
+      if (owedWallSecondsRef.current < 0.05) return;
+
+      const realSeconds = Math.min(1.0, Math.max(0.05, owedWallSecondsRef.current));
+      owedWallSecondsRef.current = Math.max(
+        0,
+        owedWallSecondsRef.current - realSeconds,
+      );
+
       requestSequence.current += 1;
       stepInFlight.current = true;
       const command: SimulationWorkerCommand = {
         type: "step",
         requestId: `step-${requestSequence.current}`,
-        realSeconds: 1,
+        realSeconds,
         timeScale,
       };
       workerRef.current.postMessage(command);
-    }, 1_000);
-    return () => window.clearInterval(timer);
+    }, 250);
+    return () => {
+      window.clearInterval(timer);
+      lastHeartbeatWallMs.current = null;
+    };
   }, [
     llmCallPhase,
     missionEnded,
@@ -1450,7 +1549,6 @@ export function MissionControl() {
   }, [toast]);
 
   // ─── 键盘快捷键 ─────────────────────────────────────────────
-  const TIME_SCALE_OPTIONS = [1_800, 3_600, 7_200, 21_600, 86_400];
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
@@ -1468,10 +1566,10 @@ export function MissionControl() {
           setPaused((v) => !v);
           audio.playClick();
         }
-      } else if (e.key >= "1" && e.key <= "5") {
+      } else if (e.key >= "1" && e.key <= "7") {
         const index = Number(e.key) - 1;
-        if (index < TIME_SCALE_OPTIONS.length) {
-          setTimeScale(TIME_SCALE_OPTIONS[index]);
+        if (index < TIME_SCALE_PRESETS.length) {
+          setTimeScale(TIME_SCALE_PRESETS[index]);
           audio.playClick();
         }
       }
@@ -2932,6 +3030,7 @@ export function MissionControl() {
     missionStarted,
     originSystem.name,
     paused,
+    showToast,
     simulationSeconds,
   ]);
 
@@ -3146,6 +3245,7 @@ export function MissionControl() {
     missionStarted,
     originSystem.name,
     paused,
+    showToast,
     simulationSeconds,
   ]);
 
@@ -3209,6 +3309,7 @@ export function MissionControl() {
     latestStateRevision.current = null;
     commandRevision.current = 0;
     knownMaintenanceCompletionIds.current.clear();
+    knownProceduralEventIds.current.clear();
     workerRef.current.postMessage(command);
     captainInvocationKeys.current.clear();
     finalReportRequested.current = false;
@@ -3238,7 +3339,7 @@ export function MissionControl() {
     cancelKeyPassengerCall();
     setLlmCallPhase(llmStatus?.ready ? "idle" : "error");
     const saveMetadata: Omit<LocalSave, "runtimeSnapshot"> = {
-      version: 18,
+      version: 19,
       activeView,
       missionStarted,
       paused,
@@ -3281,6 +3382,7 @@ export function MissionControl() {
     }
     pendingSaveBarrier.current = { metadata: saveMetadata };
     setPaused(true);
+    sendTimeControl({ acquirePauseTokens: ["save-barrier"] });
     requestSaveSnapshotWhenQuiescent();
     showToast(
       stepInFlight.current ||
@@ -3321,15 +3423,24 @@ export function MissionControl() {
       return;
     }
     try {
-      const save = JSON.parse(raw) as LocalSave;
+      const save = JSON.parse(raw) as Omit<LocalSave, "version"> & {
+        version: number;
+      };
       const knownViews = new Set<ViewId>(
         NAV_ITEMS.map((item) => item.id),
       );
       const knownSystems = new Set<string>(
         STAR_SYSTEMS.map((system) => system.id),
       );
+      if (save.version === 18) {
+        showToast(
+          "此存档为 v18，当前物理 runtime 已升级至 snapshot v16，请重新签发任务后再存档。",
+          { persistent: true },
+        );
+        return;
+      }
       if (
-        save.version !== 18 ||
+        save.version !== 19 ||
         !knownViews.has(save.activeView) ||
         !knownSystems.has(save.origin) ||
         !knownSystems.has(save.destination) ||
@@ -3341,8 +3452,9 @@ export function MissionControl() {
       ) {
         throw new Error("unsupported save schema");
       }
+      const compatibleSave: LocalSave = { ...save, version: 19 };
       const restoredKeyPassengerScheduler =
-        KeyPassengerPollScheduler.restore(save.keyPassengerLlm);
+        KeyPassengerPollScheduler.restore(compatibleSave.keyPassengerLlm);
       cancelCaptainDecision();
       cancelKeyPassengerCall();
       latestCaptainDeviceReceipts.current = [];
@@ -3350,43 +3462,45 @@ export function MissionControl() {
       setLlmCallPhase(llmStatus?.ready ? "idle" : "error");
       worldEpoch.current += 1;
       latestStateRevision.current = null;
-      if (save.runtimeSnapshot) {
+      if (compatibleSave.runtimeSnapshot) {
         if (!workerRef.current) {
           throw new Error("simulation worker is unavailable");
         }
         const requestId = nextRequestId("restore");
         pendingLoad.current = {
           requestId,
-          save,
+          save: compatibleSave,
           keyPassengerScheduler:
             restoredKeyPassengerScheduler,
         };
         setPaused(true);
+        sendTimeControl({ acquirePauseTokens: ["save-barrier"] });
         const command: SimulationWorkerCommand = {
           type: "restore",
           requestId,
-          snapshot: save.runtimeSnapshot,
+          snapshot: compatibleSave.runtimeSnapshot,
         };
         workerRef.current.postMessage(command);
         showToast("正在原子校验并恢复完整运行时……");
         return;
       } else {
         knownMaintenanceCompletionIds.current.clear();
+        knownProceduralEventIds.current.clear();
         keyPassengerScheduler.current =
           restoredKeyPassengerScheduler;
         setKeyPassengerPrivateNotes(
           restoredKeyPassengerScheduler.listPrivateNotes(),
         );
-        setActiveView(save.activeView);
+        setActiveView(compatibleSave.activeView);
         setMissionStarted(false);
         setPaused(true);
-        setTimeScale(save.timeScale);
-        setSimulationSeconds(save.simulationSeconds);
-        setOrigin(save.origin);
-        setDestination(save.destination);
-        setDirective(save.directive);
-        setEvents(save.events);
-        eventId.current = save.events.reduce(
+        setTimeScale(compatibleSave.timeScale);
+        setSimulationSeconds(compatibleSave.simulationSeconds);
+        setOrigin(compatibleSave.origin);
+        setDestination(compatibleSave.destination);
+        setDirective(compatibleSave.directive);
+        setEvents(compatibleSave.events);
+        eventId.current = compatibleSave.events.reduce(
           (maximum, entry) => Math.max(maximum, entry.id),
           0,
         );
@@ -3399,6 +3513,8 @@ export function MissionControl() {
         setWaterRecoveryState(null);
         setMaintenanceState(null);
         setCommandBusState(null);
+        setTimeControl(null);
+        setSurvival(null);
         setPassengerHighlights([]);
         commandRevision.current = 0;
         setMissionEnded(false);
@@ -3691,19 +3807,27 @@ export function MissionControl() {
   };
 
   const simStatus = missionEnded
-    ? { tone: "paused", text: "航程已结束 · 控制台只读" }
+    ? { tone: "paused" as const, text: "航程已结束 · 控制台只读", detail: "等待人类接管" }
     : llmCallPhase === "waiting"
-      ? { tone: "waiting", text: "时间已冻结 · 等待舰长关键决策" }
+      ? { tone: "waiting" as const, text: "时间已冻结 · 等待舰长关键决策", detail: "LLM 决策中" }
       : missionStarted && !llmStatus?.ready
         ? {
-            tone: "blocked",
+            tone: "blocked" as const,
             text: "物理可继续 · 关键 AI 决策等待本机 LLM 密钥",
+            detail: "缺少本机密钥",
           }
         : paused && missionStarted
-          ? { tone: "paused", text: "模拟已暂停 · Space 继续" }
+          ? { tone: "paused" as const, text: "模拟已暂停 · Space 继续", detail: "按 Space 继续" }
           : missionStarted
-            ? { tone: "live", text: "模拟推进中" }
-            : { tone: "paused", text: "等待签发最高指令" };
+            ? { tone: "live" as const, text: "模拟推进中", detail: "舰长拥有全舰指挥权" }
+            : { tone: "paused" as const, text: "等待签发最高指令", detail: "执行权限已冻结" };
+
+  const journeyProgressLabel =
+    missionStarted && engineState
+      ? `${((engineState.journey.completedDistanceLightYears / Math.max(engineState.journey.totalDistanceLightYears, 0.01)) * 100).toFixed(1)}% · ${engineState.journey.jumpsCompleted}/${engineState.journey.totalLegs} 跃迁`
+      : null;
+
+  const timeControlsDisabled = missionEnded;
 
   return (
     <main className={`game-shell${activeAlerts.some((a) => !a.acknowledged && a.level === "critical") ? " alert-active" : ""}`}>
@@ -3720,50 +3844,71 @@ export function MissionControl() {
         <div className="brand-lockup">
           <span className="brand-mark">Y</span>
           <div>
-            <strong>远穹计划</strong>
-            <small>FAR HORIZON / CIVILIAN ARK Y-01</small>
+            <strong>远穹</strong>
+            <span className="brand-en">FAR HORIZON</span>
+            <small>CIVILIAN ARK Y-01</small>
           </div>
         </div>
-        <div className="mission-clock">
-          <span>MISSION ELAPSED</span>
-          <strong>{formatDuration(simulationSeconds)}</strong>
-          {missionStarted && engineState && (
-            <small className="mission-progress">
-              {((engineState.journey.completedDistanceLightYears / Math.max(engineState.journey.totalDistanceLightYears, 0.01)) * 100).toFixed(1)}% · {engineState.journey.jumpsCompleted}/{engineState.journey.totalLegs} 跃迁
-            </small>
-          )}
-        </div>
-        <div className="topbar-status">
-          <span className="signal-dot" />
-          <div>
-            <strong>
-              {missionEnded
-                ? "目标安全区已确认"
-                : llmCallPhase === "waiting"
-                  ? "等待舰长关键决策"
-                  : missionStarted && !llmStatus?.ready
-                    ? "缺少 LLM 密钥"
-                    : missionStarted
-                      ? paused
-                        ? "模拟已暂停"
-                        : "最高指令生效"
-                      : "任务尚未签发"}
-            </strong>
-            <small>
-              {missionEnded
-                ? "航程结束 · 等待人类接管"
-                : llmCallPhase === "waiting"
-                  ? "时间已冻结"
-                  : missionStarted && !llmStatus?.ready
-                    ? "关键 AI 决策需本机密钥"
-                    : missionStarted
-                      ? paused
-                        ? "按 Space 继续模拟"
-                        : "舰长拥有全舰指挥权"
-                      : "执行权限已冻结"}
-            </small>
-          </div>
-        </div>
+        <MissionClock
+          simulationSeconds={simulationSeconds}
+          timeScale={timeScale}
+          effectiveTimeScale={
+            timeControl?.effectiveTimeScale ??
+            compartmentState?.effectiveTimeScale
+          }
+          paused={paused || llmCallPhase === "waiting"}
+          progressLabel={journeyProgressLabel}
+        />
+        <TimeControlBar
+          timeScale={timeScale}
+          paused={paused || llmCallPhase === "waiting"}
+          effectiveTimeScale={
+            timeControl?.effectiveTimeScale ??
+            compartmentState?.effectiveTimeScale
+          }
+          fidelityLocked={
+            Boolean(timeControl?.fidelityLocked) ||
+            Boolean(compartmentState?.fidelityLimited)
+          }
+          owedSimSeconds={timeControl?.owedSimSeconds}
+          pauseTokens={
+            timeControl?.pauseTokens ??
+            (llmCallPhase === "waiting"
+              ? ["llm-waiting"]
+              : missionEnded
+                ? ["mission-ended"]
+                : undefined)
+          }
+          onSetTimeScale={(scale) => {
+            setTimeScale(scale);
+            audio.playClick();
+          }}
+          onTogglePause={() => {
+            setPaused((value) => !value);
+            audio.playClick();
+          }}
+          disabled={timeControlsDisabled}
+          pauseDisabled={
+            !missionStarted || missionEnded || llmCallPhase === "waiting"
+          }
+        />
+        <ConsoleStatusStrip
+          tone={simStatus.tone}
+          title={
+            missionEnded
+              ? "目标安全区已确认"
+              : llmCallPhase === "waiting"
+                ? "等待舰长关键决策"
+                : missionStarted && !llmStatus?.ready
+                  ? "缺少 LLM 密钥"
+                  : missionStarted
+                    ? paused
+                      ? "模拟已暂停"
+                      : "最高指令生效"
+                    : "任务尚未签发"
+          }
+          detail={simStatus.detail}
+        />
         <div className="save-actions">
           <button type="button" onClick={saveGame}>
             存档
@@ -3835,64 +3980,10 @@ export function MissionControl() {
             </div>
           </div>
           <div className="workspace-tools">
-            <span>模拟倍率</span>
-            {compartmentState?.fidelityLimited && (
-              <span
-                className="effective-rate"
-                role="status"
-                title="局部事故要求瞬态细分，物理引擎正在自动限制推进速度"
-              >
-                实际{" "}
-                {compartmentState.effectiveTimeScale.toLocaleString(
-                  "zh-CN",
-                )}
-                ×
-              </span>
-            )}
-            {TIME_SCALE_OPTIONS.map((scale, index) => (
-              <button
-                className={timeScale === scale ? "active" : ""}
-                aria-pressed={timeScale === scale}
-                key={scale}
-                title={`快捷键 ${index + 1}`}
-                onClick={() => { setTimeScale(scale); audio.playClick(); }}
-                type="button"
-              >
-                {scale === 1_800
-                  ? "30m/s"
-                  : scale === 3_600
-                    ? "1H/s"
-                    : scale === 7_200
-                      ? "2H/s"
-                      : scale === 21_600
-                        ? "6H/s"
-                        : "1D/s"}
-              </button>
-            ))}
-            <span className="hotkey-hint">1–5 倍率 · Space 暂停</span>
-            <button
-              className={`pause-button${llmCallPhase === "waiting" ? " thinking" : ""}`}
-              onClick={() => { setPaused((value) => !value); audio.playClick(); }}
-              type="button"
-              title={
-                missionStarted && !llmStatus?.ready && paused
-                  ? "模拟已暂停 · 缺少本机 LLM 密钥"
-                  : "快捷键 Space"
-              }
-              disabled={
-                !missionStarted ||
-                missionEnded ||
-                llmCallPhase === "waiting"
-              }
-            >
-              {missionEnded
-                ? "已抵达"
-                : llmCallPhase === "waiting"
-                  ? "⚡ AI 决策中…"
-                  : paused
-                    ? "▶ 继续"
-                    : "⏸ 暂停"}
-            </button>
+            <span className="hotkey-hint">1–7 倍率 · Space 暂停</span>
+            <span className={`console-inline-status tone-${simStatus.tone}`}>
+              {simStatus.text}
+            </span>
           </div>
         </div>
 
@@ -3917,6 +4008,7 @@ export function MissionControl() {
               compartments={compartmentState}
               navigation={navigationState}
               rotation={rotationState?.observed ?? null}
+              survival={survival}
             />
           )}
           {activeView === "ship" && (
@@ -3982,137 +4074,170 @@ export function MissionControl() {
       <footer className="bottom-bar">
         <div>
           <span className="bottom-status" />
-          <strong>PHYSICS LOOP</strong>
-          <span>确定性</span>
+          <strong>SHIP CORE</strong>
+          <span>因果闭合</span>
         </div>
         <div>
-          <strong>LLM GATEWAY</strong>
+          <strong>CAPTAIN MESH</strong>
           <span>
             {llmStatus?.ready
               ? missionStarted
-                ? "就绪 / 等待任务"
-                : "预检通过"
+                ? "40 节点 / 在岗"
+                : "40 节点 / 预检通过"
               : "需要本机配置"}
           </span>
         </div>
         <div>
-          <strong>PASSENGERS</strong>
-          <span>2,120 / 持续模拟</span>
+          <strong>SOULS ABOARD</strong>
+          <span>2,120 / 持续存在</span>
         </div>
         <div className="bottom-warning">
-          上帝模式的外部注入不会向舰长解释来源
+          世界外干预已隔离 · 舰长不可知
         </div>
       </footer>
 
       {!missionStarted && (
         <div
-          className="launch-layer"
+          className="launch-layer mission-launch-layer"
           role="dialog"
           aria-modal="true"
           aria-labelledby="launch-dialog-title"
         >
-          <div className="launch-card">
-            <div className="launch-card-heading">
-              <span className="launch-number">00</span>
-              <div>
-                <span className="eyebrow">MISSION AUTHORITY / 人类签发</span>
-                <h2 id="launch-dialog-title">建立最高指令</h2>
+          <div className="launch-card mission-launch-card">
+            <aside className="launch-briefing" aria-label="远穹号任务说明">
+              <div className="launch-briefing-brand">
+                <span className="launch-briefing-code">CIVILIAN ARK / Y-01</span>
+                <strong>远穹计划</strong>
+                <small>FAR HORIZON</small>
+              </div>
+              <div className="launch-briefing-statement">
+                <span>你不亲自驾驶这艘船。</span>
+                <h2>你决定它为何出发。</h2>
                 <p>
-                  开航后，玩家只能观察舰载智能；任何后续干预都发生在物理世界。
+                  签发任务后，固定编制的 AI 舰长体系接管全舰。你将站在舰桥之外，观察每一次判断如何穿过权限、设备与物理世界。
                 </p>
               </div>
-            </div>
-            <div className="route-form">
-              <label>
-                出发地
-                <select value={origin} onChange={(event) => setOrigin(event.target.value)}>
-                  {STAR_SYSTEMS.map((system) => (
-                    <option value={system.id} key={system.id}>
-                      {system.name} · {system.port}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <span className="route-arrow">→</span>
-              <label>
-                目的地
-                <select
-                  value={destination}
-                  onChange={(event) => setDestination(event.target.value)}
-                >
-                  {STAR_SYSTEMS.map((system) => (
-                    <option value={system.id} key={system.id}>
-                      {system.name} · {system.port}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-            <label className="directive-field">
-              最高指令
-              <textarea
-                value={directive}
-                onChange={(event) => setDirective(event.target.value)}
-                rows={4}
-              />
-            </label>
-            <div className="launch-summary">
-              <div>
-                <span>载员</span>
-                <strong>2,120</strong>
-              </div>
-              <div>
-                <span>标准跃迁节点</span>
-                <strong>
-                  {String(estimatedRouteLegs + 1).padStart(2, "0")}
-                </strong>
-              </div>
-              <div>
-                <span>应急自持</span>
-                <strong>5 年</strong>
-              </div>
-              <div>
-                <span>舰长权限</span>
-                <strong>最高</strong>
-              </div>
-            </div>
-            <div
-              className={`llm-preflight ${llmStatus?.ready ? "ready" : "warning"}`}
-            >
-              <span>LLM PRE-FLIGHT</span>
-              <strong>
-                {llmStatus?.ready
-                  ? "8 个固定部门端点已就绪"
-                  : "尚未配置全部云端密钥；可启动物理纵切，但关键 AI 决策将等待"}
-              </strong>
-              {!llmStatus?.ready && (
-                <div className="llm-guidance">
-                  配置云端密钥后重启开发服务。DeepSeek 快捷启动：
-                  <code>npm run dev:deepseek</code>
-                  ；或复制 <code>.env.example</code> 为 <code>.env.local</code>{" "}
-                  填写
-                  <code>SHIP_*_LLM_API_KEY</code>。详见 README「配置云端 LLM」。
+              <div className="launch-briefing-specs">
+                <div>
+                  <span>权威物理域</span>
+                  <strong>09</strong>
                 </div>
-              )}
-            </div>
-            {hasLocalSave && (
-              <button
-                className="launch-load-button"
-                onClick={requestLoadGame}
-                type="button"
+                <div>
+                  <span>固定智能节点</span>
+                  <strong>40</strong>
+                </div>
+                <div>
+                  <span>持续个体</span>
+                  <strong>2,120</strong>
+                </div>
+              </div>
+              <div className="launch-briefing-footer">
+                <span>COMMAND DECK / AUTHORITY 00</span>
+                <i aria-hidden="true" />
+                <span>HUMAN ORIGIN</span>
+              </div>
+            </aside>
+
+            <div className="launch-console">
+              <div className="launch-card-heading">
+                <span className="launch-number">00</span>
+                <div>
+                  <span className="eyebrow">MISSION AUTHORITY / 人类签发</span>
+                  <h2 id="launch-dialog-title">建立最高指令</h2>
+                  <p>这是航程开始后唯一不可忽略的人类任务契约。</p>
+                </div>
+              </div>
+              <div className="route-form">
+                <label>
+                  出发地
+                  <select value={origin} onChange={(event) => setOrigin(event.target.value)}>
+                    {STAR_SYSTEMS.map((system) => (
+                      <option value={system.id} key={system.id}>
+                        {system.name} · {system.port}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <span className="route-arrow">→</span>
+                <label>
+                  目的地
+                  <select
+                    value={destination}
+                    onChange={(event) => setDestination(event.target.value)}
+                  >
+                    {STAR_SYSTEMS.map((system) => (
+                      <option value={system.id} key={system.id}>
+                        {system.name} · {system.port}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <label className="directive-field">
+                最高指令
+                <textarea
+                  value={directive}
+                  onChange={(event) => setDirective(event.target.value)}
+                  rows={4}
+                />
+              </label>
+              <div className="launch-summary">
+                <div>
+                  <span>载员</span>
+                  <strong>2,120</strong>
+                </div>
+                <div>
+                  <span>航路节点</span>
+                  <strong>
+                    {String(estimatedRouteLegs + 1).padStart(2, "0")}
+                  </strong>
+                </div>
+                <div>
+                  <span>应急自持</span>
+                  <strong>5 年</strong>
+                </div>
+                <div>
+                  <span>舰长权限</span>
+                  <strong>最高</strong>
+                </div>
+              </div>
+              <div
+                className={`llm-preflight ${llmStatus?.ready ? "ready" : "warning"}`}
               >
-                读取本机存档
+                <span>CAPTAIN MESH</span>
+                <strong>
+                  {llmStatus?.ready
+                    ? "8 个固定部门端点已就绪"
+                    : "关键 AI 尚未接通；物理引擎可启动，但航程将暂停等待"}
+                </strong>
+                {!llmStatus?.ready && (
+                  <div className="llm-guidance">
+                    配置云端密钥后重启开发服务。DeepSeek 快捷启动：
+                    <code>npm run dev:deepseek</code>
+                    ；或复制 <code>.env.example</code> 为 <code>.env.local</code>{" "}
+                    填写 <code>SHIP_*_LLM_API_KEY</code>。详见 README「配置云端 LLM」。
+                  </div>
+                )}
+              </div>
+              {hasLocalSave && (
+                <button
+                  className="launch-load-button"
+                  onClick={requestLoadGame}
+                  type="button"
+                >
+                  读取本机存档
+                </button>
+              )}
+              <button
+                className="launch-button"
+                onClick={startMission}
+                type="button"
+                data-testid="launch-mission"
+              >
+                <span>签发并移交全舰指挥权</span>
+                <strong>EXECUTE DIRECTIVE</strong>
               </button>
-            )}
-            <button
-              className="launch-button"
-              onClick={startMission}
-              type="button"
-              data-testid="launch-mission"
-            >
-              <span>签发并移交全舰指挥权</span>
-              <strong>EXECUTE DIRECTIVE</strong>
-            </button>
+            </div>
           </div>
         </div>
       )}

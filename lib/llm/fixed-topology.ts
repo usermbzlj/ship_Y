@@ -387,8 +387,8 @@ export function expandFarHorizonFixedTopology(
   }
 
   if (Object.hasOwn(input, "playerAssistants")) {
-    const { playerAssistants: _playerAssistants, ...shipConfiguration } =
-      input;
+    const shipConfiguration = { ...input };
+    delete shipConfiguration.playerAssistants;
     return expandFarHorizonFixedTopology(shipConfiguration);
   }
 

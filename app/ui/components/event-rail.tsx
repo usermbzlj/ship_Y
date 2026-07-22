@@ -161,8 +161,8 @@ export function EventRail({
       >
         <div className="event-rail-heading">
           <div>
-            <span className="eyebrow">EVENT STREAM</span>
-            <h2>全舰事件</h2>
+            <span className="eyebrow">BRIDGE LOG / 实时记录</span>
+            <h2>舰桥日志</h2>
           </div>
           <span className="event-count">{events.length}</span>
         </div>
@@ -182,22 +182,30 @@ export function EventRail({
         </div>
 
         <div className="event-list">
-          {visibleEvents.map((event) => (
-            <EventItem
-              key={event.id}
-              event={event}
-              expanded={expandedId === event.id}
-              onToggle={() =>
-                setExpandedId((current) =>
-                  current === event.id ? null : event.id,
-                )
-              }
-            />
-          ))}
+          {visibleEvents.length > 0 ? (
+            visibleEvents.map((event) => (
+              <EventItem
+                key={event.id}
+                event={event}
+                expanded={expandedId === event.id}
+                onToggle={() =>
+                  setExpandedId((current) =>
+                    current === event.id ? null : event.id,
+                  )
+                }
+              />
+            ))
+          ) : (
+            <div className="event-empty-state">
+              <span>NO ACTIVE RECORD</span>
+              <strong>{missionStarted ? "等待首条舰务记录" : "等待任务签发"}</strong>
+              <p>航程中的设备变化、舰长决策与外部事件会按发生顺序写入这里。</p>
+            </div>
+          )}
         </div>
 
         <div className="captain-glance">
-          <span className="eyebrow">CAPTAIN / 乾枢</span>
+          <span className="eyebrow">CAPTAIN CORE / 乾枢</span>
           <div className="captain-glance-grid">
             <div>
               <span>态势</span>

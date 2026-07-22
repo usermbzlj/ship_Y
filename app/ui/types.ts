@@ -180,7 +180,7 @@ export type RuntimeSimulationSnapshot =
   import("@/lib/sim/protocol").RuntimeSimulationSnapshot;
 
 export interface LocalSave {
-  version: 18;
+  version: 19;
   activeView: ViewId;
   missionStarted: boolean;
   paused: boolean;

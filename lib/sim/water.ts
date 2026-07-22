@@ -7,7 +7,8 @@
  * wastewater through a primary recovery stage and a brine-polishing stage.
  */
 
-export const WATER_RECOVERY_SNAPSHOT_VERSION = 1 as const;
+export const WATER_RECOVERY_SNAPSHOT_VERSION = 2 as const;
+export const WATER_RECOVERY_SNAPSHOT_VERSIONS = [1, 2] as const;
 export const WATER_LOOP_IDS = ["water-loop-a", "water-loop-b"] as const;
 export const WATER_PROCESSOR_IDS = [
   "water-processor-a",
@@ -56,6 +57,8 @@ export interface WaterMassLedger {
   metabolicOutflowKg: number;
   condensateInflowKg: number;
   externallyAddedKg: number;
+  /** Accumulated floating-point closure residual; not a physical source/sink. */
+  numericalResidualKg: number;
   wastewaterProcessedKg: number;
   primaryRecoveredKg: number;
   brineRecoveredKg: number;
@@ -76,7 +79,7 @@ export interface WaterObservationState {
 }
 
 export interface WaterRecoverySnapshot {
-  snapshotVersion: typeof WATER_RECOVERY_SNAPSHOT_VERSION;
+  snapshotVersion: (typeof WATER_RECOVERY_SNAPSHOT_VERSIONS)[number];
   elapsedMicroseconds: number;
   loops: WaterLoop[];
   processors: WaterProcessor[];
@@ -249,6 +252,7 @@ function createSnapshot(): WaterRecoverySnapshot {
       metabolicOutflowKg: 0,
       condensateInflowKg: 0,
       externallyAddedKg: 0,
+      numericalResidualKg: 0,
       wastewaterProcessedKg: 0,
       primaryRecoveredKg: 0,
       brineRecoveredKg: 0,
@@ -315,17 +319,61 @@ function validateObservationFrame(
   }
 }
 
-function massClosureError(snapshot: WaterRecoverySnapshot): number {
-  const expected =
+function expectedInventoryKg(snapshot: WaterRecoverySnapshot): number {
+  return (
     snapshot.ledger.initialInventoryKg +
     snapshot.ledger.condensateInflowKg +
-    snapshot.ledger.externallyAddedKg -
-    snapshot.ledger.metabolicOutflowKg;
-  return inventoryKg(snapshot.loops) - expected;
+    snapshot.ledger.externallyAddedKg +
+    snapshot.ledger.numericalResidualKg -
+    snapshot.ledger.metabolicOutflowKg
+  );
+}
+
+function massClosureError(snapshot: WaterRecoverySnapshot): number {
+  return inventoryKg(snapshot.loops) - expectedInventoryKg(snapshot);
+}
+
+/** Same spirit as cooling energy closure: absolute floor + relative scale. */
+function massClosureToleranceKg(snapshot: WaterRecoverySnapshot): number {
+  return Math.max(1e-4, Math.abs(inventoryKg(snapshot.loops)) * 1e-11);
+}
+
+/**
+ * Fold floating-point inventory/ledger mismatch into the numerical residual so
+ * long AFK runs do not trip the hard conservation gate.
+ */
+function absorbNumericalMassResidual(snapshot: WaterRecoverySnapshot): void {
+  snapshot.ledger.numericalResidualKg += massClosureError(snapshot);
+}
+
+function migrateWaterSnapshot(
+  snapshot: WaterRecoverySnapshot,
+): WaterRecoverySnapshot {
+  const version = snapshot.snapshotVersion as number;
+  if (
+    version !== 1 &&
+    version !== WATER_RECOVERY_SNAPSHOT_VERSION
+  ) {
+    throw new Error("unsupported water-recovery snapshot version");
+  }
+  const ledger = snapshot.ledger as WaterMassLedger & {
+    numericalResidualKg?: number;
+  };
+  const migrated: WaterRecoverySnapshot = {
+    ...snapshot,
+    snapshotVersion: WATER_RECOVERY_SNAPSHOT_VERSION,
+    ledger: {
+      ...ledger,
+      numericalResidualKg: ledger.numericalResidualKg ?? 0,
+    },
+  };
+  return migrated;
 }
 
 function validateSnapshot(snapshot: WaterRecoverySnapshot): void {
-  if (snapshot.snapshotVersion !== WATER_RECOVERY_SNAPSHOT_VERSION) {
+  if (
+    snapshot.snapshotVersion !== WATER_RECOVERY_SNAPSHOT_VERSION
+  ) {
     throw new Error("unsupported water-recovery snapshot version");
   }
   if (
@@ -453,7 +501,7 @@ function validateSnapshot(snapshot: WaterRecoverySnapshot): void {
   }
 
   for (const [key, value] of Object.entries(snapshot.ledger)) {
-    if (key === "externallyAddedKg") {
+    if (key === "externallyAddedKg" || key === "numericalResidualKg") {
       assertFinite(value, `ledger.${key}`);
     } else {
       assertNonNegative(value, `ledger.${key}`);
@@ -478,7 +526,7 @@ function validateSnapshot(snapshot: WaterRecoverySnapshot): void {
   ) {
     throw new Error("water processor cumulative mass balance does not close");
   }
-  if (Math.abs(massClosureError(snapshot)) > 1e-6) {
+  if (Math.abs(massClosureError(snapshot)) > massClosureToleranceKg(snapshot)) {
     throw new Error("water inventory mass balance does not close");
   }
   if (!Array.isArray(snapshot.observation.pending)) {
@@ -513,7 +561,9 @@ export class WaterRecoveryNetwork {
   private stateValue: WaterRecoverySnapshot;
 
   constructor(snapshot?: WaterRecoverySnapshot) {
-    this.stateValue = cloneData(snapshot ?? createSnapshot());
+    this.stateValue = cloneData(
+      snapshot ? migrateWaterSnapshot(snapshot) : createSnapshot(),
+    );
     validateSnapshot(this.stateValue);
   }
 
@@ -601,6 +651,7 @@ export class WaterRecoveryNetwork {
       loop.potableKg = Math.max(0, loop.potableKg - amount);
       this.stateValue.ledger.metabolicOutflowKg += amount;
     }
+    absorbNumericalMassResidual(this.stateValue);
     validateSnapshot(this.stateValue);
   }
 
@@ -619,6 +670,7 @@ export class WaterRecoveryNetwork {
       loop.wastewaterKg += amount;
       this.stateValue.ledger.condensateInflowKg += amount;
     }
+    absorbNumericalMassResidual(this.stateValue);
     validateSnapshot(this.stateValue);
   }
 
@@ -637,6 +689,7 @@ export class WaterRecoveryNetwork {
       loop.potableKg = loop.potableCapacityKg * fillFraction;
     }
     this.stateValue.ledger.externallyAddedKg += totalKg - before;
+    absorbNumericalMassResidual(this.stateValue);
     validateSnapshot(this.stateValue);
   }
 
@@ -725,6 +778,7 @@ export class WaterRecoveryNetwork {
     this.stateValue.observation.pending.push(
       createObservationFrame(this.stateValue),
     );
+    absorbNumericalMassResidual(this.stateValue);
     validateSnapshot(this.stateValue);
   }
 

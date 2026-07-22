@@ -10,10 +10,14 @@ import type {
   ElectricalTelemetry,
   NavigationTelemetry,
 } from "../types";
-import type { RotationTelemetry } from "@/lib/sim/protocol";
+import type {
+  RotationTelemetry,
+  SimulationWorkerSurvivalTelemetry,
+} from "@/lib/sim/protocol";
 import { STAR_SYSTEMS, INITIAL_SYSTEMS } from "../constants";
 import { StarMap } from "../components/star-map";
 import { StatusPill } from "../components/status-pill";
+import { SurvivalPressure } from "../components/survival-pressure";
 
 export function VoyageView({
   origin,
@@ -26,6 +30,7 @@ export function VoyageView({
   compartments,
   navigation,
   rotation,
+  survival,
 }: {
   origin: string;
   destination: string;
@@ -37,6 +42,7 @@ export function VoyageView({
   compartments: CompartmentTelemetry | null;
   navigation: NavigationTelemetry | null;
   rotation: RotationTelemetry["observed"] | null;
+  survival: SimulationWorkerSurvivalTelemetry | null;
 }) {
   const [directiveExpanded, setDirectiveExpanded] = useState(false);
   const directiveIsLong = directive.length > 48;
@@ -117,6 +123,46 @@ export function VoyageView({
           observedBusFrequencyHz < 49.5
         ? "critical"
         : "nominal";
+  const completedDistanceLightYears =
+    state?.journey.completedDistanceLightYears ?? 0;
+  const totalDistanceLightYears =
+    state?.journey.totalDistanceLightYears ?? distanceLightYears;
+  const journeyProgress = Math.min(
+    100,
+    Math.max(
+      0,
+      (completedDistanceLightYears /
+        Math.max(totalDistanceLightYears, 0.01)) *
+        100,
+    ),
+  );
+  const remainingDistanceLightYears = Math.max(
+    0,
+    totalDistanceLightYears - completedDistanceLightYears,
+  );
+  const journeyPhase = !missionStarted
+    ? {
+        code: "AUTHORITY HOLD",
+        title: "等待人类签发",
+        detail: "航路已装订，舰长权限保持冻结",
+      }
+    : state?.journey.status === "arrived"
+      ? {
+          code: "SAFE ARRIVAL",
+          title: "目标安全区已确认",
+          detail: "航程控制权等待移交",
+        }
+      : state?.journey.status === "ready"
+        ? {
+            code: "JUMP WINDOW",
+            title: "跃迁条件已满足",
+            detail: "舰长正在执行最终航路判断",
+          }
+        : {
+            code: "DEEP CRUISE",
+            title: "深空航路执行中",
+            detail: "全舰系统服从最高指令",
+          };
   const systems: SystemCard[] = state
     ? [
         {
@@ -269,10 +315,10 @@ export function VoyageView({
 
   return (
     <section className="view-grid voyage-view" aria-label="航程总览">
-      <div className="panel map-panel">
+      <div className="panel map-panel bridge-viewport">
         <div className="panel-heading">
           <div>
-            <span className="eyebrow">NAVIGATION / 跃迁航路</span>
+            <span className="eyebrow">FORWARD OBSERVATION / 前向主视窗</span>
             <h2>
               {originSystem.name} <i>→</i> {destinationSystem.name}
             </h2>
@@ -287,13 +333,36 @@ export function VoyageView({
             destinationId={destination}
             running={missionStarted}
           />
+          <div className="viewport-glass" aria-hidden="true" />
+          <div className="viewport-reticle" aria-hidden="true">
+            <i />
+            <i />
+            <i />
+            <i />
+          </div>
+          <div className="bridge-phase-readout">
+            <span>{journeyPhase.code}</span>
+            <strong>{journeyPhase.title}</strong>
+            <small>{journeyPhase.detail}</small>
+          </div>
+          <div className="viewport-bearing" aria-hidden="true">
+            <span>270</span>
+            <i />
+            <span>315</span>
+            <i />
+            <strong>000</strong>
+            <i />
+            <span>045</span>
+            <i />
+            <span>090</span>
+          </div>
           <div className="map-readout map-readout-left">
-            <span>直线距离</span>
-            <strong>{distanceLightYears.toFixed(2)} LY</strong>
+            <span>航程完成</span>
+            <strong>{journeyProgress.toFixed(1)}%</strong>
           </div>
           <div className="map-readout map-readout-right">
-            <span>预计节点</span>
-            <strong>{String(routeLegs + 1).padStart(2, "0")}</strong>
+            <span>剩余航程</span>
+            <strong>{remainingDistanceLightYears.toFixed(2)} LY</strong>
           </div>
           {missionStarted && (
             <div
@@ -307,6 +376,12 @@ export function VoyageView({
               Y-01
             </div>
           )}
+        </div>
+        <div className="bridge-progress" aria-label={`航程完成 ${journeyProgress.toFixed(1)}%`}>
+          <i style={{ width: `${journeyProgress}%` }} />
+          <span>ORIGIN / {originSystem.name}</span>
+          <strong>{state?.journey.jumpsCompleted ?? 0} / {state?.journey.totalLegs ?? routeLegs} JUMPS</strong>
+          <span>DESTINATION / {destinationSystem.name}</span>
         </div>
         <div
           className={`directive-strip${directiveExpanded ? " expanded" : ""}`}
@@ -337,10 +412,10 @@ export function VoyageView({
       <div className="panel ship-panel">
         <div className="panel-heading compact">
           <div>
-            <span className="eyebrow">VESSEL / Y-01</span>
-            <h2>远穹级移民舰</h2>
+            <span className="eyebrow">STARBOARD TACTICAL / 右舷战术台</span>
+            <h2>远穹号 · 舰体姿态</h2>
           </div>
-          <span className="micro-code">820M · 2,120 SOULS</span>
+          <span className="micro-code">820M · 2,120 人</span>
         </div>
         <div className="ship-schematic" aria-label="远穹号舰体示意">
           <div className="ship-shield" />
@@ -377,26 +452,23 @@ export function VoyageView({
         </div>
       </div>
 
-      <div className="systems-row">
-        {systems.map((system) => (
-          <article className="system-card" key={system.name}>
-            <div className="system-card-top">
-              <span>{system.name}</span>
-              <StatusPill tone={system.tone}>
-                {system.tone === "critical"
-                  ? "告警"
-                  : system.tone === "watch"
-                    ? "关注"
-                    : "正常"}
-              </StatusPill>
-            </div>
-            <strong>{system.value}</strong>
-            <p>{system.detail}</p>
-            <div className="meter">
-              <i style={{ width: `${system.load}%` }} />
-            </div>
-          </article>
-        ))}
+      <SurvivalPressure survival={survival} />
+
+      <div className="ship-status-strip" aria-label="舰况摘要">
+        <div className="ship-status-label">舰况</div>
+        <div className="ship-status-items">
+          {systems.map((system) => (
+            <article
+              className={`ship-status-item tone-${system.tone}`}
+              key={system.name}
+              title={system.detail}
+            >
+              <span className="ship-status-name">{system.name}</span>
+              <strong>{system.value}</strong>
+              <small>{system.detail}</small>
+            </article>
+          ))}
+        </div>
       </div>
     </section>
   );

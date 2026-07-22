@@ -25,7 +25,7 @@ function dispatch(command) {
 }
 
 function initialize(requestId) {
-  return dispatch({
+  const ready = dispatch({
     type: "initialize",
     requestId,
     mission: {
@@ -38,6 +38,16 @@ function initialize(requestId) {
       timeScale: 60,
     },
   });
+  assert.equal(ready.type, "ready", ready.message);
+  // initialize acquires a default `ui` pause token; release it so steps advance.
+  const released = dispatch({
+    type: "set-time-control",
+    requestId: `${requestId}:release-ui`,
+    releasePauseTokens: ["ui"],
+  });
+  assert.equal(released.type, "ready", released.message);
+  assert.equal(released.payload.timeControl.paused, false);
+  return released;
 }
 
 function snapshot(requestId) {

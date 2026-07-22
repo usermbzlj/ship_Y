@@ -1,27 +1,31 @@
 /**
- * 程序化事件生成器 — 基于仿真时间和确定性种子自动产生事件。
- * 在协调器层运行，通过上帝干预接口注入因果事件或直接产生叙事事件。
- *
- * 事件类型：
- * - 设备磨损/故障（基于运行时间）
- * - 微流星体撞击（随机）
- * - 传感器漂移/故障
- * - 乘客社会事件（基于压力/信任阈值）
- * - 休眠并发症
- * - 环境/辐射事件
+ * Authoritative procedural event scheduler — lives in the Worker, enters saves.
+ * Physical injections are declared separately from narrative-only timeline noise.
  */
+
+export const PROCEDURAL_WORLD_SNAPSHOT_VERSION = 1 as const;
 
 export type ProceduralEventSeverity = "info" | "watch" | "warning" | "critical";
 
-export interface ProceduralEvent {
+export interface ProceduralWorldEvent {
   id: string;
   type: string;
   severity: ProceduralEventSeverity;
   source: string;
   message: string;
   simulationSeconds: number;
-  /** 如果需要上帝干预，提供 intervention eventType */
+  /** When set, Worker should apply a real intervention. */
   interventionEventType?: string;
+  /** Narrative-only events never mutate physics. */
+  narrativeOnly: boolean;
+}
+
+export interface ProceduralWorldSnapshot {
+  snapshotVersion: typeof PROCEDURAL_WORLD_SNAPSHOT_VERSION;
+  seed: number;
+  rngState: number;
+  eventCounter: number;
+  nextTriggerAt: Record<string, number>;
 }
 
 interface EventScheduleEntry {
@@ -32,16 +36,14 @@ interface EventScheduleEntry {
   source: string;
   messages: string[];
   interventionEventType?: string;
-  /** 最早触发时间（仿真秒） */
   earliestSeconds: number;
 }
 
-/** 事件调度表 — 定义各类事件的最短/最长间隔和消息池 */
 const EVENT_SCHEDULE: EventScheduleEntry[] = [
   {
     type: "micrometeoroid",
-    minIntervalSeconds: 72_000, // 20h
-    maxIntervalSeconds: 259_200, // 72h
+    minIntervalSeconds: 72_000,
+    maxIntervalSeconds: 259_200,
     severity: "warning",
     source: "外壳传感器阵列",
     messages: [
@@ -50,12 +52,12 @@ const EVENT_SCHEDULE: EventScheduleEntry[] = [
       "船体外壳遭受微流星体轰击，密封完整性监测已启动。",
     ],
     interventionEventType: "micrometeoroid",
-    earliestSeconds: 14_400, // 4h after start
+    earliestSeconds: 14_400,
   },
   {
     type: "sensor-drift",
-    minIntervalSeconds: 43_200, // 12h
-    maxIntervalSeconds: 172_800, // 48h
+    minIntervalSeconds: 43_200,
+    maxIntervalSeconds: 172_800,
     severity: "info",
     source: "数字孪生估算器",
     messages: [
@@ -67,14 +69,14 @@ const EVENT_SCHEDULE: EventScheduleEntry[] = [
   },
   {
     type: "passenger-social",
-    minIntervalSeconds: 28_800, // 8h
-    maxIntervalSeconds: 86_400, // 24h
+    minIntervalSeconds: 28_800,
+    maxIntervalSeconds: 86_400,
     severity: "info",
     source: "乘客事务部",
     messages: [
       "B 环公共区发生乘客纠纷，安保机器人已到场调解。",
       "一批清醒乘客联名请求增加娱乐区供电配额。",
-      "农业环志愿者报告作物生长异常，请求生态农艺师复核。",
+      "农业环志愿者报告作物观察记录异常，请求农艺复核（观察项，非产量模型）。",
       "乘客自发组织了一场关于航程意义的公开讨论。",
       "休眠舱家属探视请求排队已超过 48 小时。",
       "独立记者再次申请访问舰内事故记录，乘客事务部已转交舰长。",
@@ -83,8 +85,8 @@ const EVENT_SCHEDULE: EventScheduleEntry[] = [
   },
   {
     type: "hibernation-complication",
-    minIntervalSeconds: 86_400, // 24h
-    maxIntervalSeconds: 345_600, // 96h
+    minIntervalSeconds: 86_400,
+    maxIntervalSeconds: 345_600,
     severity: "watch",
     source: "医疗与休眠部",
     messages: [
@@ -96,8 +98,8 @@ const EVENT_SCHEDULE: EventScheduleEntry[] = [
   },
   {
     type: "equipment-wear",
-    minIntervalSeconds: 172_800, // 48h
-    maxIntervalSeconds: 604_800, // 168h (7 days)
+    minIntervalSeconds: 172_800,
+    maxIntervalSeconds: 604_800,
     severity: "watch",
     source: "工程与能源部",
     messages: [
@@ -106,13 +108,14 @@ const EVENT_SCHEDULE: EventScheduleEntry[] = [
       "水回收机 B 膜组件通量下降 3%，化学清洗已排入预防性维护计划。",
       "聚变模块 3 号磁约束线圈温度略高于基线，热管理已增加局部冷却。",
     ],
+    // Honest binding: only the coolant-pump path is physically modeled today.
     interventionEventType: "coolant-pump-seizure",
     earliestSeconds: 86_400,
   },
   {
     type: "radiation-event",
-    minIntervalSeconds: 259_200, // 72h
-    maxIntervalSeconds: 864_000, // 240h (10 days)
+    minIntervalSeconds: 259_200,
+    maxIntervalSeconds: 864_000,
     severity: "warning",
     source: "外部环境监测",
     messages: [
@@ -125,8 +128,8 @@ const EVENT_SCHEDULE: EventScheduleEntry[] = [
   },
   {
     type: "power-fluctuation",
-    minIntervalSeconds: 86_400, // 24h
-    maxIntervalSeconds: 432_000, // 120h (5 days)
+    minIntervalSeconds: 86_400,
+    maxIntervalSeconds: 432_000,
     severity: "watch",
     source: "配电系统",
     messages: [
@@ -138,79 +141,108 @@ const EVENT_SCHEDULE: EventScheduleEntry[] = [
   },
 ];
 
-/** 确定性伪随机数生成器（基于种子） */
-function seededRandom(seed: number): () => number {
-  let state = seed;
-  return () => {
-    state = (state * 1664525 + 1013904223) & 0xffffffff;
-    return (state >>> 0) / 0xffffffff;
-  };
+function hashSeedString(seed: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i += 1) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
 }
 
-/**
- * 程序化事件调度器。
- * 在协调器中每个仿真步调用 `check()`，返回新触发的事件列表。
- */
-export class ProceduralEventScheduler {
-  private nextTriggerAt: Map<string, number> = new Map();
-  private random: () => number;
+export class ProceduralWorldScheduler {
+  private seedValue: number;
+  private rngState: number;
   private eventCounter = 0;
+  private nextTriggerAt = new Map<string, number>();
 
-  constructor(seed: number) {
-    this.random = seededRandom(seed);
-    // 初始化每类事件的首次触发时间
+  constructor(seed: string | number) {
+    this.seedValue =
+      typeof seed === "number" ? seed >>> 0 : hashSeedString(seed);
+    this.rngState = this.seedValue || 1;
+    this.reseedSchedule();
+  }
+
+  private nextRandom(): number {
+    this.rngState = (Math.imul(this.rngState, 1664525) + 1013904223) >>> 0;
+    return this.rngState / 0x100000000;
+  }
+
+  private reseedSchedule(): void {
+    this.nextTriggerAt.clear();
     for (const entry of EVENT_SCHEDULE) {
       const interval =
         entry.minIntervalSeconds +
-        this.random() * (entry.maxIntervalSeconds - entry.minIntervalSeconds);
+        this.nextRandom() *
+          (entry.maxIntervalSeconds - entry.minIntervalSeconds);
       this.nextTriggerAt.set(entry.type, entry.earliestSeconds + interval);
     }
   }
 
-  /**
-   * 检查当前仿真时间是否有事件触发。
-   * 返回新触发的事件列表（可能为空）。
-   */
-  check(simulationSeconds: number): ProceduralEvent[] {
-    const triggered: ProceduralEvent[] = [];
-
+  check(simulationSeconds: number): ProceduralWorldEvent[] {
+    const triggered: ProceduralWorldEvent[] = [];
     for (const entry of EVENT_SCHEDULE) {
       const nextAt = this.nextTriggerAt.get(entry.type);
       if (nextAt === undefined || simulationSeconds < nextAt) continue;
 
-      // 触发事件
-      this.eventCounter++;
-      const messageIndex = Math.floor(this.random() * entry.messages.length);
+      this.eventCounter += 1;
+      const messageIndex = Math.floor(
+        this.nextRandom() * entry.messages.length,
+      );
       triggered.push({
         id: `proc-${entry.type}-${this.eventCounter}`,
         type: entry.type,
         severity: entry.severity,
         source: entry.source,
-        message: entry.messages[messageIndex],
+        message: entry.messages[messageIndex] ?? entry.messages[0]!,
         simulationSeconds,
         interventionEventType: entry.interventionEventType,
+        narrativeOnly: entry.interventionEventType === undefined,
       });
 
-      // 计算下次触发时间
       const interval =
         entry.minIntervalSeconds +
-        this.random() * (entry.maxIntervalSeconds - entry.minIntervalSeconds);
+        this.nextRandom() *
+          (entry.maxIntervalSeconds - entry.minIntervalSeconds);
       this.nextTriggerAt.set(entry.type, simulationSeconds + interval);
     }
-
     return triggered;
   }
 
-  /** 重置调度器（新航程时调用） */
-  reset(seed: number) {
-    this.random = seededRandom(seed);
+  reset(seed: string | number): void {
+    this.seedValue =
+      typeof seed === "number" ? seed >>> 0 : hashSeedString(seed);
+    this.rngState = this.seedValue || 1;
     this.eventCounter = 0;
-    this.nextTriggerAt.clear();
-    for (const entry of EVENT_SCHEDULE) {
-      const interval =
-        entry.minIntervalSeconds +
-        this.random() * (entry.maxIntervalSeconds - entry.minIntervalSeconds);
-      this.nextTriggerAt.set(entry.type, entry.earliestSeconds + interval);
+    this.reseedSchedule();
+  }
+
+  snapshot(): ProceduralWorldSnapshot {
+    const nextTriggerAt: Record<string, number> = {};
+    for (const [key, value] of this.nextTriggerAt) {
+      nextTriggerAt[key] = value;
     }
+    return {
+      snapshotVersion: PROCEDURAL_WORLD_SNAPSHOT_VERSION,
+      seed: this.seedValue,
+      rngState: this.rngState,
+      eventCounter: this.eventCounter,
+      nextTriggerAt,
+    };
+  }
+
+  static restore(snapshot: ProceduralWorldSnapshot): ProceduralWorldScheduler {
+    if (snapshot.snapshotVersion !== PROCEDURAL_WORLD_SNAPSHOT_VERSION) {
+      throw new Error(
+        `unsupported procedural world snapshot version ${String(snapshot.snapshotVersion)}`,
+      );
+    }
+    const scheduler = new ProceduralWorldScheduler(snapshot.seed);
+    scheduler.rngState = snapshot.rngState >>> 0;
+    scheduler.eventCounter = snapshot.eventCounter;
+    scheduler.nextTriggerAt = new Map(
+      Object.entries(snapshot.nextTriggerAt).map(([k, v]) => [k, Number(v)]),
+    );
+    return scheduler;
   }
 }

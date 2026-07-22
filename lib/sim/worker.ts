@@ -30,6 +30,23 @@ import {
   MAINTENANCE_ASSET_SPECS,
   MaintenanceNetwork,
 } from "./maintenance.ts";
+import { SimulationTimeDirector } from "./director.ts";
+import type { TimeDirectorSnapshot } from "./director.ts";
+import {
+  ProceduralWorldScheduler,
+  type ProceduralWorldEvent,
+  type ProceduralWorldSnapshot,
+} from "./procedural-world.ts";
+import {
+  applyRationAndStarvation,
+  createEmptySurvivalLedger,
+  integrateHazardDose,
+  restoreSurvival,
+  snapshotSurvival,
+  type SurvivalHazardFamily,
+  type SurvivalLedger,
+  type ZoneHazardDose,
+} from "./survival.ts";
 import type {
   AirHandlerId,
   CompartmentStepResult,
@@ -259,6 +276,11 @@ function createCommandBus(): DeterministicCommandBus<
 
 let commandBus = createCommandBus();
 let highestDirective = "";
+let timeDirector = new SimulationTimeDirector(1_800);
+let proceduralWorld = new ProceduralWorldScheduler("far-horizon-preview");
+let survivalLedger: SurvivalLedger = createEmptySurvivalLedger();
+let survivalZoneDoses: ZoneHazardDose[] = [];
+let lastProceduralEvents: ProceduralWorldEvent[] = [];
 const MEDICAL_BATCH_LIMIT = 24;
 const GAS_SENSIBLE_HEAT_J_PER_KG_K = 1_005;
 const ELECTRICAL_COUPLING_INTERVAL_SECONDS = 60;
@@ -348,8 +370,81 @@ function createPassengerEnvironmentalExposureStates():
   );
 }
 
+function createSurvivalZoneDoses(): ZoneHazardDose[] {
+  return BASELINE_ZONE_IDS.flatMap((zoneId) =>
+    PASSENGER_ENVIRONMENTAL_HAZARD_FAMILIES.map((family) => ({
+      zoneId,
+      family: family as SurvivalHazardFamily,
+      accumulatedDoseSeconds: 0,
+      currentTier: 0 as const,
+      episode: 0,
+    })),
+  );
+}
+
+function syncExposuresFromSurvivalDoses(): void {
+  passengerEnvironmentalExposures = survivalZoneDoses.map((dose) => ({
+    zoneId: dose.zoneId as ZoneId,
+    family: dose.family as PassengerEnvironmentalHazardFamily,
+    currentTier: dose.currentTier,
+    episode: dose.episode,
+  }));
+}
+
+function clampIncidentDelta(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(1, Math.max(-1, value));
+}
+
+function applyContinuousRosterDeltas(
+  targetPassengerIds: readonly string[],
+  deltas: {
+    physical?: number;
+    stress?: number;
+  },
+): void {
+  const physical = clampIncidentDelta(deltas.physical ?? 0);
+  const stress = clampIncidentDelta(deltas.stress ?? 0);
+  if (
+    targetPassengerIds.length === 0 ||
+    (physical === 0 && stress === 0)
+  ) {
+    return;
+  }
+  const targets = new Set(targetPassengerIds);
+  const snapshot = passengers.snapshot();
+  for (const person of snapshot.passengers) {
+    if (!targets.has(person.id) || person.lifeState === "deceased") {
+      continue;
+    }
+    if (physical !== 0) {
+      person.health.physical = Math.min(
+        1,
+        Math.max(0, person.health.physical + physical),
+      );
+    }
+    if (stress !== 0 && person.lifeState === "awake") {
+      person.psychology.stress = Math.min(
+        1,
+        Math.max(0, person.psychology.stress + stress),
+      );
+    }
+    if (person.health.physical === 0) {
+      snapshot.activeTransitions = snapshot.activeTransitions.filter(
+        (transition) => transition.passengerId !== person.id,
+      );
+      person.lifeState = "deceased";
+      person.hibernationPodId = null;
+    }
+  }
+  passengers = PassengerSimulation.restore(snapshot);
+  synchronizePopulationAggregate();
+  synchronizeCompartmentOccupants();
+}
+
 let passengerEnvironmentalExposures =
   createPassengerEnvironmentalExposureStates();
+survivalZoneDoses = createSurvivalZoneDoses();
 
 const SENSOR_QUANTITIES = [
   "pressurePa",
@@ -2298,6 +2393,24 @@ function currentState(): SimulationWorkerState {
           revisionAfter: entry.revisionAfter,
         })),
     },
+    timeControl: {
+      timeScale: timeDirector.timeScale,
+      effectiveTimeScale: timeDirector.isPaused
+        ? 0
+        : timeDirector.lastEffectiveTimeScale,
+      paused: timeDirector.isPaused,
+      pauseTokens: [...timeDirector.pauseTokens],
+      owedSimSeconds: timeDirector.owedSimSeconds,
+      fidelityLocked: timeDirector.fidelityLocked,
+      droppedSimSecondsCumulative: timeDirector.droppedSimSecondsCumulative,
+    },
+    proceduralEvents: lastProceduralEvents.map((event) => ({ ...event })),
+    survival: {
+      rationFoodConsumedKg: survivalLedger.rationFoodConsumedKg,
+      starvationExposurePersonSeconds:
+        survivalLedger.starvationExposurePersonSeconds,
+      foodDryKg: engine.getState().consumables.foodDryKg,
+    },
   };
 }
 
@@ -2366,6 +2479,12 @@ function initialize(
   commandBus = createCommandBus();
   passengerEnvironmentalExposures =
     createPassengerEnvironmentalExposureStates();
+  survivalZoneDoses = createSurvivalZoneDoses();
+  survivalLedger = createEmptySurvivalLedger();
+  timeDirector = new SimulationTimeDirector(command.mission.timeScale);
+  timeDirector.acquirePauseToken("ui");
+  proceduralWorld = new ProceduralWorldScheduler(command.mission.seed);
+  lastProceduralEvents = [];
   synchronizeCompartmentOccupants();
   synchronizeWaterOccupants();
   requestedTimeScale = command.mission.timeScale;
@@ -2392,7 +2511,7 @@ function restore(
   command: Extract<SimulationWorkerCommand, { type: "restore" }>,
 ): void {
   if (
-    command.snapshot.snapshotVersion !== 15 ||
+    command.snapshot.snapshotVersion !== 16 ||
     !command.snapshot.highestDirective.trim() ||
     command.snapshot.engine.powerAuthority !== "external-network" ||
     command.snapshot.engine.atmosphereAuthority !== "external-network" ||
@@ -2485,6 +2604,39 @@ function restore(
     command.snapshot.passengerEnvironmentalExposures,
     restoredCompartments,
   );
+  const restoredSurvival = restoreSurvival(command.snapshot.survival);
+  if (
+    restoredSurvival.zoneDoses.length !==
+    command.snapshot.passengerEnvironmentalExposures.length
+  ) {
+    throw new Error(
+      "survival zone doses must match passenger environmental exposure cardinality",
+    );
+  }
+  for (
+    let index = 0;
+    index < restoredSurvival.zoneDoses.length;
+    index += 1
+  ) {
+    const dose = restoredSurvival.zoneDoses[index]!;
+    const exposure = command.snapshot.passengerEnvironmentalExposures[index]!;
+    if (
+      dose.zoneId !== exposure.zoneId ||
+      dose.family !== exposure.family ||
+      dose.currentTier !== exposure.currentTier ||
+      dose.episode !== exposure.episode
+    ) {
+      throw new Error(
+        `survival zone dose ${dose.zoneId}/${dose.family} does not match environmental exposure`,
+      );
+    }
+  }
+  const restoredTimeDirector = SimulationTimeDirector.restore(
+    command.snapshot.timeDirector,
+  );
+  const restoredProceduralWorld = ProceduralWorldScheduler.restore(
+    command.snapshot.proceduralWorld,
+  );
   validateRestoredProjection(
     restoredEngine,
     restoredPassengers,
@@ -2515,9 +2667,16 @@ function restore(
   passengerEnvironmentalExposures = structuredClone(
     command.snapshot.passengerEnvironmentalExposures,
   );
+  survivalLedger = restoredSurvival.ledger;
+  survivalZoneDoses = restoredSurvival.zoneDoses;
+  timeDirector = restoredTimeDirector;
+  proceduralWorld = restoredProceduralWorld;
+  lastProceduralEvents = [];
   commandBus = restoredCommandBus;
-  requestedTimeScale = engine.timeScale;
-  effectiveTimeScale = engine.timeScale;
+  requestedTimeScale = timeDirector.timeScale;
+  effectiveTimeScale = timeDirector.isPaused
+    ? 0
+    : timeDirector.lastEffectiveTimeScale || engine.timeScale;
   lastCompartmentStep = {
     fidelityMode: "equilibrium-fast",
     fineSubsteps: 0,
@@ -2533,7 +2692,7 @@ function restore(
 
 function runtimeSnapshot(): RuntimeSimulationSnapshot {
   return {
-    snapshotVersion: 15,
+    snapshotVersion: 16,
     highestDirective,
     engine: engine.snapshot(),
     passengers: passengers.snapshot(),
@@ -2548,6 +2707,9 @@ function runtimeSnapshot(): RuntimeSimulationSnapshot {
     passengerEnvironmentalExposures: structuredClone(
       passengerEnvironmentalExposures,
     ),
+    timeDirector: timeDirector.snapshot(),
+    proceduralWorld: proceduralWorld.snapshot(),
+    survival: snapshotSurvival(survivalLedger, survivalZoneDoses),
   };
 }
 
@@ -2565,6 +2727,10 @@ interface RuntimeDomainCheckpoint {
   maintenance: MaintenanceSnapshot;
   passengerEnvironmentalExposures:
     PassengerEnvironmentalExposureState[];
+  survivalLedger: SurvivalLedger;
+  survivalZoneDoses: ZoneHazardDose[];
+  timeDirector: TimeDirectorSnapshot;
+  proceduralWorld: ProceduralWorldSnapshot;
   requestedTimeScale: number;
   effectiveTimeScale: number;
   lastCompartmentStep: typeof lastCompartmentStep;
@@ -2584,6 +2750,10 @@ function captureDomainCheckpoint(): RuntimeDomainCheckpoint {
     passengerEnvironmentalExposures: structuredClone(
       passengerEnvironmentalExposures,
     ),
+    survivalLedger: { ...survivalLedger },
+    survivalZoneDoses: survivalZoneDoses.map((dose) => ({ ...dose })),
+    timeDirector: timeDirector.snapshot(),
+    proceduralWorld: proceduralWorld.snapshot(),
     requestedTimeScale,
     effectiveTimeScale,
     lastCompartmentStep: structuredClone(lastCompartmentStep),
@@ -2614,6 +2784,14 @@ function restoreDomainCheckpoint(
   );
   passengerEnvironmentalExposures = structuredClone(
     checkpoint.passengerEnvironmentalExposures,
+  );
+  survivalLedger = { ...checkpoint.survivalLedger };
+  survivalZoneDoses = checkpoint.survivalZoneDoses.map((dose) => ({
+    ...dose,
+  }));
+  timeDirector = SimulationTimeDirector.restore(checkpoint.timeDirector);
+  proceduralWorld = ProceduralWorldScheduler.restore(
+    checkpoint.proceduralWorld,
   );
   requestedTimeScale = checkpoint.requestedTimeScale;
   effectiveTimeScale = checkpoint.effectiveTimeScale;
@@ -2789,6 +2967,9 @@ function runCoupledStepUnchecked(
     fineSubsteps,
     equilibriumIntervals,
   };
+  updatePassengerEnvironmentalExposures(
+    realSeconds * effectiveTimeScale,
+  );
   if (
     passengers.nowMicroseconds !== engine.elapsedMicroseconds ||
     compartments.elapsedMicroseconds !== engine.elapsedMicroseconds ||
@@ -3009,11 +3190,20 @@ function advanceCoupledPhysicalDomains(
   applyHibernationPowerIncidents(
     hibernationPower.crossedIncidentThresholds,
   );
-  engine.applyMetabolicMassExchange(metabolicExchange);
+  // Atmosphere chemistry still applies; feedstock=0 so foodDryKg is not dual-debited.
+  // Survival ration is the sole authoritative food inventory sink.
+  engine.applyMetabolicMassExchange({
+    oxygenConsumedKg: metabolicExchange.oxygenConsumedKg,
+    carbonDioxideProducedKg: metabolicExchange.oxygenConsumedKg,
+    waterVaporProducedKg: metabolicExchange.waterVaporProducedKg,
+  });
   synchronizeAtmosphereAggregate(
     capturedCarbonDioxideTotal(),
   );
-  updatePassengerEnvironmentalExposures();
+  // Per-slice ration keeps long-step vs repeated-step food/revision equivalent.
+  applySurvivalRationAndStarvation(simulatedSeconds);
+  // Tier/episode sync only inside slices; continuous dose runs once per step.
+  updatePassengerEnvironmentalExposures(0);
   synchronizePopulationAggregate();
   synchronizeCompartmentOccupants();
   synchronizeWaterOccupants();
@@ -3721,75 +3911,98 @@ function validatePassengerEnvironmentalExposureStates(
   }
 }
 
-function updatePassengerEnvironmentalExposures(): void {
-  const byKey = new Map(
-    passengerEnvironmentalExposures.map((state) => [
-      `${state.zoneId}/${state.family}`,
-      state,
+function updatePassengerEnvironmentalExposures(
+  deltaSeconds = 0,
+): void {
+  const doseByKey = new Map(
+    survivalZoneDoses.map((dose) => [
+      `${dose.zoneId}/${dose.family}`,
+      dose,
     ]),
   );
+  const nextDoses: ZoneHazardDose[] = [];
   const activeExposures: Array<{
     zoneId: ZoneId;
     family: PassengerEnvironmentalHazardFamily;
     tier: Exclude<PassengerEnvironmentalHazardTier, 0>;
     episode: number;
   }> = [];
+  const continuousDoseHits: Array<{
+    zoneId: ZoneId;
+    family: PassengerEnvironmentalHazardFamily;
+    physicalDelta: number;
+    stressDelta: number;
+  }> = [];
+
   for (const zoneId of BASELINE_ZONE_IDS) {
     const truth = compartments.getZoneTruth(zoneId);
     for (const family of PASSENGER_ENVIRONMENTAL_HAZARD_FAMILIES) {
-      const state = byKey.get(`${zoneId}/${family}`);
-      if (!state) {
+      const previous = doseByKey.get(`${zoneId}/${family}`);
+      if (!previous) {
         throw new Error(
-          `passenger environmental exposure state lost ${zoneId}/${family}`,
+          `survival zone dose state lost ${zoneId}/${family}`,
         );
       }
-      const previousTier = state.currentTier;
-      const currentTier = passengerEnvironmentalHazardTier(
+      const nextTier = passengerEnvironmentalHazardTier(
         truth,
         family,
       );
-      if (previousTier === 0 && currentTier > 0) {
-        state.episode += 1;
-      }
-      state.currentTier = currentTier;
-      if (currentTier > 0) {
+      const integrated = integrateHazardDose({
+        previous,
+        nextTier,
+        deltaSeconds,
+      });
+      nextDoses.push(integrated.dose);
+      if (nextTier > 0) {
         activeExposures.push({
           zoneId,
           family,
-          tier: currentTier as Exclude<
+          tier: nextTier as Exclude<
             PassengerEnvironmentalHazardTier,
             0
           >,
-          episode: state.episode,
+          episode: integrated.dose.episode,
+        });
+      }
+      if (
+        deltaSeconds > 0 &&
+        (integrated.physicalDelta !== 0 ||
+          integrated.stressDelta !== 0)
+      ) {
+        continuousDoseHits.push({
+          zoneId,
+          family,
+          physicalDelta: integrated.physicalDelta,
+          stressDelta: integrated.stressDelta,
         });
       }
     }
   }
+
+  survivalZoneDoses = nextDoses;
+  syncExposuresFromSurvivalDoses();
+
+  const awakePassengersByZone = new Map<ZoneId, Passenger[]>(
+    BASELINE_ZONE_IDS.map((zoneId) => [zoneId, []]),
+  );
+  for (const person of passengers.getAllPassengers()) {
+    if (person.lifeState !== "awake") continue;
+    awakePassengersByZone
+      .get(stableZoneForCabin(person.cabinId))!
+      .push(person);
+  }
+
   if (activeExposures.length > 0) {
-    const awakePassengersByZone = new Map<
-      ZoneId,
-      Passenger[]
-    >(
-      BASELINE_ZONE_IDS.map((zoneId) => [zoneId, []]),
-    );
-    for (const person of passengers.getAllPassengers()) {
-      if (person.lifeState !== "awake") continue;
-      awakePassengersByZone
-        .get(stableZoneForCabin(person.cabinId))!
-        .push(person);
-    }
     for (const exposure of activeExposures) {
-      const awakePassengers =
+      const awakeInZone =
         awakePassengersByZone.get(exposure.zoneId)!;
-      if (awakePassengers.length === 0) continue;
-      // Apply every tier reached in the current episode. Re-evaluation is
-      // intentional: applyPassengerIncident is idempotent for people already
-      // exposed, while newly awakened occupants receive the active exposure.
+      if (awakeInZone.length === 0) continue;
+      // Episode memory remains for logging; continuous dose owns health drain.
       for (let tier = 1; tier <= exposure.tier; tier += 1) {
         const eventId =
           `compartment-exposure:${exposure.zoneId}:${exposure.family}:` +
           `episode-${exposure.episode}:tier-${tier}`;
-        const targetPassengerIds = awakePassengers
+        const targetPassengerIds = awakeInZone
           .filter(
             (person) =>
               !person.memories.some(
@@ -3806,16 +4019,268 @@ function updatePassengerEnvironmentalExposures(): void {
         );
         applyIncidentToRoster({
           ...incident,
+          // Keep psychology / experience from the episode crossing; physical
+          // damage is applied continuously via survival dose below.
+          healthImpact: {},
           eventId,
           targetPassengerIds,
         });
       }
     }
   }
+
+  if (continuousDoseHits.length > 0 && deltaSeconds > 0) {
+    for (const hit of continuousDoseHits) {
+      const targets = awakePassengersByZone
+        .get(hit.zoneId)!
+        .map((person) => person.id);
+      if (targets.length === 0) continue;
+      applyContinuousRosterDeltas(targets, {
+        physical: hit.physicalDelta,
+        stress: hit.stressDelta,
+      });
+    }
+  }
+
   validatePassengerEnvironmentalExposureStates(
     passengerEnvironmentalExposures,
     compartments,
   );
+}
+
+function applySurvivalRationAndStarvation(deltaSeconds: number): void {
+  const awake = passengers
+    .getAllPassengers()
+    .filter((person) => person.lifeState === "awake");
+  const awakeCount = awake.length;
+  const foodBefore = engine.getState().consumables.foodDryKg;
+  const rationed = applyRationAndStarvation({
+    foodDryKg: foodBefore,
+    awakeCount,
+    deltaSeconds,
+    ledger: survivalLedger,
+  });
+  survivalLedger = rationed.ledger;
+  const demanded = foodBefore - rationed.foodDryKg;
+  if (demanded > 0) {
+    const consumed = engine.consumeFoodRationKg(demanded);
+    if (Math.abs(consumed - demanded) > 1e-9) {
+      throw new Error(
+        "survival ration food debit diverged from ledger demand",
+      );
+    }
+  }
+  const starvationDelta = rationed.starvationPhysicalDelta;
+  if (starvationDelta !== 0 && awakeCount > 0) {
+    applyContinuousRosterDeltas(
+      awake.map((person) => person.id),
+      { physical: starvationDelta },
+    );
+  }
+}
+
+function buildProceduralInterventionRequest(
+  event: ProceduralWorldEvent,
+): ExternalInterventionRequest | null {
+  const eventType = event.interventionEventType;
+  if (!eventType) return null;
+  const common = {
+    id: `procedural:${event.id}`,
+    actor: "environment:procedural",
+    reason: event.message,
+    metadata: {
+      mode: "causal-event" as const,
+      eventType,
+      sourceKnownToAi: false,
+      proceduralEventId: event.id,
+      proceduralEventType: event.type,
+    },
+  };
+  switch (eventType) {
+    case "micrometeoroid":
+      return {
+        ...common,
+        metadata: {
+          ...common.metadata,
+          targetZoneId: "A-18",
+        },
+        operations: [
+          {
+            operation: "add",
+            path: "atmosphere.leakAreaSquareMeters",
+            value: 0.000045,
+          },
+        ],
+        declaredBalance: {
+          massKg: -0.34,
+          energyJ: 280_000_000,
+          linearMomentumKgMPerSecond: [1_180, -240, 90],
+          angularMomentumKgM2PerSecond: [0, 28_000, -74_000],
+          note: "Projectile impact, ablated hull mass and transferred momentum",
+        },
+      };
+    case "coolant-pump-seizure":
+      return {
+        ...common,
+        metadata: {
+          ...common.metadata,
+          targetPumpId: "pump-a",
+        },
+        operations: [],
+        declaredBalance: {
+          massKg: 0,
+          energyJ: 0,
+          linearMomentumKgMPerSecond: [0, 0, 0],
+          angularMomentumKgM2PerSecond: [0, 0, 0],
+          note: "Topology fault; subsequent waste heat remains in the closed ship system",
+        },
+      };
+    case "stellar-flare":
+      return {
+        ...common,
+        operations: [
+          {
+            operation: "multiply",
+            path: "environment.radiationDoseRateMilliSievertsPerHour",
+            value: 180,
+          },
+          {
+            operation: "multiply",
+            path: "environment.chargedParticleFluxPerSquareMeterSecond",
+            value: 2_400,
+          },
+          {
+            operation: "add",
+            path: "environment.stellarIrradianceWattsPerSquareMeter",
+            value: 8_500_000,
+          },
+        ],
+        declaredBalance: {
+          massKg: 0,
+          energyJ: 0,
+          linearMomentumKgMPerSecond: [0, 0, 0],
+          angularMomentumKgM2PerSecond: [0, 0, 0],
+          note: "Changes explicit external radiation and particle-flux boundaries; future deposited energy is integrated by downstream solvers",
+        },
+      };
+    default:
+      return null;
+  }
+}
+
+function applyWorkerIntervention(
+  request: ExternalInterventionRequest,
+): ExternalInterventionRecord {
+  const checkpoint = captureDomainCheckpoint();
+  try {
+    const normalizedRequest = normalizeWaterProcessorTrip(
+      normalizeAirHandlerTrip(
+        normalizeRingBearingDegradation(
+          normalizeDirectForceBalance(request),
+        ),
+      ),
+    );
+    const record = engine.applyExternalIntervention(normalizedRequest);
+    applyCompartmentInterventionEffects(normalizedRequest, record);
+    applyCoolingInterventionEffects(normalizedRequest, record);
+    applyElectricalInterventionEffects(normalizedRequest, record);
+    applyWaterInterventionEffects(normalizedRequest, record);
+    applyRotationInterventionEffects(normalizedRequest);
+    applyNavigationInterventionEffects(record);
+    updatePassengerEnvironmentalExposures(0);
+    validateRestoredProjection(
+      engine,
+      passengers,
+      compartments,
+      cooling,
+      electrical,
+      navigation,
+      rotation,
+      water,
+    );
+    return record;
+  } catch (error) {
+    restoreDomainCheckpoint(checkpoint);
+    throw error;
+  }
+}
+
+function applyProceduralWorldEvents(
+  simulationSeconds: number,
+): ProceduralWorldEvent[] {
+  const triggered = proceduralWorld.check(simulationSeconds);
+  for (const event of triggered) {
+    if (event.narrativeOnly || !event.interventionEventType) {
+      continue;
+    }
+    const request = buildProceduralInterventionRequest(event);
+    if (request === null) continue;
+    applyWorkerIntervention(request);
+  }
+  return triggered;
+}
+
+function applyTimeControl(
+  command: Extract<SimulationWorkerCommand, { type: "set-time-control" }>,
+): void {
+  if (command.timeScale !== undefined) {
+    timeDirector.setTimeScale(command.timeScale);
+    requestedTimeScale = command.timeScale;
+  }
+  for (const token of command.acquirePauseTokens ?? []) {
+    timeDirector.acquirePauseToken(token);
+  }
+  for (const token of command.releasePauseTokens ?? []) {
+    timeDirector.releasePauseToken(token);
+  }
+  post({
+    type: "ready",
+    requestId: command.requestId,
+    payload: currentState(),
+  });
+}
+
+function advanceSimulationStep(
+  command: Extract<SimulationWorkerCommand, { type: "step" }>,
+): void {
+  lastProceduralEvents = [];
+  if (Number.isFinite(command.timeScale) && command.timeScale > 0) {
+    timeDirector.setTimeScale(command.timeScale);
+  }
+  const plan = timeDirector.planHeartbeat(command.realSeconds);
+  if (plan.paused || plan.wallSecondsToRun === 0) {
+    timeDirector.commitHeartbeat({
+      wallSecondsElapsed: command.realSeconds,
+      wallSecondsRequested: 0,
+      requestedTimeScale: plan.requestedTimeScale,
+      effectiveTimeScale: 0,
+    });
+    requestedTimeScale = plan.requestedTimeScale;
+    effectiveTimeScale = 0;
+    lastProceduralEvents = [];
+    post({
+      type: "stepped",
+      requestId: command.requestId,
+      payload: currentState(),
+    });
+    return;
+  }
+
+  runCoupledStep(plan.wallSecondsToRun, plan.requestedTimeScale);
+  timeDirector.commitHeartbeat({
+    wallSecondsElapsed: command.realSeconds,
+    wallSecondsRequested: plan.wallSecondsToRun,
+    requestedTimeScale: plan.requestedTimeScale,
+    effectiveTimeScale,
+  });
+  lastProceduralEvents = applyProceduralWorldEvents(
+    engine.elapsedSeconds,
+  );
+  post({
+    type: "stepped",
+    requestId: command.requestId,
+    payload: currentState(),
+  });
 }
 
 function applyCompartmentInterventionEffects(
@@ -4777,20 +5242,18 @@ globalThis.onmessage = (message: MessageEvent<SimulationWorkerCommand>) => {
       case "restore":
         restore(command);
         return;
+      case "set-time-control":
+        applyTimeControl(command);
+        return;
       case "step":
-        runCoupledStep(command.realSeconds, command.timeScale);
-        post({
-          type: "stepped",
-          requestId: command.requestId,
-          payload: currentState(),
-        });
+        advanceSimulationStep(command);
         return;
       case "snapshot":
         post({
           type: "snapshot",
           requestId: command.requestId,
           payload: { snapshot: runtimeSnapshot() },
-      });
+        });
         return;
       case "ship-command": {
         const result = dispatchShipCommand(command);
@@ -4809,50 +5272,7 @@ globalThis.onmessage = (message: MessageEvent<SimulationWorkerCommand>) => {
         });
         return;
       case "intervene": {
-        const checkpoint = captureDomainCheckpoint();
-        let normalizedRequest: ExternalInterventionRequest;
-        let record: ExternalInterventionRecord;
-        try {
-          normalizedRequest = normalizeWaterProcessorTrip(
-            normalizeAirHandlerTrip(
-              normalizeRingBearingDegradation(
-                normalizeDirectForceBalance(command.request),
-              ),
-            ),
-          );
-          record = engine.applyExternalIntervention(
-            normalizedRequest,
-          );
-          applyCompartmentInterventionEffects(
-            normalizedRequest,
-            record,
-          );
-          applyCoolingInterventionEffects(
-            normalizedRequest,
-            record,
-          );
-          applyElectricalInterventionEffects(
-            normalizedRequest,
-            record,
-          );
-          applyWaterInterventionEffects(normalizedRequest, record);
-          applyRotationInterventionEffects(normalizedRequest);
-          applyNavigationInterventionEffects(record);
-          updatePassengerEnvironmentalExposures();
-          validateRestoredProjection(
-            engine,
-            passengers,
-            compartments,
-            cooling,
-            electrical,
-            navigation,
-            rotation,
-            water,
-          );
-        } catch (error) {
-          restoreDomainCheckpoint(checkpoint);
-          throw error;
-        }
+        const record = applyWorkerIntervention(command.request);
         post({
           type: "intervention",
           requestId: command.requestId,

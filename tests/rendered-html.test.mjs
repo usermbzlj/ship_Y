@@ -36,6 +36,9 @@ test("server-renders the Far Horizon mission shell", async () => {
   assert.match(html, /远穹计划/);
   assert.match(html, /建立最高指令/);
   assert.match(html, /签发并移交全舰指挥权/);
+  assert.match(html, /你决定它为何出发/);
+  assert.match(html, /把全舰交给 AI 舰长之后/);
+  assert.match(html, /og\.png/);
   assert.match(html, /人工干预/);
   assert.match(html, /2,120/);
   assert.doesNotMatch(html, /react-loading-skeleton|Codex is working/i);
@@ -64,8 +67,11 @@ test("production source contains a real worker-backed simulator, not starter UI"
   assert.match(css, /\.event-rail-toggle/);
   assert.match(css, /\.god-confirm-bar/);
   assert.match(css, /prefers-reduced-motion:\s*reduce/);
-  assert.match(missionControl, /environment:procedural/);
+  assert.match(simulationWorker, /environment:procedural/);
+  assert.match(simulationWorker, /ProceduralWorldScheduler/);
+  assert.match(simulationWorker, /SimulationTimeDirector/);
   assert.match(missionControl, /farhorizon-save/);
+  assert.match(missionControl, /TimeControlBar/);
   assert.match(missionControl, /sim-status-strip/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   assert.doesNotMatch(missionControl, /SkeletonPreview/);

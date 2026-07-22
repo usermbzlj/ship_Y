@@ -14,7 +14,7 @@ function parseArgs(argv) {
   const options = {
     port: 3000,
     host: "127.0.0.1",
-    model: "deepseek-v4-flash",
+    model: "deepseek-v4-pro",
     thinking: "disabled",
     credential: "",
   };

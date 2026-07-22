@@ -577,7 +577,7 @@ API 密钥不得写入场景、存档、日志或导出的航程报告；玩家�
 
 ### 当前实现
 
-- React 协调器（`app/mission-control.tsx`）内嵌 `ProceduralEventScheduler`（`app/ui/procedural-events.ts`）：固定种子、`7` 类定时事件，调度状态**未**写入存档。
+- Worker 内 `ProceduralWorldScheduler`（`lib/sim/procedural-world.ts`，由 `lib/sim/worker.ts` 驱动）：固定任务种子、`7` 类定时事件，调度状态写入运行时快照。
 - **物理注入**（`3` 类）：`micrometeoroid`、`coolant-pump-seizure`（由 `equipment-wear` 触发）、`stellar-flare`（由 `radiation-event` 触发）经 `actor: "environment:procedural"` 进入 Worker 上帝干预接口。
 - **叙事为主**（其余类型）：传感器漂移、乘客社会、休眠并发症、配电波动等写入全舰事件时间线，不保证改变权威物理状态。
 - 上文事件库（火灾、疫情、罢工、犯罪级联等）仍是**产品目标**；不得宣称已实现。
@@ -601,14 +601,14 @@ API 密钥不得写入场景、存档、日志或导出的航程报告；玩家�
 
 **已实现**
 
-- 全屏签发权威对话框（起点 / 终点 / 最高指令、`launch-layer`）；签发前侧栏与主视图锁定，事件时间线为空。
-- 五主视图：航程、舰体（`detail-view` / `topology-grid`）、乘员、AI 观察、人工干预（内联确认条）。
-- 事件时间线：来源筛选、最多 `500` 条；视口 `≤1100px` 时右侧 `event-rail` 抽屉（切换钮 + 背景遮罩）。
+- 全屏舰桥授权台（起点 / 终点 / 最高指令、`mission-launch-card`），明确玩家的人类签发权与 AI 舰长的世界内指挥权；签发前侧栏与主视图锁定，舰桥日志为空。
+- 五主视图：舰桥、舰务（`detail-view` / `topology-grid`）、乘员、AI 观察、人工干预（内联确认条）。舰桥首屏包含前向主视窗、航向刻度、任务相位、剩余航程、跃迁进度和右舷舰体姿态台。
+- 舰桥日志：状态筛选、最多 `500` 条并提供签发前空状态；视口 `≤1100px` 时右侧 `event-rail` 抽屉（切换钮 + 背景遮罩）。
 - 警报横幅、`sim-status-strip`（`live` / `waiting` / `blocked` / `paused`）、底栏 API / 物理状态。
 - 上帝模式因果注入与原力覆写（提交前内联确认）；读档覆盖确认对话框。
 - 上帝视图**上帝助手**面板：自然语言 → 计划预览 → 玩家确认 → 执行；由 `playerAssistants.godAssistant` 经 `POST /api/llm/invoke`（`intent: "god-assist"`）编译，**不属于**固定 `40` 节点舰内 LLM 拓扑；物理引擎拒收时据拒收原因自动向 LLM 修订一次。
 - 航程结束抵达报告层；时间倍率五档（`30m/s`–`1D/s`）与 `1`–`5` / `Space` 快捷键；主音量静音。
-- 手动存档 / 读档：`localStorage` 键 `farhorizon-save`（外层 `v18`、运行时快照 `v15`、关键乘客轮询 `v2`）；签发卡探测本机存档。
+- 手动存档 / 读档：`localStorage` 键 `farhorizon-save`（外层 `v19`、运行时快照 `v16`、关键乘客轮询 `v2`）；签发卡探测本机存档。
 
 **目标**
 
@@ -644,7 +644,7 @@ API 密钥不得写入场景、存档、日志或导出的航程报告；玩家�
 
 ### 当前实现
 
-- **仅**手动存档 / 读档：`localStorage` 键 `farhorizon-save`；外层格式 `v18`，内含运行时快照 `v15` 与关键乘客轮询快照 `v2`。
+- **仅**手动存档 / 读档：`localStorage` 键 `farhorizon-save`；外层格式 `v19`，内含运行时快照 `v16` 与关键乘客轮询快照 `v2`。
 - 保存屏障：暂停新步进 / 调用、等待在途物理事务完成后向 Worker 取安全点。
 - 读档前弹出覆盖确认；加载会替换当前活动会话。
 - **尚无**：自动存档、轮换崩溃恢复槽、IndexedDB、checksum / 版本迁移链、导入导出包、待处理 API 调用恢复。

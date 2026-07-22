@@ -559,3 +559,35 @@ test("metabolic products debit feedstock and water reservoirs exactly", () => {
     /cannot weigh less/,
   );
 });
+
+test("consumeFoodRationKg is the inventory-facing food debit API", () => {
+  const engine = new SimulationEngine();
+  const before = engine.getState();
+  const consumed = engine.consumeFoodRationKg(12.5);
+  assert.equal(consumed, 12.5);
+  const after = engine.getState();
+  assert.equal(after.consumables.foodDryKg, before.consumables.foodDryKg - 12.5);
+  assert.equal(
+    after.consumables.foodConsumedKgCumulative,
+    before.consumables.foodConsumedKgCumulative + 12.5,
+  );
+  // Neutral metabolic exchange (feedstock=0) must not touch food inventory.
+  engine.applyMetabolicMassExchange({
+    oxygenConsumedKg: 3,
+    carbonDioxideProducedKg: 3,
+    waterVaporProducedKg: 0,
+  });
+  assert.equal(
+    engine.getState().consumables.foodDryKg,
+    after.consumables.foodDryKg,
+  );
+  assert.equal(
+    engine.getState().consumables.foodConsumedKgCumulative,
+    after.consumables.foodConsumedKgCumulative,
+  );
+  const short = engine.consumeFoodRationKg(
+    engine.getState().consumables.foodDryKg + 100,
+  );
+  assert.equal(short, after.consumables.foodDryKg);
+  assert.equal(engine.getState().consumables.foodDryKg, 0);
+});
