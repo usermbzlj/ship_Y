@@ -6,50 +6,24 @@ import {
   useMemo,
   useRef,
   useState,
-  type ReactNode,
 } from "react";
+import type { ExternalInterventionRequest, ShipState } from "@/lib/sim";
+import type { RingControlMode } from "@/lib/sim/rotation";
+import type { ReactorMode } from "@/lib/sim/electrical";
+import type { BatteryControlMode } from "@/lib/sim/electrical";
+import type { ZoneId } from "@/lib/sim/compartments";
+import type { AirHandlerId } from "@/lib/sim/compartments";
+import type { CoolantPumpId } from "@/lib/sim/cooling";
 import type {
-  ExternalInterventionRequest,
-  ShipState,
-} from "@/lib/sim";
-import {
-  AIR_HANDLER_IDS,
-  type AirHandlerId,
-  type ZoneId,
-} from "@/lib/sim/compartments";
-import {
-  COOLANT_PUMP_IDS,
-  type CoolantPumpId,
-} from "@/lib/sim/cooling";
-import {
-  ELECTRICAL_BATTERY_IDS,
-  ELECTRICAL_BREAKER_IDS,
-  ELECTRICAL_LOAD_IDS,
-  FUSION_REACTOR_IDS,
-  type BatteryControlMode,
-  type ElectricalBatteryId,
-  type ElectricalBreakerId,
-  type ElectricalLoadId,
-  type FusionReactorId,
-  type ReactorMode,
+  ElectricalBatteryId,
+  ElectricalBreakerId,
+  ElectricalLoadId,
+  FusionReactorId,
 } from "@/lib/sim/electrical";
-import {
-  THRUSTER_IDS,
-  type ThrusterId,
-} from "@/lib/sim/navigation";
-import {
-  ROTATION_RING_IDS,
-  type RingControlMode,
-  type RotationRingId,
-} from "@/lib/sim/rotation";
-import {
-  WATER_PROCESSOR_IDS,
-  type WaterProcessorId,
-} from "@/lib/sim/water";
-import {
-  MAINTENANCE_ASSET_IDS,
-  type MaintenanceAssetId,
-} from "@/lib/sim/maintenance";
+import type { ThrusterId } from "@/lib/sim/navigation";
+import type { RotationRingId } from "@/lib/sim/rotation";
+import type { WaterProcessorId } from "@/lib/sim/water";
+import type { MaintenanceAssetId } from "@/lib/sim/maintenance";
 import {
   KeyPassengerPollScheduler,
   type KeyPassengerPollingSnapshot,
@@ -71,384 +45,86 @@ import type {
   WaterRecoveryTelemetry,
 } from "@/lib/sim/protocol";
 
-type ViewId = "voyage" | "ship" | "people" | "ai" | "god";
-type SystemTone = "nominal" | "watch" | "critical";
+// ─── 从拆分模块导入 ───────────────────────────────────────────
+import type {
+  ViewId,
+  SystemTone,
+  LlmCallPhase,
+  TimelineEvent,
+  SystemCard,
+  LlmRuntimeStatus,
+  LlmInvokeResult,
+  LlmInvokeRoutePayload,
+  CaptainDeviceReceiptStatus,
+  CaptainDeviceReceiptSummary,
+  LocalSave,
+  ForceField,
+} from "@/app/ui/types";
+import {
+  STAR_SYSTEMS,
+  NAV_ITEMS,
+  THRUSTER_ID_SET,
+  FUSION_REACTOR_ID_SET,
+  COOLANT_PUMP_ID_SET,
+  ELECTRICAL_LOAD_ID_SET,
+  ELECTRICAL_BREAKER_ID_SET,
+  ELECTRICAL_BATTERY_ID_SET,
+  ROTATION_RING_ID_SET,
+  AIR_HANDLER_ID_SET,
+  WATER_PROCESSOR_ID_SET,
+  MAINTENANCE_ASSET_ID_SET,
+  RING_CONTROL_MODES,
+  RING_CONTROL_MODE_SET,
+  BATTERY_CONTROL_MODES,
+  BATTERY_CONTROL_MODE_SET,
+  REACTOR_MODES,
+  REACTOR_MODE_SET,
+  MAX_TIMELINE_EVENTS,
+  INITIAL_EVENTS,
+  INITIAL_SYSTEMS,
+  FORCE_FIELDS,
+  AI_ROSTER,
+  PASSENGERS,
+  MAX_CAPTAIN_WORLD_COMMANDS_PER_CYCLE,
+  AUTHORIZED_CONTROLLER_RECORD_DELAY_SECONDS,
+  AUTHORIZED_MANIFEST_RECORD_DELAY_SECONDS,
+  AUTHORIZED_RECORD_HISTORY_LIMIT,
+  AIR_HANDLER_IDS,
+  COOLANT_PUMP_IDS,
+  ELECTRICAL_BATTERY_IDS,
+  ELECTRICAL_BREAKER_IDS,
+  ELECTRICAL_LOAD_IDS,
+  FUSION_REACTOR_IDS,
+  THRUSTER_IDS,
+  ROTATION_RING_IDS,
+  WATER_PROCESSOR_IDS,
+  MAINTENANCE_ASSET_IDS,
+} from "@/app/ui/constants";
+import {
+  formatDuration,
+  formatCadence,
+  prependTimelineEvent,
+  compactLlmTimelineText,
+} from "@/app/ui/utils";
+import { VoyageView } from "@/app/ui/views/voyage-view";
+import { ShipView } from "@/app/ui/views/ship-view";
+import { PeopleView } from "@/app/ui/views/people-view";
+import { AiView } from "@/app/ui/views/ai-view";
+import { GodView } from "@/app/ui/views/god-view";
+import {
+  AlertBanner,
+  detectAlerts,
+  type ActiveAlert,
+} from "@/app/ui/components/alert-banner";
+import { useAudio } from "@/app/ui/use-audio";
+import { ProceduralEventScheduler } from "@/app/ui/procedural-events";
+
 type ShipWorldCommand = Extract<
   SimulationWorkerCommand,
   { type: "ship-command" }
 >["command"];
 
-type TimelineEvent = {
-  id: number;
-  at: string;
-  source: string;
-  text: string;
-  tone: SystemTone;
-};
 
-type SystemCard = {
-  name: string;
-  value: string;
-  detail: string;
-  load: number;
-  tone: SystemTone;
-};
-
-const STAR_SYSTEMS = [
-  {
-    id: "sol",
-    name: "太阳系",
-    port: "拉格朗日港",
-    x: 14,
-    y: 68,
-    distanceFromSolLy: 0,
-  },
-  {
-    id: "barnard",
-    name: "巴纳德星",
-    port: "赫尔墨斯中继站",
-    x: 29,
-    y: 45,
-    distanceFromSolLy: 5.96,
-  },
-  {
-    id: "wolf359",
-    name: "沃尔夫 359",
-    port: "远望补给环",
-    x: 43,
-    y: 72,
-    distanceFromSolLy: 7.86,
-  },
-  {
-    id: "sirius",
-    name: "天狼星",
-    port: "晨星自治领",
-    x: 55,
-    y: 34,
-    distanceFromSolLy: 8.6,
-  },
-  {
-    id: "epsilon",
-    name: "波江座 ε",
-    port: "阿斯特拉殖民地",
-    x: 72,
-    y: 57,
-    distanceFromSolLy: 10.47,
-  },
-  {
-    id: "tau-ceti",
-    name: "鲸鱼座 τ",
-    port: "新海岸",
-    x: 86,
-    y: 29,
-    distanceFromSolLy: 11.9,
-  },
-] as const;
-
-const NAV_ITEMS: Array<{ id: ViewId; label: string; mark: string }> = [
-  { id: "voyage", label: "航程", mark: "01" },
-  { id: "ship", label: "舰体", mark: "02" },
-  { id: "people", label: "乘员", mark: "03" },
-  { id: "ai", label: "AI 观察", mark: "04" },
-  { id: "god", label: "人工干预", mark: "05" },
-];
-
-const THRUSTER_ID_SET = new Set<string>(THRUSTER_IDS);
-const FUSION_REACTOR_ID_SET = new Set<string>(FUSION_REACTOR_IDS);
-const COOLANT_PUMP_ID_SET = new Set<string>(COOLANT_PUMP_IDS);
-const ELECTRICAL_LOAD_ID_SET = new Set<string>(ELECTRICAL_LOAD_IDS);
-const ELECTRICAL_BREAKER_ID_SET = new Set<string>(
-  ELECTRICAL_BREAKER_IDS,
-);
-const ELECTRICAL_BATTERY_ID_SET = new Set<string>(
-  ELECTRICAL_BATTERY_IDS,
-);
-const ROTATION_RING_ID_SET = new Set<string>(ROTATION_RING_IDS);
-const AIR_HANDLER_ID_SET = new Set<string>(AIR_HANDLER_IDS);
-const WATER_PROCESSOR_ID_SET = new Set<string>(WATER_PROCESSOR_IDS);
-const MAINTENANCE_ASSET_ID_SET = new Set<string>(MAINTENANCE_ASSET_IDS);
-const RING_CONTROL_MODES = [
-  "speed-hold",
-  "coast",
-  "brake",
-] as const satisfies readonly RingControlMode[];
-const RING_CONTROL_MODE_SET = new Set<string>(RING_CONTROL_MODES);
-const BATTERY_CONTROL_MODES = [
-  "automatic",
-  "charge-only",
-  "discharge-only",
-  "standby",
-] as const satisfies readonly BatteryControlMode[];
-const BATTERY_CONTROL_MODE_SET = new Set<string>(
-  BATTERY_CONTROL_MODES,
-);
-const REACTOR_MODES = [
-  "online",
-  "hot-standby",
-  "offline",
-] as const satisfies readonly ReactorMode[];
-const REACTOR_MODE_SET = new Set<string>(REACTOR_MODES);
-const MAX_TIMELINE_EVENTS = 500;
-
-const INITIAL_EVENTS: TimelineEvent[] = [
-  {
-    id: 1,
-    at: "T−03:40",
-    source: "跃迁工程部",
-    text: "三组场线圈通过冷态自检，误差低于 0.018%。",
-    tone: "nominal",
-  },
-  {
-    id: 2,
-    at: "T−02:15",
-    source: "乘客事务部",
-    text: "首批轮值清醒名单已完成医疗复核。",
-    tone: "nominal",
-  },
-  {
-    id: 3,
-    at: "T−00:42",
-    source: "舰长 AI",
-    text: "等待最高指令签发。所有执行权限保持冻结。",
-    tone: "watch",
-  },
-];
-
-const INITIAL_SYSTEMS: SystemCard[] = [
-  {
-    name: "聚变电网",
-    value: "842 MW",
-    detail: "4 在线 / 2 热备",
-    load: 62,
-    tone: "nominal",
-  },
-  {
-    name: "热管理",
-    value: "311 K",
-    detail: "散热余量 38%",
-    load: 58,
-    tone: "nominal",
-  },
-  {
-    name: "生命保障",
-    value: "98.1%",
-    detail: "四机组交叉供给",
-    load: 74,
-    tone: "nominal",
-  },
-  {
-    name: "火炬推进",
-    value: "24.00 t",
-    detail: "推进剂 36.00 kt",
-    load: 100,
-    tone: "nominal",
-  },
-  {
-    name: "旋转居住环",
-    value: "1.002 g",
-    detail: "A +2.000 · B −2.000 rpm",
-    load: 100,
-    tone: "nominal",
-  },
-  {
-    name: "跃迁储能",
-    value: "33.3%",
-    detail: "充能中 · 联锁保持",
-    load: 33,
-    tone: "watch",
-  },
-];
-
-const FORCE_FIELDS = [
-  {
-    id: "coolant-temperature",
-    label: "冷却母线温度",
-    path: "thermal.coolantTemperatureK",
-    unit: "K",
-    defaultValue: "342.0",
-  },
-  {
-    id: "generation",
-    label: "聚变电网总发电",
-    path: "power.generationKw",
-    unit: "kW",
-    defaultValue: "650000",
-  },
-  {
-    id: "oxygen-mass",
-    label: "居住区氧气总质量",
-    path: "atmosphere.gasesKg.oxygen",
-    unit: "kg",
-    defaultValue: "118000",
-  },
-  {
-    id: "leak-area",
-    label: "等效舰体破口面积",
-    path: "atmosphere.leakAreaSquareMeters",
-    unit: "m²",
-    defaultValue: "0.00008",
-  },
-  {
-    id: "radiation-rate",
-    label: "外部辐射剂量率",
-    path: "environment.radiationDoseRateMilliSievertsPerHour",
-    unit: "mSv/h",
-    defaultValue: "2.5",
-  },
-  {
-    id: "potable-water",
-    label: "可饮用水库存",
-    path: "water.potableKg",
-    unit: "kg",
-    defaultValue: "3200000",
-  },
-] as const;
-
-type ForceFieldId = (typeof FORCE_FIELDS)[number]["id"];
-
-interface LocalSave {
-  version: 18;
-  activeView: ViewId;
-  missionStarted: boolean;
-  paused: boolean;
-  timeScale: number;
-  simulationSeconds: number;
-  origin: string;
-  destination: string;
-  directive: string;
-  events: TimelineEvent[];
-  keyPassengerLlm: KeyPassengerPollingSnapshot;
-  runtimeSnapshot: RuntimeSimulationSnapshot | null;
-}
-
-const PASSENGERS = [
-  {
-    name: "周弦",
-    role: "材料工程师",
-    cabin: "A-17-042",
-    state: "清醒",
-    trust: 74,
-    note: "对舰长 AI 保持谨慎信任",
-  },
-  {
-    name: "沈绫",
-    role: "儿科医生",
-    cabin: "B-04-116",
-    state: "休眠",
-    trust: 91,
-    note: "医疗应急唤醒序列 07",
-  },
-  {
-    name: "罗德里格斯",
-    role: "生态农艺师",
-    cabin: "A-21-008",
-    state: "清醒",
-    trust: 63,
-    note: "要求扩大农业环供电配额",
-  },
-  {
-    name: "韩祁",
-    role: "独立记者",
-    cabin: "B-11-033",
-    state: "清醒",
-    trust: 41,
-    note: "持续申请访问舰内事故记录",
-  },
-];
-
-const AI_ROSTER = [
-  {
-    id: "captain",
-    role: "舰长",
-    name: "乾枢",
-    model: "主推理模型",
-    state: "等待最高指令",
-    cadence: "自主",
-  },
-  {
-    id: "navigation",
-    role: "导航与跃迁",
-    name: "北辰",
-    model: "推理模型",
-    state: "航路预计算",
-    cadence: "28 分钟",
-  },
-  {
-    id: "engineering",
-    role: "工程与能源",
-    name: "炉心",
-    model: "推理模型",
-    state: "全系统监测",
-    cadence: "11 分钟",
-  },
-  {
-    id: "life-support",
-    role: "生命保障",
-    name: "青穹",
-    model: "推理模型",
-    state: "大气与水循环监测",
-    cadence: "1 小时",
-  },
-  {
-    id: "medical",
-    role: "医疗与休眠",
-    name: "白塔",
-    model: "医疗模型",
-    state: "待命",
-    cadence: "47 分钟",
-  },
-  {
-    id: "passenger-affairs",
-    role: "乘客事务",
-    name: "栖居",
-    model: "轻量模型",
-    state: "处理 14 项请求",
-    cadence: "19 分钟",
-  },
-  {
-    id: "security",
-    role: "安保与应急",
-    name: "界碑",
-    model: "推理模型",
-    state: "全舰通行态势监测",
-    cadence: "2 小时",
-  },
-  {
-    id: "passenger-service",
-    role: "乘客服务",
-    name: "归栖",
-    model: "轻量模型",
-    state: "处理生活服务队列",
-    cadence: "12 小时",
-  },
-];
-
-type LlmRuntimeStatus = {
-  ready: boolean;
-  fixedAgentCount: number;
-  pendingRoutineTickets: number;
-  agents: Array<{
-    id: string;
-    role: string;
-    state: "ready" | "retrying" | "missing-secret";
-    routine: {
-      systemInfoIntervalSimSeconds: number;
-      discussionDepth: number;
-      discussionRounds: number;
-    };
-  }>;
-  usage: {
-    inputTokens: number;
-    outputTokens: number;
-    totalTokens: number;
-  };
-};
-
-type LlmCallPhase = "idle" | "waiting" | "error";
-
-const AUTHORIZED_CONTROLLER_RECORD_DELAY_SECONDS = 60;
-const AUTHORIZED_MANIFEST_RECORD_DELAY_SECONDS = 300;
-const AUTHORIZED_RECORD_HISTORY_LIMIT = 1_024;
 
 type AuthorizedControllerRecord = {
   worldEpoch: number;
@@ -484,47 +160,6 @@ type KeyPassengerCallCycle = {
   pollId: string;
   passengerId: string;
   controller: AbortController;
-};
-
-type RoutineTicketReference = {
-  callId: string;
-  toolCallId: string;
-  expiresAtEpochMs: number;
-};
-
-type LlmInvokeResult = {
-  callId: string;
-  agentId: string;
-  text: string;
-  toolCalls: Array<{
-    id: string;
-    name: string;
-    arguments: unknown;
-  }>;
-  routineTickets: RoutineTicketReference[];
-};
-
-type LlmInvokeRoutePayload = {
-  result?: LlmInvokeResult;
-  error?: { message?: string };
-};
-
-const MAX_CAPTAIN_WORLD_COMMANDS_PER_CYCLE = 8;
-
-type CaptainDeviceReceiptStatus =
-  | "accepted"
-  | "rejected"
-  | "invalid"
-  | "limit"
-  | "skipped";
-
-type CaptainDeviceReceiptSummary = {
-  ordinal: number;
-  toolCallId: string;
-  toolName: string;
-  commandKind: ShipWorldCommand["kind"] | null;
-  status: CaptainDeviceReceiptStatus;
-  summary: string;
 };
 
 type QueuedCaptainWorldCommand = {
@@ -1009,1522 +644,14 @@ function parseCaptainWorldToolCall(
   };
 }
 
-function formatDuration(totalSeconds: number) {
-  const days = Math.floor(totalSeconds / 86_400);
-  const hours = Math.floor((totalSeconds % 86_400) / 3_600);
-  const minutes = Math.floor((totalSeconds % 3_600) / 60);
-  return `${String(days).padStart(3, "0")}D ${String(hours).padStart(2, "0")}H ${String(minutes).padStart(2, "0")}M`;
-}
 
-function formatCadence(seconds: number) {
-  if (seconds >= 86_400 && seconds % 86_400 === 0) {
-    return `${seconds / 86_400} 天`;
-  }
-  if (seconds >= 3_600 && seconds % 3_600 === 0) {
-    return `${seconds / 3_600} 小时`;
-  }
-  if (seconds >= 60 && seconds % 60 === 0) {
-    return `${seconds / 60} 分钟`;
-  }
-  return `${seconds} 秒`;
-}
 
-function prependTimelineEvent(
-  current: TimelineEvent[],
-  event: TimelineEvent,
-): TimelineEvent[] {
-  return [event, ...current].slice(0, MAX_TIMELINE_EVENTS);
-}
-
-function compactLlmTimelineText(
-  value: string,
-  maximumLength: number,
-  fallback: string,
-): string {
-  const plainText = value
-    .trim()
-    .replace(/```[A-Za-z0-9_-]*\s*/g, "")
-    .replace(/```/g, "")
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-    .replace(/^\s{0,3}#{1,6}\s*/gm, "")
-    .replace(/^\s*[-+*]\s+/gm, "")
-    .replace(/^\s*\d+[.)]\s+/gm, "")
-    .replace(/\|\s*:?-{3,}:?\s*(?=\|)/g, "")
-    .replace(/\|/g, " · ")
-    .replace(/[\*_`~]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!plainText) return fallback;
-  if (plainText.length <= maximumLength) return plainText;
-  return `${plainText.slice(0, Math.max(1, maximumLength - 1)).trimEnd()}…`;
-}
-
-function StarMap({
-  originId,
-  destinationId,
-  running,
-}: {
-  originId: string;
-  destinationId: string;
-  running: boolean;
-}) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const context = canvas.getContext("2d");
-    if (!context) return;
-
-    const draw = () => {
-      const bounds = canvas.getBoundingClientRect();
-      const ratio = Math.min(window.devicePixelRatio || 1, 2);
-      canvas.width = Math.max(1, Math.floor(bounds.width * ratio));
-      canvas.height = Math.max(1, Math.floor(bounds.height * ratio));
-      context.setTransform(ratio, 0, 0, ratio, 0, 0);
-      context.clearRect(0, 0, bounds.width, bounds.height);
-
-      const gradient = context.createRadialGradient(
-        bounds.width * 0.56,
-        bounds.height * 0.46,
-        10,
-        bounds.width * 0.56,
-        bounds.height * 0.46,
-        bounds.width * 0.72,
-      );
-      gradient.addColorStop(0, "rgba(27, 47, 54, 0.34)");
-      gradient.addColorStop(1, "rgba(4, 9, 12, 0)");
-      context.fillStyle = gradient;
-      context.fillRect(0, 0, bounds.width, bounds.height);
-
-      for (let index = 0; index < 92; index += 1) {
-        const x = ((index * 79) % 997) / 997;
-        const y = ((index * 131 + 17) % 991) / 991;
-        const alpha = 0.18 + ((index * 17) % 48) / 100;
-        context.fillStyle = `rgba(205, 224, 221, ${alpha})`;
-        context.fillRect(
-          x * bounds.width,
-          y * bounds.height,
-          index % 11 === 0 ? 1.6 : 0.8,
-          index % 11 === 0 ? 1.6 : 0.8,
-        );
-      }
-
-      const originIndex = STAR_SYSTEMS.findIndex(
-        (system) => system.id === originId,
-      );
-      const destinationIndex = STAR_SYSTEMS.findIndex(
-        (system) => system.id === destinationId,
-      );
-      const start = Math.min(originIndex, destinationIndex);
-      const end = Math.max(originIndex, destinationIndex);
-      const route = STAR_SYSTEMS.slice(start, end + 1);
-
-      context.lineWidth = 1;
-      context.setLineDash([6, 9]);
-      context.strokeStyle = running
-        ? "rgba(235, 177, 77, 0.72)"
-        : "rgba(121, 182, 183, 0.42)";
-      context.beginPath();
-      route.forEach((system, index) => {
-        const x = (system.x / 100) * bounds.width;
-        const y = (system.y / 100) * bounds.height;
-        if (index === 0) context.moveTo(x, y);
-        else context.lineTo(x, y);
-      });
-      context.stroke();
-      context.setLineDash([]);
-
-      STAR_SYSTEMS.forEach((system) => {
-        const x = (system.x / 100) * bounds.width;
-        const y = (system.y / 100) * bounds.height;
-        const selected =
-          system.id === originId || system.id === destinationId;
-        context.beginPath();
-        context.arc(x, y, selected ? 4.5 : 2.5, 0, Math.PI * 2);
-        context.fillStyle = selected ? "#eab34f" : "#9cc3c2";
-        context.fill();
-        if (selected) {
-          context.beginPath();
-          context.arc(x, y, 10, 0, Math.PI * 2);
-          context.strokeStyle = "rgba(234, 179, 79, 0.4)";
-          context.stroke();
-        }
-        context.font =
-          selected
-            ? '600 11px "Microsoft YaHei", sans-serif'
-            : '400 10px "Microsoft YaHei", sans-serif';
-        context.fillStyle = selected
-          ? "rgba(244, 224, 181, 0.92)"
-          : "rgba(160, 184, 182, 0.7)";
-        context.fillText(system.name, x + 10, y - 8);
-      });
-    };
-
-    draw();
-    const observer = new ResizeObserver(draw);
-    observer.observe(canvas);
-    return () => observer.disconnect();
-  }, [destinationId, originId, running]);
-
-  return (
-    <canvas
-      ref={canvasRef}
-      className="star-map"
-      aria-label="星际航路图"
-    />
-  );
-}
-
-function StatusPill({
-  tone,
-  children,
-}: {
-  tone: SystemTone;
-  children: ReactNode;
-}) {
-  return <span className={`status-pill status-${tone}`}>{children}</span>;
-}
-
-function VoyageView({
-  origin,
-  destination,
-  missionStarted,
-  directive,
-  state,
-  cooling,
-  electrical,
-  compartments,
-  navigation,
-  rotation,
-}: {
-  origin: string;
-  destination: string;
-  missionStarted: boolean;
-  directive: string;
-  state: ShipState | null;
-  cooling: CoolingTelemetry | null;
-  electrical: ElectricalTelemetry | null;
-  compartments: CompartmentTelemetry | null;
-  navigation: NavigationTelemetry | null;
-  rotation: RotationTelemetry["observed"] | null;
-}) {
-  const originSystem = STAR_SYSTEMS.find((system) => system.id === origin)!;
-  const destinationSystem = STAR_SYSTEMS.find(
-    (system) => system.id === destination,
-  )!;
-  const distanceLightYears = Math.max(
-    0.1,
-    Math.abs(
-      destinationSystem.distanceFromSolLy - originSystem.distanceFromSolLy,
-    ),
-  );
-  const routeLegs = Math.max(1, Math.ceil(distanceLightYears / 2.5));
-  const observedCoolantTemperatureK =
-    cooling?.observed.averageCoolantTemperatureK ?? null;
-  const observedRadiatedPowerW =
-    cooling?.observed.totalRadiatedPowerW ?? null;
-  const observedPressurePa =
-    compartments?.observedPressureAveragePa ?? null;
-  const observedOxygenReadings =
-    compartments?.zones
-      .map((zone) => zone.observed.oxygenPartialPressurePa)
-      .filter((value): value is number => value !== null) ?? [];
-  const observedOxygenPartialPressurePa =
-    observedOxygenReadings.length === 0
-      ? null
-      : observedOxygenReadings.reduce(
-          (total, value) => total + value,
-          0,
-        ) / observedOxygenReadings.length;
-  const observedGenerationKw =
-    electrical?.observed.totalReactorOutputKw ?? null;
-  const observedServedPowerKw =
-    electrical?.observed.totalServedPowerKw ?? null;
-  const observedBusVoltageV =
-    electrical?.observed.averageBusVoltageV ?? null;
-  const observedBusFrequencyHz =
-    electrical?.observed.averageBusFrequencyHz ?? null;
-  const observedFusionFuelMassKg =
-    navigation?.observed.fusionFuelMassKg ?? null;
-  const observedRingA =
-    rotation?.rings.find((ring) => ring.id === "ring-a") ?? null;
-  const observedRingB =
-    rotation?.rings.find((ring) => ring.id === "ring-b") ?? null;
-  const observedRingGravityReadings = [
-    observedRingA?.artificialGravityG,
-    observedRingB?.artificialGravityG,
-  ].filter((value): value is number => value !== null && value !== undefined);
-  const observedAverageRingGravityG =
-    observedRingGravityReadings.length === 0
-      ? null
-      : observedRingGravityReadings.reduce(
-          (total, value) => total + value,
-          0,
-        ) / observedRingGravityReadings.length;
-  const observedPeakRingVibrationMmPerS = Math.max(
-    observedRingA?.vibrationMmPerS ?? 0,
-    observedRingB?.vibrationMmPerS ?? 0,
-  );
-  const ringTone: SystemTone =
-    observedAverageRingGravityG === null
-      ? "watch"
-      : observedAverageRingGravityG < 0.8 ||
-          observedAverageRingGravityG > 1.15 ||
-          observedPeakRingVibrationMmPerS > 7.1
-        ? "critical"
-        : observedAverageRingGravityG < 0.92 ||
-            observedAverageRingGravityG > 1.08 ||
-            observedPeakRingVibrationMmPerS > 3.5
-          ? "watch"
-          : "nominal";
-  const electricalTone: SystemTone =
-    observedBusVoltageV === null ||
-    observedBusFrequencyHz === null
-      ? "watch"
-      : observedBusVoltageV < 10_450 ||
-          observedBusFrequencyHz < 49.5
-        ? "critical"
-        : "nominal";
-  const systems: SystemCard[] = state
-    ? [
-        {
-          name: "聚变电网",
-          value:
-            observedGenerationKw === null
-              ? "读数建立中"
-              : `${(observedGenerationKw / 1_000).toFixed(0)} MW`,
-          detail:
-            observedServedPowerKw === null
-              ? "电网传感器延迟"
-              : `观测供给 ${(observedServedPowerKw / 1_000).toFixed(0)} MW`,
-          load:
-            observedGenerationKw === null ||
-            observedServedPowerKw === null
-              ? 0
-              : Math.min(
-                  100,
-                  (observedServedPowerKw /
-                    Math.max(observedGenerationKw, 1)) *
-                    100,
-                ),
-          tone: electricalTone,
-        },
-        {
-          name: "热管理",
-          value:
-            observedCoolantTemperatureK === null
-              ? "读数建立中"
-              : `${observedCoolantTemperatureK.toFixed(1)} K`,
-          detail:
-            observedRadiatedPowerW === null
-              ? "双回路传感器延迟"
-              : `观测散热 ${(observedRadiatedPowerW / 1_000_000).toFixed(1)} MW`,
-          load: Math.min(
-            100,
-            (state.thermal.internalHeatKw /
-              Math.max(
-                (observedRadiatedPowerW ?? 0) / 1_000,
-                1,
-              )) *
-              100,
-          ),
-          tone:
-            observedCoolantTemperatureK === null
-              ? "watch"
-              : observedCoolantTemperatureK > 360
-                ? "critical"
-                : "nominal",
-        },
-        {
-          name: "生命保障",
-          value:
-            observedPressurePa === null
-              ? "读数建立中"
-              : `${(observedPressurePa / 1_000).toFixed(1)} kPa`,
-          detail:
-            observedOxygenPartialPressurePa === null
-              ? "氧分压传感器延迟"
-              : `O₂ 观测 ${(observedOxygenPartialPressurePa / 1_000).toFixed(1)} kPa`,
-          load: Math.min(
-            100,
-            (state.population.awake /
-              Math.max(state.population.total, 1)) *
-              100 +
-              55,
-          ),
-          tone:
-            observedPressurePa === null
-              ? "watch"
-              : observedPressurePa < 75_000
-                ? "critical"
-                : "nominal",
-        },
-        {
-          name: "火炬推进",
-          value:
-            observedFusionFuelMassKg === null
-              ? "读数建立中"
-              : `${(observedFusionFuelMassKg / 1_000).toFixed(2)} t`,
-          detail:
-            observedFusionFuelMassKg === null
-              ? "聚变燃料计量延迟"
-              : `推进剂观测 ${
-                  navigation?.observed.propellantMassKg === null ||
-                  navigation?.observed.propellantMassKg === undefined
-                    ? "建立中"
-                    : `${(
-                        navigation.observed.propellantMassKg /
-                        1_000_000
-                      ).toFixed(2)} kt`
-                }`,
-          load:
-            observedFusionFuelMassKg === null
-              ? 0
-              : Math.min(
-                  100,
-                  Math.max(
-                    0,
-                    (observedFusionFuelMassKg / 24_000) * 100,
-                  ),
-                ),
-          tone:
-            observedFusionFuelMassKg === null
-              ? "watch"
-              : observedFusionFuelMassKg < 2_400
-                ? "critical"
-                : "nominal",
-        },
-        {
-          name: "旋转居住环",
-          value:
-            observedAverageRingGravityG === null
-              ? "读数建立中"
-              : `${observedAverageRingGravityG.toFixed(3)} g`,
-          detail:
-            observedRingA?.relativeRpm === null ||
-            observedRingA?.relativeRpm === undefined ||
-            observedRingB?.relativeRpm === null ||
-            observedRingB?.relativeRpm === undefined
-              ? "双环转速传感器延迟"
-              : `A ${observedRingA.relativeRpm >= 0 ? "+" : ""}${observedRingA.relativeRpm.toFixed(3)} · B ${observedRingB.relativeRpm >= 0 ? "+" : ""}${observedRingB.relativeRpm.toFixed(3)} rpm`,
-          load:
-            observedAverageRingGravityG === null
-              ? 0
-              : Math.min(100, observedAverageRingGravityG * 100),
-          tone: ringTone,
-        },
-        {
-          name: "跃迁储能",
-          value: `${((state.journey.jumpDriveChargeKWh / state.journey.jumpDriveCapacityKWh) * 100).toFixed(1)}%`,
-          detail:
-            state.journey.status === "ready"
-              ? "储能完成 · 等待舰长"
-              : state.journey.status === "arrived"
-                ? "任务结束 · 联锁"
-                : "充能中 · 联锁保持",
-          load:
-            (state.journey.jumpDriveChargeKWh /
-              state.journey.jumpDriveCapacityKWh) *
-            100,
-          tone:
-            state.journey.status === "ready" ||
-            state.journey.status === "arrived"
-              ? "nominal"
-              : "watch",
-        },
-      ]
-    : INITIAL_SYSTEMS;
-
-  return (
-    <section className="view-grid voyage-view" aria-label="航程总览">
-      <div className="panel map-panel">
-        <div className="panel-heading">
-          <div>
-            <span className="eyebrow">NAVIGATION / 跃迁航路</span>
-            <h2>
-              {originSystem.name} <i>→</i> {destinationSystem.name}
-            </h2>
-          </div>
-          <StatusPill tone={missionStarted ? "nominal" : "watch"}>
-            {missionStarted ? "航路执行中" : "等待签发"}
-          </StatusPill>
-        </div>
-        <div className="map-stage">
-          <StarMap
-            originId={origin}
-            destinationId={destination}
-            running={missionStarted}
-          />
-          <div className="map-readout map-readout-left">
-            <span>直线距离</span>
-            <strong>{distanceLightYears.toFixed(2)} LY</strong>
-          </div>
-          <div className="map-readout map-readout-right">
-            <span>预计节点</span>
-            <strong>{String(routeLegs + 1).padStart(2, "0")}</strong>
-          </div>
-          {missionStarted && (
-            <div
-              className="vessel-marker"
-              aria-label="远穹号当前位置"
-              style={{
-                left: `${18 + Math.min(1, (state?.journey.completedDistanceLightYears ?? 0) / Math.max(state?.journey.totalDistanceLightYears ?? 1, 0.1)) * 64}%`,
-              }}
-            >
-              <span />
-              Y-01
-            </div>
-          )}
-        </div>
-        <div className="directive-strip">
-          <span className="directive-seal">最高指令</span>
-          <p>{directive}</p>
-        </div>
-      </div>
-
-      <div className="panel ship-panel">
-        <div className="panel-heading compact">
-          <div>
-            <span className="eyebrow">VESSEL / Y-01</span>
-            <h2>远穹级移民舰</h2>
-          </div>
-          <span className="micro-code">820M · 2,120 SOULS</span>
-        </div>
-        <div className="ship-schematic" aria-label="远穹号舰体示意">
-          <div className="ship-shield" />
-          <div className="ship-spine" />
-          <div className="ship-ring ring-alpha">
-            <span>A</span>
-          </div>
-          <div className="ship-ring ring-beta">
-            <span>B</span>
-          </div>
-          <div className="ship-core" />
-          <div className="ship-engine engine-one" />
-          <div className="ship-engine engine-two" />
-          <div className="ship-engine engine-three" />
-          <div className="ship-axis" />
-        </div>
-        <div className="ship-facts">
-          <div>
-            <span>双环平均重力</span>
-            <strong>
-              {observedAverageRingGravityG === null
-                ? "建立中"
-                : `${observedAverageRingGravityG.toFixed(3)} g`}
-            </strong>
-          </div>
-          <div>
-            <span>压力分区</span>
-            <strong>48</strong>
-          </div>
-          <div>
-            <span>应急自持</span>
-            <strong>5 年</strong>
-          </div>
-        </div>
-      </div>
-
-      <div className="systems-row">
-        {systems.map((system) => (
-          <article className="system-card" key={system.name}>
-            <div className="system-card-top">
-              <span>{system.name}</span>
-              <StatusPill tone={system.tone}>
-                {system.tone === "critical"
-                  ? "告警"
-                  : system.tone === "watch"
-                    ? "进行"
-                    : "正常"}
-              </StatusPill>
-            </div>
-            <strong>{system.value}</strong>
-            <p>{system.detail}</p>
-            <div className="meter">
-              <i style={{ width: `${system.load}%` }} />
-            </div>
-          </article>
-        ))}
-      </div>
-    </section>
-  );
-}
-
-function ShipView({
-  state,
-  compartments,
-  cooling,
-  electrical,
-  rotation,
-  waterRecovery,
-  maintenance,
-}: {
-  state: ShipState | null;
-  compartments: CompartmentTelemetry | null;
-  cooling: CoolingTelemetry | null;
-  electrical: ElectricalTelemetry | null;
-  rotation: RotationTelemetry["observed"] | null;
-  waterRecovery: WaterRecoveryTelemetry | null;
-  maintenance: MaintenanceTelemetry | null;
-}) {
-  const criticalZones =
-    compartments?.zones.filter(
-      (zone) => zone.condition === "critical",
-    ).length ?? 0;
-  const watchZones =
-    compartments?.zones.filter(
-      (zone) => zone.condition === "watch",
-    ).length ?? 0;
-  const offlineZones =
-    compartments?.zones.filter(
-      (zone) => zone.condition === "offline",
-    ).length ?? 0;
-  const overallTone: SystemTone =
-    criticalZones > 0
-      ? "critical"
-      : watchZones > 0 || offlineZones > 0
-        ? "watch"
-        : "nominal";
-  const electricalReading = (
-    targetId: string,
-    quantity: ElectricalTelemetry["sensors"][number]["quantity"],
-  ) =>
-    electrical?.sensors.find(
-      (sensor) =>
-        sensor.targetId === targetId &&
-        sensor.quantity === quantity,
-    )?.value ?? null;
-  const busAServedPowerKw = electricalReading(
-    "bus-a",
-    "servedPowerKw",
-  );
-  const busBServedPowerKw = electricalReading(
-    "bus-b",
-    "servedPowerKw",
-  );
-  const busAVoltageV = electricalReading("bus-a", "voltageV");
-  const busBVoltageV = electricalReading("bus-b", "voltageV");
-  const observedRingA =
-    rotation?.rings.find((ring) => ring.id === "ring-a") ?? null;
-  const observedRingB =
-    rotation?.rings.find((ring) => ring.id === "ring-b") ?? null;
-  const ringNetwork = (
-    label: string,
-    ring: RotationTelemetry["observed"]["rings"][number] | null,
-  ): readonly [string, string, number] => [
-    ring?.relativeRpm === null || ring?.relativeRpm === undefined
-      ? `${label} · 转速建立中`
-      : `${label} · ${ring.relativeRpm >= 0 ? "+" : ""}${ring.relativeRpm.toFixed(2)} rpm`,
-    ring?.artificialGravityG === null ||
-    ring?.artificialGravityG === undefined
-      ? "读数建立中"
-      : `${ring.artificialGravityG.toFixed(3)} g`,
-    ring?.artificialGravityG === null ||
-    ring?.artificialGravityG === undefined
-      ? 0
-      : Math.min(100, ring.artificialGravityG * 100),
-  ];
-  const airHandlerNetwork = (
-    ring: "A" | "B",
-  ): readonly [string, string, number] => {
-    const controller = compartments?.airHandlers.controllers.find(
-      (handler) => handler.ring === ring,
-    );
-    const carbonDioxideReadings =
-      compartments?.zones
-        .filter((zone) => zone.zoneId.startsWith(`${ring}-`))
-        .map(
-          (zone) => zone.observed.carbonDioxidePartialPressurePa,
-        )
-        .filter((value): value is number => value !== null) ?? [];
-    const observedCarbonDioxidePa =
-      carbonDioxideReadings.length === 0
-        ? null
-        : carbonDioxideReadings.reduce(
-            (total, value) => total + value,
-            0,
-          ) / carbonDioxideReadings.length;
-    return [
-      `空气处理 ${ring}`,
-      controller
-        ? `${controller.scrubberEnabled ? "吸附" : "旁路"} · ${observedCarbonDioxidePa === null ? "CO₂ —" : `CO₂ ${observedCarbonDioxidePa.toFixed(0)} Pa`}`
-        : "控制器建立中",
-      (controller?.commandedFlowFraction ?? 0) * 100,
-    ];
-  };
-  const waterProcessorNetwork = (
-    ring: "a" | "b",
-  ): readonly [string, string, number] => {
-    const controller = waterRecovery?.controllers.find(
-      (processor) => processor.ring === ring,
-    );
-    const processorId: WaterProcessorId =
-      ring === "a" ? "water-processor-a" : "water-processor-b";
-    const observed = waterRecovery?.observed;
-    return [
-      `水回收 ${ring.toUpperCase()}`,
-      controller && observed
-        ? `${(observed.processorThroughputKgPerDay[processorId] / 1_000).toFixed(1)}t/d · ${(observed.potableKgByRing[ring] / 1_000_000).toFixed(2)}kt`
-        : controller
-          ? `${(controller.commandedThroughputFraction * 100).toFixed(0)}% · 水量 —`
-          : "控制器建立中",
-      (controller?.commandedThroughputFraction ?? 0) * 100,
-    ];
-  };
-  const maintenanceProgressPercent = maintenance?.activeTasks.length
-    ? Math.min(
-        100,
-        (maintenance.activeTasks.reduce(
-          (total, task) =>
-            total +
-            task.completedWorkSeconds / task.requiredWorkSeconds,
-          0,
-        ) /
-          maintenance.activeTasks.length) *
-          100,
-      )
-    : 0;
-  const networks: ReadonlyArray<readonly [string, string, number]> = [
-    [
-      "主电网 A",
-      busAServedPowerKw === null
-        ? "读数建立中"
-        : `${(busAServedPowerKw / 1_000).toFixed(0)} MW`,
-      busAVoltageV === null
-        ? 0
-        : Math.min(100, (busAVoltageV / 11_000) * 100),
-    ],
-    [
-      "主电网 B",
-      busBServedPowerKw === null
-        ? "读数建立中"
-        : `${(busBServedPowerKw / 1_000).toFixed(0)} MW`,
-      busBVoltageV === null
-        ? 0
-        : Math.min(100, (busBVoltageV / 11_000) * 100),
-    ],
-    [
-      "冷却母线",
-      cooling?.observed.averageCoolantTemperatureK === null ||
-      cooling?.observed.averageCoolantTemperatureK === undefined
-        ? "读数建立中"
-        : `${cooling.observed.averageCoolantTemperatureK.toFixed(1)} K`,
-      state &&
-      cooling?.observed.totalRadiatedPowerW !== null &&
-      cooling?.observed.totalRadiatedPowerW !== undefined
-        ? Math.min(
-            100,
-            (state.thermal.internalHeatKw /
-              Math.max(
-                cooling.observed.totalRadiatedPowerW / 1_000,
-                1,
-              )) *
-              100,
-          )
-        : 0,
-    ],
-    ringNetwork("A 环", observedRingA),
-    ringNetwork("B 环", observedRingB),
-    airHandlerNetwork("A"),
-    airHandlerNetwork("B"),
-    waterProcessorNetwork("a"),
-    waterProcessorNetwork("b"),
-    [
-      "大气总压",
-      compartments?.observedPressureAveragePa === null ||
-      compartments?.observedPressureAveragePa === undefined
-        ? "读数建立中"
-        : `${(compartments.observedPressureAveragePa / 1_000).toFixed(1)} kPa`,
-      compartments?.observedPressureAveragePa === null ||
-      compartments?.observedPressureAveragePa === undefined
-        ? 0
-        : Math.min(
-            100,
-            (compartments.observedPressureAveragePa / 101_325) * 100,
-          ),
-    ],
-    [
-      "净水回收",
-      state ? `${(state.water.recyclerEfficiency * 100).toFixed(1)}%` : "98.1%",
-      state ? state.water.recyclerEfficiency * 100 : 81,
-    ],
-    [
-      "维修与备件",
-      maintenance
-        ? maintenance.activeTasks.length > 0
-          ? `${maintenance.activeTasks.length} 项进行中 · ${Math.round(maintenanceProgressPercent)}%`
-          : `待命 · ${Object.values(maintenance.inventory).reduce((total, quantity) => total + quantity, 0)} 件备件`
-        : "诊断总线建立中",
-      maintenanceProgressPercent,
-    ],
-    [
-      "外部辐射",
-      state
-        ? `${state.environment.radiationDoseRateMilliSievertsPerHour.toFixed(3)} mSv/h`
-        : "0.012 mSv/h",
-      state
-        ? Math.min(
-            100,
-            state.environment.radiationDoseRateMilliSievertsPerHour * 20,
-          )
-        : 24,
-    ],
-  ];
-  return (
-    <section className="view-grid detail-view" aria-label="舰体系统">
-      <div className="panel topology-panel">
-        <div className="panel-heading">
-          <div>
-            <span className="eyebrow">SYSTEM TOPOLOGY / 舰体网络</span>
-            <h2>能量与生命保障拓扑</h2>
-          </div>
-          <StatusPill tone={overallTone}>
-            {criticalZones > 0
-              ? `${criticalZones} 区告警`
-              : watchZones > 0
-                ? `${watchZones} 区关注`
-                : offlineZones > 0
-                  ? "传感器建立中"
-                  : "全域稳定"}
-          </StatusPill>
-        </div>
-        <div className="topology-grid">
-          <div className="topology-core">
-            <span>聚变母线</span>
-            <strong>
-              {electrical?.observed.totalReactorOutputKw === null ||
-              electrical?.observed.totalReactorOutputKw === undefined
-                ? "读数建立中"
-                : `${(electrical.observed.totalReactorOutputKw / 1_000).toFixed(0)} MW`}
-            </strong>
-          </div>
-          {["A 环", "B 环", "工程脊柱", "休眠舱群"].map((label, index) => (
-            <div
-              className={`topology-node topology-node-${index + 1}`}
-              key={label}
-            >
-              <span>{label}</span>
-              <i />
-            </div>
-          ))}
-        </div>
-      </div>
-      <div className="panel network-panel">
-        <div className="panel-heading compact">
-          <div>
-            <span className="eyebrow">LIVE NETWORKS</span>
-            <h2>实时负载</h2>
-          </div>
-        </div>
-        <div className="network-list">
-          {networks.map(([name, value, load]) => (
-            <div className="network-row" key={name}>
-              <span>{name}</span>
-              <div className="meter">
-                <i style={{ width: `${load}%` }} />
-              </div>
-              <strong>{value}</strong>
-            </div>
-          ))}
-        </div>
-        <p className="panel-note">
-          {maintenance?.activeTasks[0]
-            ? `${maintenance.activeTasks[0].id} · ${maintenance.activeTasks[0].assetId} · ${maintenance.activeTasks[0].assignedRobotId} / ${maintenance.activeTasks[0].assignedCrewId}${maintenance.activeTasks[0].blockedReason ? ` · 阻塞：${maintenance.activeTasks[0].blockedReason}` : ""}`
-            : maintenance
-              ? "维修机器人待命；备件只会在任务创建时锁定并消耗。"
-              : "正在连接维修诊断与备件账本。"}
-        </p>
-      </div>
-      <div className="panel sector-panel">
-        <div className="panel-heading compact">
-          <div>
-            <span className="eyebrow">PRESSURE SECTORS</span>
-            <h2>48 个主要压力区</h2>
-          </div>
-        </div>
-        <div className="sector-matrix">
-          {(compartments?.zones ??
-            Array.from({ length: 48 }, (_, index) => ({
-              zoneId: `${index < 24 ? "A" : "B"}-${String(
-                (index % 24) + 1,
-              ).padStart(2, "0")}`,
-              condition: "offline" as const,
-              hasBreach: false,
-              observed: { pressurePa: null },
-            }))).map((zone) => (
-            <span
-              key={zone.zoneId}
-              className={`sector-${zone.condition}`}
-              role="img"
-              tabIndex={0}
-              aria-label={`${zone.zoneId}，${
-                zone.observed.pressurePa === null
-                  ? "压力遥测等待中"
-                  : `压力 ${(zone.observed.pressurePa / 1_000).toFixed(2)} 千帕，状态 ${zone.condition}`
-              }`}
-              title={`${zone.zoneId} · ${
-                zone.observed.pressurePa === null
-                  ? "压力遥测等待中"
-                  : `${(zone.observed.pressurePa / 1_000).toFixed(2)} kPa`
-              }`}
-            />
-          ))}
-        </div>
-        <p className="panel-note">
-          {compartments
-            ? compartments.fidelityLimited
-              ? `局部瞬态求解已接管：时间倍率由 ${compartments.requestedTimeScale.toLocaleString("zh-CN")}× 自动限至 ${compartments.effectiveTimeScale.toLocaleString("zh-CN")}×；外逸气体 ${compartments.totalVentedGasKg.toFixed(2)} kg。`
-              : `传感压力 ${
-                  compartments.observedPressureMinPa === null
-                    ? "等待首批延迟读数"
-                    : `${(compartments.observedPressureMinPa / 1_000).toFixed(2)}–${((compartments.observedPressureMaxPa ?? 0) / 1_000).toFixed(2)} kPa`
-                }；当前采用 ${compartments.fidelityMode === "equilibrium-fast" ? "平衡态快速求解" : "瞬态细分求解"}。`
-            : "正在连接 48 区压力遥测总线。"}
-        </p>
-      </div>
-    </section>
-  );
-}
-
-function PeopleView({
-  state,
-  highlights,
-  privateNotes,
-}: {
-  state: ShipState | null;
-  highlights: PassengerHighlightTelemetry[];
-  privateNotes: KeyPassengerPrivateNote[];
-}) {
-  const total = state?.population.total ?? 2_120;
-  const awake = state?.population.awake ?? 218;
-  const hibernating = state?.population.hibernating ?? 1_902;
-  const health = (state?.population.averageHealth ?? 0.985) * 100;
-  const morale = state?.population.averageMorale ?? 0.82;
-  const privateNoteByPassengerId = new Map(
-    privateNotes.map((note) => [note.passengerId, note]),
-  );
-  const displayedPassengers =
-    highlights.length > 0
-      ? highlights.map((person) => {
-          const privateNote = privateNoteByPassengerId.get(
-            person.passengerId,
-          );
-          return {
-          id: person.passengerId,
-          name: person.name,
-          role: person.occupation,
-          cabin: person.cabinId,
-          zoneId: person.zoneId,
-          zoneCondition: person.zoneCondition,
-          zoneObservation:
-            person.lifeState === "hibernating"
-              ? "休眠舱内 · 分配区非实时位置"
-              : person.lifeState === "deceased"
-                ? "个人区域记录已封存"
-                : person.zoneObservedPressurePa === null
-                  ? "区域遥测等待中"
-                  : `${(person.zoneObservedPressurePa / 1_000).toFixed(1)} kPa · ${person.zoneObservationAgeSeconds?.toFixed(0) ?? "?"}s`,
-          state:
-            person.lifeState === "awake"
-              ? "清醒"
-              : person.lifeState === "hibernating"
-                ? "休眠"
-                : "死亡",
-          trust: Math.round(person.trust * 100),
-          note:
-            person.lifeState === "deceased"
-              ? "个人记录已封存"
-              : privateNote
-                ? `私人终端 · ${formatDuration(privateNote.createdAtSimulationSeconds)}：${privateNote.text.slice(0, 220)}`
-                : `身体 ${(person.physicalHealth * 100).toFixed(0)}% · 压力 ${(person.stress * 100).toFixed(0)}% · 等待私人终端轮询`,
-          };
-        })
-      : PASSENGERS.map((person) => ({
-          ...person,
-          id: `preview:${person.cabin}`,
-          zoneId: "待映射",
-          zoneCondition: "offline" as const,
-          zoneObservation: "区域遥测等待中",
-        }));
-  return (
-    <section className="view-grid people-view" aria-label="乘员状态">
-      <div className="panel population-panel">
-        <div className="panel-heading">
-          <div>
-            <span className="eyebrow">POPULATION / 个体持续模拟</span>
-            <h2>{total.toLocaleString("zh-CN")} 名乘员</h2>
-          </div>
-          <StatusPill
-            tone={
-              health < 70
-                ? "critical"
-                : health < 90
-                  ? "watch"
-                  : "nominal"
-            }
-          >
-            {health < 70 ? "医疗告警" : health < 90 ? "需要关注" : "医疗稳定"}
-          </StatusPill>
-        </div>
-        <div className="population-orbit">
-          <div className="population-core">
-            <strong>{awake.toLocaleString("zh-CN")}</strong>
-            <span>当前清醒</span>
-          </div>
-          <div className="orbit-ring orbit-one" />
-          <div className="orbit-ring orbit-two" />
-          <span className="population-tag tag-awake">
-            {((awake / total) * 100).toFixed(1)}% 清醒
-          </span>
-          <span className="population-tag tag-sleep">
-            {hibernating.toLocaleString("zh-CN")} 休眠
-          </span>
-          <span className="population-tag tag-care">
-            {(state?.population.deceased ?? 0).toLocaleString("zh-CN")} 死亡
-          </span>
-        </div>
-        <div className="population-metrics">
-          <div>
-            <span>群体健康</span>
-            <strong>{health.toFixed(1)}%</strong>
-          </div>
-          <div>
-            <span>社会压力</span>
-            <strong>{morale > 0.75 ? "中低" : morale > 0.5 ? "偏高" : "危险"}</strong>
-          </div>
-          <div>
-            <span>休眠舱占用</span>
-            <strong>
-              {(state?.hibernation.occupiedPods ?? 1_902).toLocaleString("zh-CN")}
-            </strong>
-          </div>
-        </div>
-      </div>
-      <div className="panel passenger-panel">
-        <div className="panel-heading compact">
-          <div>
-            <span className="eyebrow">KEY PASSENGERS / 固定关键槽位 32</span>
-            <h2>关键乘客观察</h2>
-          </div>
-        </div>
-        <div className="passenger-list">
-          {displayedPassengers.map((passenger) => (
-            <article className="passenger-row" key={passenger.id}>
-              <div className="avatar">{passenger.name.slice(0, 1)}</div>
-              <div>
-                <strong>{passenger.name}</strong>
-                <span>
-                  {passenger.role} · {passenger.cabin} ·{" "}
-                  {passenger.zoneId}
-                </span>
-                <p>{passenger.note}</p>
-              </div>
-              <div className="passenger-state">
-                <StatusPill
-                  tone={
-                    passenger.state === "死亡" ||
-                    (passenger.state === "清醒" &&
-                      passenger.zoneCondition === "critical")
-                      ? "critical"
-                      : passenger.state === "清醒" &&
-                          passenger.zoneCondition === "nominal"
-                        ? "nominal"
-                        : "watch"
-                  }
-                >
-                  {passenger.state === "清醒" &&
-                  passenger.zoneCondition === "critical"
-                    ? "清醒 · 区域危险"
-                    : passenger.state === "清醒" &&
-                        passenger.zoneCondition === "watch"
-                      ? "清醒 · 区域关注"
-                      : passenger.state}
-                </StatusPill>
-                <span>信任 {passenger.trust}</span>
-                <span>
-                  {passenger.state === "休眠"
-                    ? "休眠舱生命保障"
-                    : passenger.state === "死亡"
-                      ? "区域记录封存"
-                      : `区域 ${
-                          passenger.zoneCondition === "nominal"
-                            ? "正常"
-                            : passenger.zoneCondition === "watch"
-                              ? "关注"
-                              : passenger.zoneCondition === "critical"
-                                ? "危险"
-                                : "离线"
-                        }`}
-                </span>
-                <span>{passenger.zoneObservation}</span>
-              </div>
-            </article>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function AiView({
-  status,
-  callPhase,
-  commandBus,
-}: {
-  status: LlmRuntimeStatus | null;
-  callPhase: LlmCallPhase;
-  commandBus: CommandBusTelemetry | null;
-}) {
-  const configuredSlotCount =
-    status?.agents.filter((agent) => agent.state !== "missing-secret")
-      .length ?? 0;
-  const configuredDepartmentCount =
-    status?.agents.filter(
-      (agent) =>
-        AI_ROSTER.some((department) => department.id === agent.id) &&
-        agent.state !== "missing-secret",
-    ).length ?? 0;
-  return (
-    <section className="view-grid ai-view" aria-label="固定多模型观察">
-      <div className="panel ai-roster-panel">
-        <div className="panel-heading">
-          <div>
-            <span className="eyebrow">FIXED INTELLIGENCE / 固定拓扑</span>
-            <h2>舰载智能组织</h2>
-          </div>
-          <StatusPill tone={status?.ready ? "nominal" : "watch"}>
-            8 部门 + 32 关键乘客
-          </StatusPill>
-        </div>
-        <div className="ai-roster">
-          {AI_ROSTER.map((agent, index) => {
-            const runtime = status?.agents.find(
-              (candidate) => candidate.id === agent.id,
-            );
-            const runtimeLabel =
-              runtime?.state === "ready"
-                ? "端点就绪"
-                : runtime?.state === "retrying"
-                  ? "持续重试中"
-                  : runtime?.state === "missing-secret"
-                    ? "缺少服务端密钥"
-                    : "检测配置";
-            return (
-              <article
-                className={`ai-agent ${index === 0 ? "ai-captain" : ""} agent-${runtime?.state ?? "checking"}`}
-                key={agent.id}
-              >
-                <div className="ai-glyph">
-                  {index === 0 ? "C" : `D${index}`}
-                </div>
-                <div>
-                  <span>{agent.role}</span>
-                  <strong>{agent.name}</strong>
-                  <p>{runtimeLabel}</p>
-                </div>
-                <div className="ai-agent-meta">
-                  <span>{agent.model}</span>
-                  <small>
-                    系统信息：
-                    {runtime
-                      ? formatCadence(
-                          runtime.routine.systemInfoIntervalSimSeconds,
-                        )
-                      : agent.cadence}
-                  </small>
-                </div>
-              </article>
-            );
-          })}
-        </div>
-      </div>
-      <div className="panel thought-panel">
-        <div className="panel-heading compact">
-          <div>
-            <span className="eyebrow">OBSERVER LOG / 不可篡改</span>
-            <h2>模型调用观察</h2>
-          </div>
-          <span className="live-mark">
-            {callPhase === "waiting"
-              ? "CALLING"
-              : callPhase === "error"
-                ? "BLOCKED"
-                : status?.ready
-                  ? "READY"
-                  : "LOCAL"}
-          </span>
-        </div>
-        <div className="thought-stream">
-          <div className="thought-line">
-            <span>PRECHECK</span>
-            <p>
-              固定组织拓扑已锁定；运行期间不存在创建、复制或提升新
-              LLM 的接口。
-            </p>
-          </div>
-          <div className="thought-line">
-            <span>CONFIG</span>
-            <p>
-              {status
-                ? `${configuredSlotCount} / ${status.fixedAgentCount} 个固定模型槽位已具备服务端密钥。`
-                : "正在读取本机服务器的模型配置状态。"}
-            </p>
-          </div>
-          <div className="thought-line accent">
-            <span>POLICY</span>
-            <p>
-              {status?.ready
-                ? callPhase === "waiting"
-                  ? "关键模型调用进行中，仿真时间已冻结；界面与重试状态继续响应。"
-                  : "所有固定部门可调用；每个角色仍只能读取自身获授权的观测。"
-                : "模型不可用时关键决策保持暂停，确定性安全控制器继续维持最后策略。"}
-            </p>
-          </div>
-        </div>
-        <div className="usage-grid">
-          <div>
-            <span>固定槽位</span>
-            <strong>{status?.fixedAgentCount ?? 8}</strong>
-          </div>
-          <div>
-            <span>已配置部门</span>
-            <strong>{configuredDepartmentCount} / 8</strong>
-          </div>
-          <div>
-            <span>累计 Token</span>
-            <strong>
-              {status?.usage.totalTokens.toLocaleString("zh-CN") ?? "0"}
-            </strong>
-          </div>
-        </div>
-        <div className="command-audit">
-          <div>
-            <span>COMMAND BUS / REVISION</span>
-            <strong>{commandBus?.revision ?? 0}</strong>
-          </div>
-          {(commandBus?.recentAudit ?? [])
-            .slice()
-            .reverse()
-            .slice(0, 4)
-            .map((entry) => (
-              <article key={entry.sequence}>
-                <span>
-                  #{entry.sequence} · {entry.actor}
-                </span>
-                <strong>{entry.kind}</strong>
-                <small
-                  className={
-                    entry.status === "succeeded"
-                      ? "audit-success"
-                      : "audit-rejected"
-                  }
-                >
-                  {entry.status === "succeeded"
-                    ? `接受 · r${entry.revisionAfter}`
-                    : `拒绝 · r${entry.revisionBefore}`}
-                </small>
-              </article>
-            ))}
-          {(commandBus?.recentAudit.length ?? 0) === 0 && (
-            <p>尚无世界内设备命令。</p>
-          )}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function GodView({
-  state,
-  compartments,
-  cooling,
-  electrical,
-  navigation,
-  rotation,
-  waterRecovery,
-  maintenance,
-  onCausalEvent,
-  onOverride,
-}: {
-  state: ShipState | null;
-  compartments: CompartmentTelemetry | null;
-  cooling: CoolingTelemetry | null;
-  electrical: ElectricalTelemetry | null;
-  navigation: NavigationTelemetry | null;
-  rotation: RotationTelemetry | null;
-  waterRecovery: WaterRecoveryTelemetry | null;
-  maintenance: MaintenanceTelemetry | null;
-  onCausalEvent: (eventId: string, label: string) => void;
-  onOverride: (
-    field: (typeof FORCE_FIELDS)[number],
-    value: number,
-  ) => void;
-}) {
-  const [fieldId, setFieldId] = useState<ForceFieldId>(
-    FORCE_FIELDS[0].id,
-  );
-  const selectedField =
-    FORCE_FIELDS.find((field) => field.id === fieldId) ?? FORCE_FIELDS[0];
-  const [value, setValue] = useState<string>(
-    selectedField.defaultValue,
-  );
-  const parsedValue = Number(value);
-  const valueIsValid = Number.isFinite(parsedValue) && parsedValue >= 0;
-
-  const changeField = (nextId: ForceFieldId) => {
-    const next =
-      FORCE_FIELDS.find((field) => field.id === nextId) ?? FORCE_FIELDS[0];
-    setFieldId(next.id);
-    setValue(next.defaultValue);
-  };
-
-  return (
-    <section className="view-grid god-view" aria-label="人工干预模式">
-      <div className="panel god-panel">
-        <div className="panel-heading">
-          <div>
-            <span className="eyebrow danger">EXTERNAL AUTHORITY / 世界之外</span>
-            <h2>人工干预模式</h2>
-          </div>
-          <StatusPill tone="critical">上帝权限</StatusPill>
-        </div>
-        <p className="god-intro">
-          这里的操作不属于舰长可用能力。所有变化将登记为外部质量、能量或状态注入，
-          随后的演化重新交还给物理引擎。
-        </p>
-        <div className="observer-truth-strip">
-          <div>
-            <span>世界真值 / 平均舱压</span>
-            <strong>
-              {state
-                ? `${(state.atmosphere.pressurePa / 1_000).toFixed(3)} kPa`
-                : "—"}
-            </strong>
-          </div>
-          <div>
-            <span>舰载观测 / 延迟均值</span>
-            <strong>
-              {compartments?.observedPressureAveragePa === null ||
-              compartments?.observedPressureAveragePa === undefined
-                ? "等待读数"
-                : `${(compartments.observedPressureAveragePa / 1_000).toFixed(3)} kPa`}
-            </strong>
-          </div>
-          <div>
-            <span>物理实体 / 活动破口</span>
-            <strong>{compartments?.activeBreaches ?? 0}</strong>
-          </div>
-          <div>
-            <span>空气处理真值 / A·B 实际风量</span>
-            <strong>
-              {compartments
-                ? compartments.airHandlers.truth
-                    .map(
-                      (handler) =>
-                        `${handler.ring} ${(handler.actualFlowFraction * 100).toFixed(0)}% · ${handler.condition}`,
-                    )
-                    .join(" / ")
-                : "—"}
-            </strong>
-          </div>
-          <div>
-            <span>水回收真值 / A·B 实际处理量</span>
-            <strong>
-              {waterRecovery
-                ? waterRecovery.truth.processors
-                    .map(
-                      (processor) =>
-                        `${processor.ring.toUpperCase()} ${(processor.actualThroughputKgPerSecond * 86_400).toFixed(0)} kg/d · ${processor.condition}`,
-                    )
-                    .join(" / ")
-                : "—"}
-            </strong>
-          </div>
-          <div>
-            <span>维修真值 / 活动任务与剩余备件</span>
-            <strong>
-              {maintenance
-                ? `${maintenance.activeTasks.length} 项 / ${Object.values(
-                    maintenance.inventory,
-                  ).reduce(
-                    (total, quantity) => total + quantity,
-                    0,
-                  )} 件`
-                : "—"}
-            </strong>
-          </div>
-          <div>
-            <span>热网络真值 / 最热点</span>
-            <strong>
-              {cooling
-                ? `${cooling.truth.hottestNodeTemperatureK.toFixed(2)} K`
-                : "—"}
-            </strong>
-          </div>
-          <div>
-            <span>电网真值 / 发电与缺供</span>
-            <strong>
-              {electrical
-                ? `${(electrical.truth.generationPowerKw / 1_000).toFixed(1)} / ${(electrical.truth.unservedPowerKw / 1_000).toFixed(1)} MW`
-                : "—"}
-            </strong>
-          </div>
-          <div>
-            <span>导航真值 / 动量闭合误差</span>
-            <strong>
-              {navigation
-                ? `${navigation.truth.linearMomentumClosureErrorKgMPerS.toExponential(2)} kg·m/s`
-                : "—"}
-            </strong>
-          </div>
-          <div>
-            <span>旋转真值 / A·B 居住重力</span>
-            <strong>
-              {rotation
-                ? rotation.truth.rings
-                    .map(
-                      (ring) =>
-                        `${ring.id === "ring-a" ? "A" : "B"} ${ring.artificialGravityG.toFixed(4)} g`,
-                    )
-                    .join(" · ")
-                : "—"}
-            </strong>
-          </div>
-          <div>
-            <span>旋转真值 / 净相对角动量</span>
-            <strong>
-              {rotation
-                ? `${rotation.truth.netRelativeRingAngularMomentumKgM2PerS.toExponential(2)} kg·m²/s`
-                : "—"}
-            </strong>
-          </div>
-          <div>
-            <span>旋转真值 / 轴承与结构振动</span>
-            <strong>
-              {rotation
-                ? rotation.truth.rings
-                    .map(
-                      (ring) =>
-                        `${ring.id === "ring-a" ? "A" : "B"} ${ring.bearingCondition} · ${ring.vibrationMmPerS.toFixed(2)} mm/s`,
-                    )
-                    .join(" / ")
-                : "—"}
-            </strong>
-          </div>
-        </div>
-        <div className="intervention-grid">
-          {[
-            [
-              "micrometeoroid",
-              "微流星体撞击",
-              "向外壳注入动量并形成等效微破口",
-            ],
-            [
-              "coolant-pump-seizure",
-              "冷却泵卡死",
-              "将真实泵转子锁为停转并由回路重新计算流量",
-            ],
-            [
-              "stellar-flare",
-              "恒星耀斑",
-              "注入外部辐射与粒子沉积产生的热负荷",
-            ],
-            [
-              "fusion-reactor-trip",
-              "聚变堆保护跳闸",
-              "触发真实堆保护与发电机断路器断开",
-            ],
-            [
-              "ring-bearing-degradation",
-              "居住环轴承劣化",
-              "令A环真实轴承进入劣化状态，后续振动、摩擦与废热由物理链路演化",
-            ],
-            [
-              "air-handler-trip",
-              "空气处理机跳停",
-              "令A环处理机实体跳停，后续环路混合与CO₂积累由分舱物理演化",
-            ],
-            [
-              "water-processor-trip",
-              "水回收机跳停",
-              "令A环水回收机实体跳停，后续净水消耗、废水积累与浓盐水产物由水网络演化",
-            ],
-            [
-              "passenger-emergency",
-              "乘客急症",
-              "从持久化乘员名册选择清醒个体并写入病例",
-            ],
-          ].map(([eventId, label, detail]) => (
-            <button
-              className="event-button"
-              key={label}
-              onClick={() => onCausalEvent(eventId, label)}
-              type="button"
-            >
-              <span>触发事件</span>
-              <strong>{label}</strong>
-              <small>{detail}</small>
-            </button>
-          ))}
-        </div>
-      </div>
-      <div className="panel override-panel">
-        <div className="panel-heading compact">
-          <div>
-            <span className="eyebrow">DIRECT OVERRIDE</span>
-            <h2>原力覆写</h2>
-          </div>
-        </div>
-        <label>
-          目标字段
-          <select
-            value={fieldId}
-            onChange={(event) =>
-              changeField(event.target.value as ForceFieldId)
-            }
-          >
-            {FORCE_FIELDS.map((field) => (
-              <option value={field.id} key={field.id}>
-                {field.label} / {field.unit}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          新数值
-          <input
-            value={value}
-            onChange={(event) => setValue(event.target.value)}
-            inputMode="decimal"
-          />
-        </label>
-        {!valueIsValid && (
-          <small className="field-error">仅接受有限的非负数值</small>
-        )}
-        <button
-          className="override-button"
-          onClick={() => onOverride(selectedField, parsedValue)}
-          type="button"
-          disabled={!valueIsValid}
-        >
-          写入外部状态
-        </button>
-        <div className="observer-lock">
-          <span>LLM 内部状态</span>
-          <strong>仅观测 · 禁止覆写</strong>
-        </div>
-      </div>
-    </section>
-  );
-}
 
 export function MissionControl() {
   const [activeView, setActiveView] = useState<ViewId>("voyage");
   const [missionStarted, setMissionStarted] = useState(false);
   const [paused, setPaused] = useState(true);
-  const [timeScale, setTimeScale] = useState(60);
+  const [timeScale, setTimeScale] = useState(1_800);
   const [simulationSeconds, setSimulationSeconds] = useState(0);
   const [engineState, setEngineState] = useState<ShipState | null>(null);
   const [compartmentState, setCompartmentState] =
@@ -2552,6 +679,9 @@ export function MissionControl() {
     useState<LlmRuntimeStatus | null>(null);
   const [llmCallPhase, setLlmCallPhase] =
     useState<LlmCallPhase>("idle");
+  const [captainDecisionLog, setCaptainDecisionLog] = useState<
+    import("@/app/ui/types").CaptainDecisionEntry[]
+  >([]);
   const [missionEnded, setMissionEnded] = useState(false);
   const [finalReport, setFinalReport] =
     useState<FinalJourneyReport | null>(null);
@@ -2562,7 +692,15 @@ export function MissionControl() {
     "以乘员存续为最高原则，将远穹号安全送达目标星系；允许舰长根据实际风险自主规划航路与清醒比例。",
   );
   const [events, setEvents] = useState<TimelineEvent[]>(INITIAL_EVENTS);
+  const [eventFilter, setEventFilter] = useState<"all" | SystemTone>("all");
   const [toast, setToast] = useState("");
+  const [lastSaveTime, setLastSaveTime] = useState<string | null>(null);
+  const [activeAlerts, setActiveAlerts] = useState<ActiveAlert[]>([]);
+  const knownAlertIds = useRef(new Set<string>());
+  const audio = useAudio();
+  const proceduralScheduler = useRef(
+    new ProceduralEventScheduler(Date.now() & 0xffffffff),
+  );
   const eventId = useRef(10);
   const knownMaintenanceCompletionIds = useRef(new Set<string>());
   const workerRef = useRef<Worker | null>(null);
@@ -2642,6 +780,15 @@ export function MissionControl() {
         (left, right) => left.ordinal - right.ordinal,
       );
       activeCaptainWorldCommandQueue.current = null;
+      // ─── 决策日志：记录执行回执 ─────────────────────────
+      setCaptainDecisionLog((prev) =>
+        prev.map((entry) =>
+          entry.triggerKey === queue.triggerKey &&
+          (entry.status === "decided" || entry.status === "executing")
+            ? { ...entry, status: "done" as const, receipts: [...queue.receipts].sort((l, r) => l.ordinal - r.ordinal) }
+            : entry,
+        ),
+      );
       if (
         queue.resumeAfterCompletion &&
         !latestMissionEnded.current
@@ -2887,6 +1034,7 @@ export function MissionControl() {
           "farhorizon-save",
           JSON.stringify(save),
         );
+        setLastSaveTime(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }));
         if (
           !pendingSave.metadata.paused &&
           !latestMissionEnded.current
@@ -2950,6 +1098,58 @@ export function MissionControl() {
       setRotationState(event.payload.rotation);
       setWaterRecoveryState(event.payload.waterRecovery);
       setMaintenanceState(event.payload.maintenance);
+
+      // ─── 警报检测 ─────────────────────────────────────────
+      const newAlerts = detectAlerts(
+        event.payload.state,
+        event.payload.electrical,
+        event.payload.cooling,
+        event.payload.compartments,
+        event.payload.elapsedSeconds,
+        knownAlertIds.current,
+      );
+      if (newAlerts.length > 0) {
+        for (const alert of newAlerts) {
+          knownAlertIds.current.add(alert.id);
+        }
+        setActiveAlerts((prev) => [...newAlerts, ...prev].slice(0, 20));
+        const highest = newAlerts.some((a) => a.level === "critical")
+          ? "critical"
+          : newAlerts.some((a) => a.level === "warning")
+            ? "warning"
+            : "watch";
+        if (highest === "critical") audio.playAlertCritical();
+        else if (highest === "warning") audio.playAlertWarning();
+        else audio.playAlertWatch();
+      }
+
+      // ─── 程序化事件检测 ─────────────────────────────────────
+      if (missionStarted && !latestMissionEnded.current) {
+        const procEvents = proceduralScheduler.current.check(
+          event.payload.elapsedSeconds,
+        );
+        for (const procEvent of procEvents) {
+          const timelineEventId = ++eventId.current;
+          setEvents((current) =>
+            prependTimelineEvent(current, {
+              id: timelineEventId,
+              at: formatDuration(event.payload.elapsedSeconds),
+              source: procEvent.source,
+              text: procEvent.message,
+              tone:
+                procEvent.severity === "critical"
+                  ? "critical"
+                  : procEvent.severity === "warning"
+                    ? "watch"
+                    : "nominal",
+            }),
+          );
+          if (procEvent.severity === "warning" || procEvent.severity === "critical") {
+            audio.playAlertWatch();
+          }
+        }
+      }
+
       for (const task of event.payload.maintenance.recentCompletedTasks) {
         if (knownMaintenanceCompletionIds.current.has(task.id)) {
           continue;
@@ -3191,6 +1391,37 @@ export function MissionControl() {
     const timer = window.setTimeout(() => setToast(""), 2_400);
     return () => window.clearTimeout(timer);
   }, [toast]);
+
+  // ─── 键盘快捷键 ─────────────────────────────────────────────
+  const TIME_SCALE_OPTIONS = [1_800, 3_600, 7_200, 21_600, 86_400];
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.tagName === "SELECT" ||
+        target.isContentEditable
+      ) {
+        return;
+      }
+      if (e.code === "Space") {
+        e.preventDefault();
+        if (missionStarted && !missionEnded && llmCallPhase !== "waiting") {
+          setPaused((v) => !v);
+          audio.playClick();
+        }
+      } else if (e.key >= "1" && e.key <= "5") {
+        const index = Number(e.key) - 1;
+        if (index < TIME_SCALE_OPTIONS.length) {
+          setTimeScale(TIME_SCALE_OPTIONS[index]);
+          audio.playClick();
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [missionStarted, missionEnded, llmCallPhase, audio]);
 
   useEffect(() => {
     if (!missionStarted || !engineState) {
@@ -3456,6 +1687,24 @@ export function MissionControl() {
     const resumeAfterCall = !paused;
     setPaused(true);
     setLlmCallPhase("waiting");
+
+    // ─── 决策日志：记录触发 ─────────────────────────────────
+    captainDecisionSequence.current += 1;
+    const decisionLogId = captainDecisionSequence.current;
+    setCaptainDecisionLog((prev) => [
+      {
+        id: decisionLogId,
+        triggerKey,
+        triggerReason,
+        simulationSeconds,
+        status: "thinking" as const,
+        captainText: "",
+        consultations: [],
+        toolCalls: [],
+        receipts: [],
+      },
+      ...prev,
+    ].slice(0, 30));
 
     const atmospherePressureObservation =
       compartmentState?.observedPressureAveragePa ?? null;
@@ -3924,6 +2173,28 @@ export function MissionControl() {
           );
         }
 
+        // ─── 决策日志：记录部门咨询结果 ─────────────────────
+        setCaptainDecisionLog((prev) =>
+          prev.map((entry) =>
+            entry.id === decisionLogId
+              ? {
+                  ...entry,
+                  consultations: departmentResults.map((r) => ({
+                    agentId: r.agentId,
+                    role:
+                      llmStatus.agents.find((a) => a.id === r.agentId)
+                        ?.role ?? r.agentId,
+                    text: compactLlmTimelineText(
+                      r.text,
+                      320,
+                      "部门返回了空白建议。",
+                    ),
+                  })),
+                }
+              : entry,
+          ),
+        );
+
         assertCurrentCaptainDecision();
         const response = await fetch("/api/llm/invoke", {
           method: "POST",
@@ -4350,6 +2621,31 @@ export function MissionControl() {
         );
 
         const captainCallId = payload.result.callId;
+
+        // ─── 决策日志：记录舰长响应与工具调用 ───────────────
+        setCaptainDecisionLog((prev) =>
+          prev.map((entry) =>
+            entry.id === decisionLogId
+              ? {
+                  ...entry,
+                  status: "decided" as const,
+                  captainText: compactLlmTimelineText(
+                    payload.result?.text ?? "",
+                    512,
+                    "舰长返回了设备命令。",
+                  ),
+                  toolCalls: (payload.result?.toolCalls ?? []).map(
+                    (tc) => ({
+                      toolCallId: tc.id,
+                      toolName: tc.name,
+                      arguments: tc.arguments,
+                    }),
+                  ),
+                }
+              : entry,
+          ),
+        );
+
         const worldToolCalls = payload.result.toolCalls.filter(
           (toolCall) =>
             toolCall.name !== "configure_self_routine",
@@ -4859,6 +3155,8 @@ export function MissionControl() {
     setEndReportDismissed(false);
     setMissionStarted(true);
     setPaused(!llmStatus?.ready);
+    audio.playConfirm();
+    audio.startAmbient();
     addEvent(
       `最高指令已签发：${originSystem.name} → ${destinationSystem.name}`,
       "nominal",
@@ -4899,6 +3197,7 @@ export function MissionControl() {
         "farhorizon-save",
         JSON.stringify(save),
       );
+      setLastSaveTime(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }));
       setToast("任务配置已保存到本机。");
       return;
     }
@@ -5301,8 +3600,16 @@ export function MissionControl() {
   };
 
   return (
-    <main className="game-shell">
+    <main className={`game-shell${activeAlerts.some((a) => !a.acknowledged && a.level === "critical") ? " alert-active" : ""}`}>
       <div className="noise-layer" />
+      <AlertBanner
+        alerts={activeAlerts}
+        onAcknowledge={(id) =>
+          setActiveAlerts((prev) =>
+            prev.map((a) => (a.id === id ? { ...a, acknowledged: true } : a)),
+          )
+        }
+      />
       <header className="topbar">
         <div className="brand-lockup">
           <span className="brand-mark">Y</span>
@@ -5314,6 +3621,11 @@ export function MissionControl() {
         <div className="mission-clock">
           <span>MISSION ELAPSED</span>
           <strong>{formatDuration(simulationSeconds)}</strong>
+          {missionStarted && engineState && (
+            <small className="mission-progress">
+              {((engineState.journey.completedDistanceLightYears / Math.max(engineState.journey.totalDistanceLightYears, 0.01)) * 100).toFixed(1)}% · {engineState.journey.jumpsCompleted}/{engineState.journey.totalLegs} 跃迁
+            </small>
+          )}
         </div>
         <div className="topbar-status">
           <span className="signal-dot" />
@@ -5343,6 +3655,11 @@ export function MissionControl() {
           <button type="button" onClick={loadGame}>
             读取
           </button>
+          {lastSaveTime && (
+            <span className="last-save-time" title="上次存档时间">
+              {lastSaveTime}
+            </span>
+          )}
         </div>
       </header>
 
@@ -5398,27 +3715,31 @@ export function MissionControl() {
                 ×
               </span>
             )}
-            {[1, 60, 3_600, 21_600].map((scale) => (
+            {TIME_SCALE_OPTIONS.map((scale, index) => (
               <button
                 className={timeScale === scale ? "active" : ""}
                 aria-pressed={timeScale === scale}
                 key={scale}
-                onClick={() => setTimeScale(scale)}
+                title={`快捷键 ${index + 1}`}
+                onClick={() => { setTimeScale(scale); audio.playClick(); }}
                 type="button"
               >
-                {scale === 1
-                  ? "1×"
-                  : scale === 60
-                    ? "60×"
-                    : scale === 3_600
-                      ? "1H/s"
-                      : "6H/s"}
+                {scale === 1_800
+                  ? "30m/s"
+                  : scale === 3_600
+                    ? "1H/s"
+                    : scale === 7_200
+                      ? "2H/s"
+                      : scale === 21_600
+                        ? "6H/s"
+                        : "1D/s"}
               </button>
             ))}
             <button
-              className="pause-button"
-              onClick={() => setPaused((value) => !value)}
+              className={`pause-button${llmCallPhase === "waiting" ? " thinking" : ""}`}
+              onClick={() => { setPaused((value) => !value); audio.playClick(); }}
               type="button"
+              title="快捷键 Space"
               disabled={
                 !missionStarted ||
                 missionEnded ||
@@ -5428,10 +3749,10 @@ export function MissionControl() {
               {missionEnded
                 ? "已抵达"
                 : llmCallPhase === "waiting"
-                  ? "AI 决策"
+                  ? "⚡ AI 决策中…"
                   : paused
-                    ? "继续"
-                    : "暂停"}
+                    ? "▶ 继续"
+                    : "⏸ 暂停"}
             </button>
           </div>
         </div>
@@ -5474,6 +3795,7 @@ export function MissionControl() {
               status={llmStatus}
               callPhase={llmCallPhase}
               commandBus={commandBusState}
+              decisionLog={captainDecisionLog}
             />
           )}
           {activeView === "god" && (
@@ -5501,8 +3823,23 @@ export function MissionControl() {
           </div>
           <span className="event-count">{events.length}</span>
         </div>
+        <div className="event-filter-bar">
+          {(["all", "nominal", "watch", "critical"] as const).map((filter) => (
+            <button
+              key={filter}
+              type="button"
+              className={`event-filter-btn${eventFilter === filter ? " active" : ""}`}
+              onClick={() => setEventFilter(filter)}
+            >
+              {filter === "all" ? "全部" : filter === "nominal" ? "正常" : filter === "watch" ? "关注" : "告警"}
+            </button>
+          ))}
+        </div>
         <div className="event-list">
-          {events.slice(0, 8).map((event) => (
+          {events
+            .filter((event) => eventFilter === "all" || event.tone === eventFilter)
+            .slice(0, 50)
+            .map((event) => (
             <article className={`event-item event-${event.tone}`} key={event.id}>
               <div>
                 <time>{event.at}</time>
@@ -5515,13 +3852,17 @@ export function MissionControl() {
         <div className="captain-glance">
           <span className="eyebrow">CAPTAIN / 乾枢</span>
           <p>
-            {missionStarted
-              ? "正在根据最高指令调整系统信息周期与首段跃迁决策。"
-              : "已完成全舰态势建模，等待人类签发唯一最高指令。"}
+            {!missionStarted
+              ? "已完成全舰态势建模，等待人类签发唯一最高指令。"
+              : llmCallPhase === "waiting"
+                ? "舰长正在召开部门会议，形成关键决策……"
+                : captainDecisionLog.length > 0
+                  ? `已完成 ${captainDecisionLog.filter((d) => d.status === "done").length} 项决策，持续监控全舰系统。`
+                  : "正在根据最高指令调整系统信息周期与首段跃迁决策。"}
           </p>
           <div>
-            <span>下次系统信息</span>
-            <strong>由 AI 自主设置</strong>
+            <span>累计决策</span>
+            <strong>{captainDecisionLog.length} 项</strong>
           </div>
         </div>
       </aside>
