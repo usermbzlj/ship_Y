@@ -49,6 +49,33 @@ export type SystemCard = {
 
 // ─── LLM 运行时状态 ──────────────────────────────────────────
 
+export type LlmObservationOutcome = "ok" | "error" | "aborted";
+
+export type LlmObservationCall = {
+  callId: string;
+  agentId: string;
+  fromAgentId?: string;
+  outcome: LlmObservationOutcome;
+  attempts: number;
+  startedAtEpochMs: number;
+  completedAtEpochMs: number;
+  promptSummary: string;
+  responseSummary?: string;
+  errorSummary?: string;
+  finishReason?: string | null;
+  toolNames?: readonly string[];
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+  };
+  discussion?: {
+    depth: number;
+    round: number;
+  };
+  metadataIntent?: string;
+};
+
 export type LlmRuntimeStatus = {
   ready: boolean;
   fixedAgentCount: number;
@@ -68,6 +95,7 @@ export type LlmRuntimeStatus = {
     outputTokens: number;
     totalTokens: number;
   };
+  recentCalls: LlmObservationCall[];
 };
 
 // ─── LLM 调用结果 ─────────────────────────────────────────────

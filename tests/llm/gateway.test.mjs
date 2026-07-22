@@ -7,6 +7,7 @@ import {
   AgentPermissionError,
   AgentRoutineController,
   FixedAgentRegistry,
+  InMemoryObservationLedger,
   InMemoryUsageLedger,
   LlmConfigurationError,
   LlmProviderHttpError,
@@ -264,6 +265,7 @@ test("custom templates, secret header references, response maps, and usage work 
   const registry = new FixedAgentRegistry(systemDefinition());
   const routines = new AgentRoutineController(registry);
   const usage = new InMemoryUsageLedger();
+  const observations = new InMemoryObservationLedger();
   let capturedRequest;
 
   const gateway = new LlmGateway(registry, {
@@ -290,6 +292,7 @@ test("custom templates, secret header references, response maps, and usage work 
     },
     routines,
     usage,
+    observation: observations,
     createCallId: () => "call-fixed",
     now: (() => {
       const values = [1000, 1100];
@@ -381,6 +384,49 @@ test("custom templates, secret header references, response maps, and usage work 
       completedAtEpochMs: 1100,
     },
   ]);
+  assert.equal(observations.recent().length, 1);
+  assert.equal(observations.recent()[0].outcome, "ok");
+  assert.equal(
+    observations.recent()[0].promptSummary,
+    'user: {"alarm":"coolant-pressure-low","measuredKpa":180}',
+  );
+  assert.deepEqual(observations.recent()[0].toolNames, [
+    "set_reactor_output",
+  ]);
+});
+
+test("observation ledger records permanent provider errors", async () => {
+  const registry = new FixedAgentRegistry(systemDefinition());
+  const observations = new InMemoryObservationLedger();
+  const gateway = new LlmGateway(registry, {
+    fetch: async () => new Response("invalid payload", { status: 400 }),
+    resolveSecret: () => "secret",
+    observation: observations,
+    sleep: async () => {
+      assert.fail("permanent provider errors must not enter retry sleep");
+    },
+    createCallId: () => "obs-error-call",
+    now: (() => {
+      const values = [5000, 5100];
+      return () => values.shift();
+    })(),
+  });
+
+  await assert.rejects(
+    gateway.invoke({
+      agentId: "captain",
+      messages: [{ role: "user", content: "status?" }],
+    }),
+    LlmProviderHttpError,
+  );
+
+  assert.equal(observations.recent().length, 1);
+  assert.equal(observations.recent()[0].outcome, "error");
+  assert.equal(observations.recent()[0].promptSummary, "user: status?");
+  assert.match(
+    observations.recent()[0].errorSummary,
+    /HTTP 400/,
+  );
 });
 
 test("permanent provider 4xx errors fail fast instead of retrying forever", async () => {

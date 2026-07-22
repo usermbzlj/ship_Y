@@ -160,6 +160,35 @@ export interface UsageSink {
   record(record: LlmUsageRecord): void | Promise<void>;
 }
 
+export type ObservationOutcome = "ok" | "error" | "aborted";
+
+export interface ObservationRecord {
+  callId: string;
+  agentId: AgentId;
+  fromAgentId?: AgentId;
+  outcome: ObservationOutcome;
+  attempts: number;
+  startedAtEpochMs: number;
+  completedAtEpochMs: number;
+  promptSummary: string;
+  responseSummary?: string;
+  errorSummary?: string;
+  finishReason?: string | null;
+  toolNames?: readonly string[];
+  usage?: LlmUsage;
+  discussion?: DiscussionPosition;
+  metadataIntent?: string;
+}
+
+export interface ObservationSink {
+  record(record: ObservationRecord): void | Promise<void>;
+}
+
+export const DEFAULT_MAX_RECENT_OBSERVATION_CALLS = 50;
+export const OBS_PROMPT_MAX_CHARS = 512;
+export const OBS_RESPONSE_MAX_CHARS = 512;
+export const OBS_ERROR_MAX_CHARS = 256;
+
 export interface RetryPolicy {
   initialDelayMs: number;
   maxDelayMs: number;
@@ -180,6 +209,7 @@ export interface LlmGatewayOptions {
   resolveSecret: (secretRef: string) => string | Promise<string>;
   routines?: AgentRoutineController;
   usage?: UsageSink;
+  observation?: ObservationSink;
   retry?: Partial<RetryPolicy>;
   sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
   onAvailabilityChange?: (
@@ -203,6 +233,7 @@ export interface FixedLlmServerStatus {
   agents: readonly FixedAgentRuntimeStatus[];
   pendingRoutineTickets: number;
   usage: LlmUsage;
+  recentCalls: readonly ObservationRecord[];
 }
 
 export interface RoutineTicketReference {
@@ -533,6 +564,32 @@ export class InMemoryUsageLedger implements UsageSink {
   }
 }
 
+export class InMemoryObservationLedger implements ObservationSink {
+  readonly #records: ObservationRecord[] = [];
+  readonly #maxRecords: number;
+
+  constructor(
+    maxRecords: number = DEFAULT_MAX_RECENT_OBSERVATION_CALLS,
+  ) {
+    this.#maxRecords = maxRecords;
+  }
+
+  record(record: ObservationRecord): void {
+    this.#records.unshift(deepFreeze(structuredClone(record)));
+    while (this.#records.length > this.#maxRecords) {
+      this.#records.pop();
+    }
+  }
+
+  recent(limit?: number): readonly ObservationRecord[] {
+    const records =
+      limit === undefined
+        ? [...this.#records]
+        : this.#records.slice(0, Math.max(0, limit));
+    return Object.freeze(records);
+  }
+}
+
 interface ParsedResponse {
   text: string;
   toolCalls: LlmToolCall[];
@@ -638,7 +695,7 @@ export class LlmGateway {
   > &
     Pick<
       LlmGatewayOptions,
-      "routines" | "usage" | "onAvailabilityChange"
+      "routines" | "usage" | "observation" | "onAvailabilityChange"
     >;
   readonly #retry: RetryPolicy;
 
@@ -654,6 +711,7 @@ export class LlmGateway {
       resolveSecret: options.resolveSecret,
       routines: options.routines,
       usage: options.usage,
+      observation: options.observation,
       sleep: options.sleep ?? abortableSleep,
       onAvailabilityChange: options.onAvailabilityChange,
       now: options.now ?? Date.now,
@@ -690,63 +748,122 @@ export class LlmGateway {
     let retrying = false;
 
     try {
-      while (true) {
-        attempts += 1;
-        try {
-          parsed = await this.#executeAttempt(agent, invocation);
-          break;
-        } catch (error) {
-          if (isAbort(error, invocation.signal)) {
-            throw new LlmRequestAbortedError();
-          }
-          if (
-            error instanceof LlmProviderHttpError &&
-            !error.retryable
-          ) {
-            throw error;
-          }
-
-          retrying = true;
-          const retryInMs = retryDelay(this.#retry, attempts);
-          await this.#options.onAvailabilityChange?.({
-            agentId: agent.id,
-            callId,
-            status: "retrying",
-            attempt: attempts,
-            retryInMs,
-            error: errorMessage(error),
-          });
+      try {
+        while (true) {
+          attempts += 1;
           try {
-            await this.#options.sleep(retryInMs, invocation.signal);
-            throwIfAborted(invocation.signal);
-          } catch (sleepError) {
-            if (isAbort(sleepError, invocation.signal)) {
+            parsed = await this.#executeAttempt(agent, invocation);
+            break;
+          } catch (error) {
+            if (isAbort(error, invocation.signal)) {
               throw new LlmRequestAbortedError();
             }
-            throw sleepError;
+            if (
+              error instanceof LlmProviderHttpError &&
+              !error.retryable
+            ) {
+              throw error;
+            }
+
+            retrying = true;
+            const retryInMs = retryDelay(this.#retry, attempts);
+            await this.#options.onAvailabilityChange?.({
+              agentId: agent.id,
+              callId,
+              status: "retrying",
+              attempt: attempts,
+              retryInMs,
+              error: errorMessage(error),
+            });
+            try {
+              await this.#options.sleep(retryInMs, invocation.signal);
+              throwIfAborted(invocation.signal);
+            } catch (sleepError) {
+              if (isAbort(sleepError, invocation.signal)) {
+                throw new LlmRequestAbortedError();
+              }
+              throw sleepError;
+            }
           }
         }
+
+        const completedAtEpochMs = this.#options.now();
+        await this.#options.usage?.record({
+          callId,
+          agentId: agent.id,
+          attempts,
+          ...parsed.usage,
+          startedAtEpochMs,
+          completedAtEpochMs,
+        });
+
+        const toolNames = parsed.toolCalls
+          .map((toolCall) => toolCall.name)
+          .slice(0, 8);
+        const metadataIntent = observationMetadataIntent(
+          invocation.metadata,
+        );
+        await this.#options.observation?.record({
+          callId,
+          agentId: agent.id,
+          ...(invocation.fromAgentId
+            ? { fromAgentId: invocation.fromAgentId }
+            : {}),
+          outcome: "ok",
+          attempts,
+          startedAtEpochMs,
+          completedAtEpochMs,
+          promptSummary: buildPromptSummary(invocation.messages),
+          responseSummary: truncateObservationText(
+            parsed.text,
+            OBS_RESPONSE_MAX_CHARS,
+          ),
+          finishReason: parsed.finishReason,
+          ...(toolNames.length > 0 ? { toolNames } : {}),
+          usage: parsed.usage,
+          ...(invocation.discussion
+            ? { discussion: invocation.discussion }
+            : {}),
+          ...(metadataIntent ? { metadataIntent } : {}),
+        });
+
+        return {
+          callId,
+          agentId: agent.id,
+          text: parsed.text,
+          toolCalls: Object.freeze(parsed.toolCalls),
+          finishReason: parsed.finishReason,
+          usage: deepFreeze(parsed.usage),
+          attempts,
+        };
+      } catch (error) {
+        const completedAtEpochMs = this.#options.now();
+        const metadataIntent = observationMetadataIntent(
+          invocation.metadata,
+        );
+        await this.#options.observation?.record({
+          callId,
+          agentId: agent.id,
+          ...(invocation.fromAgentId
+            ? { fromAgentId: invocation.fromAgentId }
+            : {}),
+          outcome:
+            error instanceof LlmRequestAbortedError ? "aborted" : "error",
+          attempts,
+          startedAtEpochMs,
+          completedAtEpochMs,
+          promptSummary: buildPromptSummary(invocation.messages),
+          errorSummary: truncateObservationText(
+            errorMessage(error),
+            OBS_ERROR_MAX_CHARS,
+          ),
+          ...(invocation.discussion
+            ? { discussion: invocation.discussion }
+            : {}),
+          ...(metadataIntent ? { metadataIntent } : {}),
+        });
+        throw error;
       }
-
-      const completedAtEpochMs = this.#options.now();
-      await this.#options.usage?.record({
-        callId,
-        agentId: agent.id,
-        attempts,
-        ...parsed.usage,
-        startedAtEpochMs,
-        completedAtEpochMs,
-      });
-
-      return {
-        callId,
-        agentId: agent.id,
-        text: parsed.text,
-        toolCalls: Object.freeze(parsed.toolCalls),
-        finishReason: parsed.finishReason,
-        usage: deepFreeze(parsed.usage),
-        attempts,
-      };
     } finally {
       if (retrying) {
         await this.#options.onAvailabilityChange?.({
@@ -866,6 +983,7 @@ export class FixedLlmServerRuntime {
   readonly registry: FixedAgentRegistry;
   readonly routines: AgentRoutineController;
   readonly usage: InMemoryUsageLedger;
+  readonly observations = new InMemoryObservationLedger();
   readonly #gateway: LlmGateway;
   readonly #readEnvironment: (name: string) => string | undefined;
   readonly #retryingCalls = new Map<string, AgentId>();
@@ -912,6 +1030,7 @@ export class FixedLlmServerRuntime {
       },
       routines: this.routines,
       usage: this.usage,
+      observation: this.observations,
       retry: options.retry,
       sleep: options.sleep,
       now: options.now,
@@ -957,6 +1076,7 @@ export class FixedLlmServerRuntime {
           ticket.toolName === CONFIGURE_SELF_ROUTINE_TOOL_NAME,
       ).length,
       usage: this.usage.totals(),
+      recentCalls: this.observations.recent(),
     });
   }
 
@@ -2561,6 +2681,35 @@ function jsonEquals(left: unknown, right: JsonValue): boolean {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+export function truncateObservationText(
+  text: string,
+  maxChars: number,
+): string {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars)}…`;
+}
+
+export function buildPromptSummary(
+  messages: readonly LlmMessage[],
+): string {
+  const lines = messages.map((message) => {
+    const content =
+      typeof message.content === "string"
+        ? message.content
+        : JSON.stringify(message.content);
+    return `${message.role}: ${content}`;
+  });
+  return truncateObservationText(lines.join("\n"), OBS_PROMPT_MAX_CHARS);
+}
+
+function observationMetadataIntent(
+  metadata: JsonObject | undefined,
+): string | undefined {
+  const intent = metadata?.intent;
+  if (typeof intent !== "string") return undefined;
+  return truncateObservationText(intent, 64);
 }
 
 function isAbort(error: unknown, signal?: AbortSignal): boolean {

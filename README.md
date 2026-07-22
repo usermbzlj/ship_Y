@@ -74,6 +74,8 @@
 
 当前运行时拓扑固定为舰长、导航、工程、生命保障、医疗、乘客事务、安全和乘客服务 `8` 个部门 actor，以及持久名册中的 `32` 个固定关键乘客 LLM 槽位。舰长在关键事件中会按领域主动咨询部门；清醒的关键乘客由单并发、轮转限额的调度器逐人轮询，而不是 `40` 路常驻并发。乘客回复只回到本人的私人记录并显示在“乘员”页，不进入全舰时间线，也不写入物理世界、体验维度或其他人的上下文，因此不代表完整部门组织和社会已经自治。任何岗位和关键槽位都不能在航程中创建、克隆、删除或临时提升。
 
+舰载 `systemPrompt` 的规范文案在 `lib/llm/prompts/`（身份 / 优先级 / 能力边界 / 决策流程 / 边界情况 / 输出契约），配置 JSON 里可写占位符；`expandFarHorizonFixedTopology` 会在加载时覆写为规范 Prompt。上帝助手默认 Prompt 同源；私有配置若提供非占位 `playerAssistants.godAssistant.systemPrompt` 仍可覆盖。
+
 ## 快速启动
 
 ### 环境要求
@@ -204,7 +206,7 @@ SHIP_GOD_ASSIST_LLM_API_KEY=
 
 | 变量 | 内容 |
 |---|---|
-| `agent.id` / `agent.role` / `agent.systemPrompt` | 当前固定岗位定义 |
+| `agent.id` / `agent.role` / `agent.systemPrompt` | 当前固定岗位定义；`systemPrompt` 在配置里可为占位符，**规范文案由 `lib/llm/prompts` 在 expand 时覆写** |
 | `request.messages` | 不含系统提示的调用消息 |
 | `request.messagesWithSystem` | 已插入该岗位固定系统提示的消息 |
 | `request.openAiMessages` / `request.openAiMessagesWithSystem` | OpenAI 兼容消息；结构化 `content` 会先序列化为 JSON 字符串 |

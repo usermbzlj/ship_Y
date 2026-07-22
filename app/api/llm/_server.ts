@@ -26,6 +26,7 @@ import {
   UnknownAgentError,
   type LlmMessage,
 } from "@/lib/llm";
+import { KEY_PASSENGER_SELF_INSTRUCTION } from "@/lib/llm/prompts";
 
 class HttpRequestValidationError extends Error {
   readonly status: number;
@@ -379,8 +380,7 @@ function normalizePassengerSelfInvocation(
             selfObservation,
             publicContext,
             previousOwnNote,
-            instruction:
-              "请以该乘员自身身份简短表达当前体验、需求或建议。不得假定自己看到了其他乘员资料，不得声称设备命令已经执行，也不得请求或创建其他代理。",
+            instruction: KEY_PASSENGER_SELF_INSTRUCTION,
           },
         },
       ],

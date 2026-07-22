@@ -102,6 +102,10 @@ import {
   prependTimelineEvent,
   compactLlmTimelineText,
 } from "@/app/ui/utils";
+import {
+  CAPTAIN_DECISION_INSTRUCTION,
+  DEPARTMENT_CONSULTATION_REQUEST,
+} from "@/app/ui/llm-readable-output";
 import { VoyageView } from "@/app/ui/views/voyage-view";
 import { ShipView } from "@/app/ui/views/ship-view";
 import { PeopleView } from "@/app/ui/views/people-view";
@@ -112,6 +116,7 @@ import {
   detectAlerts,
   type ActiveAlert,
 } from "@/app/ui/components/alert-banner";
+import { EventRail } from "@/app/ui/components/event-rail";
 import { useAudio } from "@/app/ui/use-audio";
 import { ProceduralEventScheduler } from "@/app/ui/procedural-events";
 
@@ -1386,7 +1391,10 @@ export function MissionControl() {
           llm?: LlmRuntimeStatus;
         };
         if (payload.llm) {
-          setLlmStatus(payload.llm);
+          setLlmStatus({
+            ...payload.llm,
+            recentCalls: payload.llm.recentCalls ?? [],
+          });
         }
       } catch {
         // Local server status may be temporarily unavailable during HMR.
@@ -2157,8 +2165,7 @@ export function MissionControl() {
                     {
                       role: "user",
                       content: {
-                      request:
-                        "舰长要求你基于本岗位职责提供一份简短、可核查的建议。不得假定命令已经执行，不得要求直接修改世界真值。",
+                      request: DEPARTMENT_CONSULTATION_REQUEST,
                       event: triggerReason,
                       highestDirective: directive,
                       mission: {
@@ -2281,8 +2288,7 @@ export function MissionControl() {
                         "固定部门模型报告；未经设备执行确认",
                     }),
                   ),
-                  instruction:
-                    "只可选择提供的世界内工具。若无需动作，请明确说明等待条件；不要假定工具调用已经成功。",
+                  instruction: CAPTAIN_DECISION_INSTRUCTION,
                   },
                 },
               ],
@@ -2831,7 +2837,10 @@ export function MissionControl() {
           };
           assertCurrentCaptainDecision();
           if (statusPayload.llm) {
-            setLlmStatus(statusPayload.llm);
+            setLlmStatus({
+              ...statusPayload.llm,
+              recentCalls: statusPayload.llm.recentCalls ?? [],
+            });
           }
         }
 
@@ -3086,7 +3095,10 @@ export function MissionControl() {
             llm?: LlmRuntimeStatus;
           };
           if (statusPayload.llm) {
-            setLlmStatus(statusPayload.llm);
+            setLlmStatus({
+              ...statusPayload.llm,
+              recentCalls: statusPayload.llm.recentCalls ?? [],
+            });
           }
         }
         showToast(
@@ -3953,74 +3965,19 @@ export function MissionControl() {
         </div>
       </section>
 
-      <button
-        type="button"
-        className="event-rail-toggle"
-        aria-expanded={eventRailOpen}
-        onClick={() => setEventRailOpen((value) => !value)}
-      >
-        事件 {events.length}
-      </button>
-      <button
-        type="button"
-        className={`event-rail-backdrop${eventRailOpen ? " is-open" : ""}`}
-        aria-label="关闭事件时间线"
-        onClick={() => setEventRailOpen(false)}
+      <EventRail
+        events={events}
+        open={eventRailOpen}
+        filter={eventFilter}
+        onOpenChange={setEventRailOpen}
+        onFilterChange={setEventFilter}
+        missionStarted={missionStarted}
+        llmCallPhase={llmCallPhase}
+        decisionCount={captainDecisionLog.length}
+        doneDecisionCount={
+          captainDecisionLog.filter((d) => d.status === "done").length
+        }
       />
-      <aside
-        className={`event-rail${eventRailOpen ? " is-open" : ""}`}
-        aria-label="事件时间线"
-      >
-        <div className="event-rail-heading">
-          <div>
-            <span className="eyebrow">EVENT STREAM</span>
-            <h2>全舰事件</h2>
-          </div>
-          <span className="event-count">{events.length}</span>
-        </div>
-        <div className="event-filter-bar">
-          {(["all", "nominal", "watch", "critical"] as const).map((filter) => (
-            <button
-              key={filter}
-              type="button"
-              className={`event-filter-btn${eventFilter === filter ? " active" : ""}`}
-              onClick={() => setEventFilter(filter)}
-            >
-              {filter === "all" ? "全部" : filter === "nominal" ? "正常" : filter === "watch" ? "关注" : "告警"}
-            </button>
-          ))}
-        </div>
-        <div className="event-list">
-          {events
-            .filter((event) => eventFilter === "all" || event.tone === eventFilter)
-            .slice(0, 50)
-            .map((event) => (
-            <article className={`event-item event-${event.tone}`} key={event.id}>
-              <div>
-                <time>{event.at}</time>
-                <span>{event.source}</span>
-              </div>
-              <p>{event.text}</p>
-            </article>
-          ))}
-        </div>
-        <div className="captain-glance">
-          <span className="eyebrow">CAPTAIN / 乾枢</span>
-          <p>
-            {!missionStarted
-              ? "已完成全舰态势建模，等待人类签发唯一最高指令。"
-              : llmCallPhase === "waiting"
-                ? "舰长正在召开部门会议，形成关键决策……"
-                : captainDecisionLog.length > 0
-                  ? `已完成 ${captainDecisionLog.filter((d) => d.status === "done").length} 项决策，持续监控全舰系统。`
-                  : "正在根据最高指令调整系统信息周期与首段跃迁决策。"}
-          </p>
-          <div>
-            <span>累计决策</span>
-            <strong>{captainDecisionLog.length} 项</strong>
-          </div>
-        </div>
-      </aside>
 
       <footer className="bottom-bar">
         <div>

@@ -5,6 +5,11 @@
 import type { TimelineEvent } from "./types";
 import { MAX_TIMELINE_EVENTS } from "./constants";
 
+export {
+  compactLlmTimelineText,
+  sanitizeLlmReadableText,
+} from "./llm-readable-output";
+
 /** 把仿真秒数格式化为 DDDd HHh MMm */
 export function formatDuration(totalSeconds: number): string {
   const days = Math.floor(totalSeconds / 86_400);
@@ -33,29 +38,4 @@ export function prependTimelineEvent(
   event: TimelineEvent,
 ): TimelineEvent[] {
   return [event, ...current].slice(0, MAX_TIMELINE_EVENTS);
-}
-
-/** 把 LLM 返回的 Markdown 文本压缩为纯文本摘要 */
-export function compactLlmTimelineText(
-  value: string,
-  maximumLength: number,
-  fallback: string,
-): string {
-  const plainText = value
-    .trim()
-    .replace(/```[A-Za-z0-9_-]*\s*/g, "")
-    .replace(/```/g, "")
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-    .replace(/^\s{0,3}#{1,6}\s*/gm, "")
-    .replace(/^\s*[-+*]\s+/gm, "")
-    .replace(/^\s*\d+[.)]\s+/gm, "")
-    .replace(/\|\s*:?-{3,}:?\s*(?=\|)/g, "")
-    .replace(/\|/g, " · ")
-    .replace(/[\*_`~]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!plainText) return fallback;
-  if (plainText.length <= maximumLength) return plainText;
-  return `${plainText.slice(0, Math.max(1, maximumLength - 1)).trimEnd()}…`;
 }

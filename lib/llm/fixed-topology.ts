@@ -8,6 +8,10 @@ import type {
   FixedAgentDefinition,
   FixedAgentSystemDefinition,
 } from "./index";
+import {
+  applyCanonicalSystemPrompts,
+  keyPassengerSystemPrompt,
+} from "./prompts/index.ts";
 
 export const FAR_HORIZON_FIXED_TOPOLOGY_KIND =
   "far-horizon-fixed-40-v1" as const;
@@ -246,10 +250,7 @@ function keyPassengerDefinition(
   return {
     id: passengerId,
     role: `关键乘员槽位 / ${passengerId}`,
-    systemPrompt:
-      `你是远穹号持久乘员名册中的关键 LLM 槽位 ${passengerId}。` +
-      "你只能依据获授权的个人观察、公共信息与通信内容形成判断；" +
-      "你可以表达需求、体验和建议，但不能取得舰船控制工具、直接改写世界状态或创建其他代理。",
+    systemPrompt: keyPassengerSystemPrompt(passengerId),
     permissions: [...KEY_PASSENGER_PERMISSIONS],
     canSendTo: [FAR_HORIZON_PASSENGER_TEMPLATE_AGENT_ID],
     routineDefaults: structuredClone(template.routineDefaults),
@@ -362,7 +363,11 @@ function validateFixedTopology(
 function finalizeFixedTopology(
   definition: FixedAgentSystemDefinition,
 ): FixedAgentSystemDefinition {
-  const validated = validateFixedTopology(definition);
+  const withCanonicalPrompts: FixedAgentSystemDefinition = {
+    ...definition,
+    agents: applyCanonicalSystemPrompts(definition.agents),
+  };
+  const validated = validateFixedTopology(withCanonicalPrompts);
   new FixedAgentRegistry(validated);
   return validated;
 }

@@ -421,6 +421,7 @@ test("missing environment secrets make the fixed role unavailable without networ
     ],
     pendingRoutineTickets: 0,
     usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+    recentCalls: [],
   });
   await assert.rejects(
     runtime.invoke({ agentId: "captain", messages: [] }),
@@ -543,6 +544,19 @@ test("server runtime passes custom thinking and mapped tools through an injected
     outputTokens: 20,
     totalTokens: 100,
   });
+  assert.equal(runtime.status().recentCalls.length, 1);
+  assert.equal(runtime.status().recentCalls[0].outcome, "ok");
+  assert.equal(
+    runtime.status().recentCalls[0].promptSummary,
+    "user: Coolant pressure is falling.",
+  );
+  assert.equal(
+    runtime.status().recentCalls[0].responseSummary,
+    "Isolate coolant loop B.",
+  );
+  assert.deepEqual(runtime.status().recentCalls[0].toolNames, [
+    "set_electrical_breaker",
+  ]);
 });
 
 test("cancelling a retrying call clears the runtime retry status", async () => {

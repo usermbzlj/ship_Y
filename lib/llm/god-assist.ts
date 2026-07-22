@@ -13,6 +13,12 @@ import {
   type LlmMessage,
   type LlmToolDefinition,
 } from "./index.ts";
+import {
+  CANONICAL_SYSTEM_PROMPT_STUB,
+  DEFAULT_GOD_SYSTEM_PROMPT,
+} from "./prompts/index.ts";
+
+export { DEFAULT_GOD_SYSTEM_PROMPT } from "./prompts/index.ts";
 
 export const GOD_ASSISTANT_AGENT_ID = "god-assistant" as const;
 
@@ -68,12 +74,13 @@ export interface PlayerAssistantsConfig {
   godAssistant?: GodAssistantEndpointConfig;
 }
 
-const DEFAULT_GOD_SYSTEM_PROMPT =
-  "你是远穹号世界之外的实验员助手（上帝模式顾问）。" +
-  "你只帮助玩家把自然语言意图编译成合法的上帝干预计划，不得冒充舰长或舰内部门，" +
-  "不得修改 LLM 记忆、系统提示或固定拓扑。" +
-  "优先选择能通过物理守恒校验的参数；对聚变电网总发电等原力，选择有限非负且不超过合理工程范围的数值。" +
-  "你必须通过工具提交计划，不要只给散文。";
+function resolveGodSystemPrompt(configured?: string): string {
+  const trimmed = configured?.trim();
+  if (!trimmed || trimmed === CANONICAL_SYSTEM_PROMPT_STUB) {
+    return DEFAULT_GOD_SYSTEM_PROMPT;
+  }
+  return trimmed;
+}
 
 export const GOD_ASSIST_TOOLS = Object.freeze([
   {
@@ -255,7 +262,7 @@ function buildGodAssistantAgent(
   return {
     id: GOD_ASSISTANT_AGENT_ID,
     role: "世界外上帝模式助手",
-    systemPrompt: config.systemPrompt ?? DEFAULT_GOD_SYSTEM_PROMPT,
+    systemPrompt: resolveGodSystemPrompt(config.systemPrompt),
     permissions: ["ship:read-all"],
     canSendTo: [],
     routineDefaults: {

@@ -185,6 +185,7 @@ test("GET /api/llm/status exposes all 40 fixed slots without prompts or secret n
   assert.equal(body.llm.agents[0].state, "missing-secret");
   assert.equal("systemPrompt" in body.llm.agents[0], false);
   assert.equal("endpoint" in body.llm.agents[0], false);
+  assert.deepEqual(body.llm.recentCalls, []);
   assert.doesNotMatch(JSON.stringify(body), /API_KEY|authorization/i);
 });
 
