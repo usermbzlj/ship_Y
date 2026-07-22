@@ -77,7 +77,7 @@ textarea:focus-visible {
     "top top top" 72px
     "nav work events" minmax(0, 1fr)
     "foot foot foot" 32px /
-    104px minmax(720px, 1fr) 326px;
+    104px minmax(0, 1fr) 326px;
   width: 100vw;
   height: 100dvh;
   overflow: hidden;
@@ -464,6 +464,70 @@ textarea:focus-visible {
   cursor: not-allowed;
 }
 
+.sim-status-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 22px;
+  padding: 4px 10px;
+  border: 1px solid var(--line-soft);
+  background: rgba(6, 10, 11, 0.72);
+  color: var(--muted);
+  font: 500 8px/1.4 var(--font-mono);
+  letter-spacing: 0.06em;
+}
+
+.sim-status-strip[data-tone="waiting"] {
+  border-color: rgba(150, 192, 189, 0.35);
+  color: var(--cyan);
+}
+
+.sim-status-strip[data-tone="blocked"] {
+  border-color: rgba(230, 173, 72, 0.45);
+  color: var(--amber);
+}
+
+.sim-status-strip[data-tone="paused"] {
+  border-color: rgba(230, 173, 72, 0.55);
+  color: var(--amber-pale);
+  background: rgba(230, 173, 72, 0.06);
+}
+
+.sim-status-strip[data-tone="live"] {
+  border-color: rgba(115, 175, 150, 0.4);
+  color: var(--green);
+}
+
+.audio-mute-btn {
+  min-width: 32px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  color: #657679;
+  background: rgba(6, 10, 11, 0.7);
+  font: 500 9px/1 var(--font-mono);
+  cursor: pointer;
+}
+
+.audio-mute-btn:hover {
+  border-color: #506568;
+  color: var(--cyan-bright);
+  background: rgba(150, 192, 189, 0.06);
+}
+
+.audio-mute-btn.is-muted {
+  border-color: rgba(90, 116, 119, 0.35);
+  color: var(--dim);
+  background: rgba(6, 10, 11, 0.5);
+  opacity: 0.72;
+}
+
+.hotkey-hint {
+  color: var(--dim);
+  font-size: 8px;
+  letter-spacing: 0.06em;
+}
+
 .view-stage {
   height: calc(100% - 72px);
   padding: 17px 20px 20px;
@@ -685,6 +749,7 @@ textarea:focus-visible {
   padding: 10px 18px;
   border-top: 1px solid var(--line-soft);
   background: rgba(230, 173, 72, 0.025);
+  cursor: pointer;
 }
 
 .directive-strip p {
@@ -696,6 +761,12 @@ textarea:focus-visible {
   line-height: 1.6;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.directive-strip.expanded p {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
 }
 
 .directive-seal {
@@ -1876,6 +1947,48 @@ textarea:focus-visible {
   line-height: 1.8;
 }
 
+.god-confirm-bar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 18px 12px;
+  padding: 10px 14px;
+  border: 1px solid rgba(210, 96, 83, 0.42);
+  color: #c5a09b;
+  background:
+    linear-gradient(135deg, rgba(210, 96, 83, 0.08), transparent 55%),
+    rgba(12, 8, 8, 0.92);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.god-confirm-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 8px;
+}
+
+.god-confirm-actions button {
+  min-width: 52px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid rgba(210, 96, 83, 0.35);
+  color: #c5a09b;
+  background: rgba(210, 96, 83, 0.06);
+  font: 500 9px/1 var(--font-mono);
+  cursor: pointer;
+}
+
+.god-confirm-actions button:hover {
+  border-color: rgba(210, 96, 83, 0.6);
+  color: #e8c4be;
+  background: rgba(210, 96, 83, 0.12);
+}
+
 .observer-truth-strip {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -2088,6 +2201,14 @@ textarea:focus-visible {
   background: rgba(6, 10, 11, 0.93);
 }
 
+.event-rail-toggle {
+  display: none;
+}
+
+.event-rail-backdrop {
+  display: none;
+}
+
 .event-rail-heading {
   display: flex;
   height: 72px;
@@ -2284,8 +2405,8 @@ textarea:focus-visible {
 
 .launch-layer {
   position: fixed;
-  z-index: 18;
-  inset: 72px 0 32px 104px;
+  z-index: 30;
+  inset: 0;
   display: grid;
   place-items: center;
   padding: 22px;
@@ -2307,8 +2428,8 @@ textarea:focus-visible {
 
 .end-layer {
   position: fixed;
-  z-index: 19;
-  inset: 72px 0 32px 104px;
+  z-index: 30;
+  inset: 0;
   display: grid;
   place-items: center;
   padding: 24px;
@@ -2640,6 +2761,21 @@ textarea:focus-visible {
   background: rgba(230, 173, 72, 0.04);
 }
 
+.llm-guidance {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(150, 192, 189, 0.22);
+  color: var(--dim);
+  background: rgba(6, 10, 11, 0.6);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.llm-guidance code {
+  font-family: var(--font-mono);
+  color: var(--cyan-bright);
+}
+
 .launch-button {
   display: flex;
   width: 100%;
@@ -2712,13 +2848,40 @@ textarea:focus-visible {
   right: 20px;
   bottom: 48px;
   max-width: 420px;
-  padding: 12px 16px;
-  border: 1px solid rgba(230, 173, 72, 0.48);
-  color: var(--amber-pale);
-  background: rgba(12, 16, 16, 0.96);
-  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.4);
-  font-size: 10px;
+  padding: 14px 36px 14px 16px;
+  border: 1px solid rgba(230, 173, 72, 0.58);
+  color: #f5e4b8;
+  background: rgba(8, 12, 12, 0.98);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.52);
+  font-size: 11px;
+  line-height: 1.55;
   animation: toast-enter 180ms ease-out;
+}
+
+.toast.is-persistent,
+.toast[data-persistent="true"] {
+  border-color: rgba(150, 192, 189, 0.45);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+}
+
+.toast-dismiss {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid rgba(150, 192, 189, 0.25);
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.04);
+  font: 400 12px/1 var(--font-ui);
+  cursor: pointer;
+}
+
+.toast-dismiss:hover {
+  border-color: var(--line);
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
 }
 
 @keyframes vessel-pulse {
@@ -2749,14 +2912,6 @@ textarea:focus-visible {
 @media (max-width: 1480px) {
   .game-shell {
     grid-template-columns: 88px minmax(690px, 1fr) 286px;
-  }
-
-  .launch-layer {
-    left: 88px;
-  }
-
-  .end-layer {
-    left: 88px;
   }
 
   .topbar {
@@ -2799,7 +2954,66 @@ textarea:focus-visible {
   }
 
   .event-rail {
-    display: none;
+    position: fixed;
+    top: 64px;
+    right: 0;
+    bottom: 30px;
+    width: min(340px, 92vw);
+    z-index: 25;
+    transform: translateX(105%);
+    transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+    border-left: 1px solid var(--line);
+    background: rgba(6, 10, 11, 0.97);
+    box-shadow: -18px 0 48px rgba(0, 0, 0, 0.42);
+  }
+
+  .event-rail.is-open {
+    transform: translateX(0);
+  }
+
+  .event-rail-toggle {
+    display: flex;
+    position: fixed;
+    right: 12px;
+    bottom: 42px;
+    z-index: 26;
+    min-width: 43px;
+    height: 32px;
+    padding: 0 12px;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--line);
+    color: var(--cyan-bright);
+    background: rgba(6, 10, 11, 0.92);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    backdrop-filter: blur(4px);
+    font: 500 9px/1 var(--font-mono);
+    letter-spacing: 0.08em;
+    cursor: pointer;
+  }
+
+  .event-rail-toggle:hover {
+    border-color: #506568;
+    color: var(--amber-pale);
+    background: rgba(150, 192, 189, 0.08);
+  }
+
+  .event-rail-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 24;
+    background: rgba(3, 7, 8, 0.62);
+    backdrop-filter: blur(2px);
+  }
+
+  .event-rail-backdrop.is-open {
+    display: block;
+  }
+
+  .alert-banner {
+    top: 64px;
+    left: 76px;
+    right: 12px;
   }
 
   .topbar {
@@ -2812,11 +3026,6 @@ textarea:focus-visible {
 
   .brand-lockup {
     padding: 0 16px;
-  }
-
-  .launch-layer,
-  .end-layer {
-    inset: 64px 0 30px 76px;
   }
 
   .workspace-header {
@@ -2936,9 +3145,23 @@ textarea:focus-visible {
     padding-right: 8px;
   }
 
+  .event-rail {
+    top: 58px;
+    bottom: 28px;
+  }
+
+  .event-rail-toggle {
+    bottom: 40px;
+  }
+
+  .alert-banner {
+    top: 58px;
+    left: 62px;
+    right: 10px;
+  }
+
   .launch-layer,
   .end-layer {
-    inset: 58px 0 28px 62px;
     padding: 10px;
   }
 
@@ -2995,13 +3218,8 @@ textarea:focus-visible {
   }
 
   .launch-layer {
-    top: 64px;
     padding-top: 12px;
     padding-bottom: 12px;
-  }
-
-  .end-layer {
-    top: 64px;
   }
 
   .workspace-header,
@@ -3261,8 +3479,9 @@ button:active:not(:disabled) {
   }
 }
 
-/* Toast 通知动画 */
-.toast {
+/* Toast 通知动画 — persistent 变体 */
+.toast.is-persistent,
+.toast[data-persistent="true"] {
   animation: toast-in 0.3s cubic-bezier(0.22, 1, 0.36, 1);
 }
 

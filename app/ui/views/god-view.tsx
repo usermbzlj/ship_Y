@@ -39,6 +39,11 @@ export function GodView({
   onOverride: (field: ForceField, value: number) => void;
 }) {
   const [fieldId, setFieldId] = useState<string>(FORCE_FIELDS[0].id);
+  const [pendingConfirm, setPendingConfirm] = useState<
+    | null
+    | { kind: "event"; eventId: string; label: string; detail: string }
+    | { kind: "override"; fieldLabel: string; value: number }
+  >(null);
   const selectedField =
     FORCE_FIELDS.find((field) => field.id === fieldId) ?? FORCE_FIELDS[0];
   const [value, setValue] = useState<string>(selectedField.defaultValue);
@@ -50,6 +55,19 @@ export function GodView({
       FORCE_FIELDS.find((field) => field.id === nextId) ?? FORCE_FIELDS[0];
     setFieldId(next.id);
     setValue(next.defaultValue);
+  };
+
+  const confirmPending = () => {
+    if (!pendingConfirm) return;
+    if (pendingConfirm.kind === "event") {
+      onCausalEvent(pendingConfirm.eventId, pendingConfirm.label);
+    } else {
+      const field =
+        FORCE_FIELDS.find((item) => item.label === pendingConfirm.fieldLabel) ??
+        selectedField;
+      onOverride(field, pendingConfirm.value);
+    }
+    setPendingConfirm(null);
   };
 
   return (
@@ -66,6 +84,34 @@ export function GodView({
           这里的操作不属于舰长可用能力。所有变化将登记为外部质量、能量或状态注入，
           随后的演化重新交还给物理引擎。
         </p>
+        {pendingConfirm && (
+          <div className="god-confirm-bar" role="alertdialog" aria-labelledby="god-confirm-title">
+            <div>
+              <strong id="god-confirm-title">
+                {pendingConfirm.kind === "event"
+                  ? `确认触发：${pendingConfirm.label}`
+                  : `确认覆写：${pendingConfirm.fieldLabel}`}
+              </strong>
+              <p>
+                {pendingConfirm.kind === "event"
+                  ? pendingConfirm.detail
+                  : `将写入外部数值 ${pendingConfirm.value}`}
+              </p>
+              <small>外部注入不会向舰长解释来源</small>
+            </div>
+            <div className="god-confirm-actions">
+              <button
+                type="button"
+                onClick={() => setPendingConfirm(null)}
+              >
+                取消
+              </button>
+              <button type="button" onClick={confirmPending}>
+                确认执行
+              </button>
+            </div>
+          </div>
+        )}
         <div className="observer-truth-strip">
           <div>
             <span>世界真值 / 平均舱压</span>
@@ -200,7 +246,14 @@ export function GodView({
             <button
               className="event-button"
               key={label}
-              onClick={() => onCausalEvent(eventId, label)}
+              onClick={() =>
+                setPendingConfirm({
+                  kind: "event",
+                  eventId,
+                  label,
+                  detail,
+                })
+              }
               type="button"
             >
               <span>触发事件</span>
@@ -243,7 +296,13 @@ export function GodView({
         )}
         <button
           className="override-button"
-          onClick={() => onOverride(selectedField, parsedValue)}
+          onClick={() =>
+            setPendingConfirm({
+              kind: "override",
+              fieldLabel: selectedField.label,
+              value: parsedValue,
+            })
+          }
           type="button"
           disabled={!valueIsValid}
         >

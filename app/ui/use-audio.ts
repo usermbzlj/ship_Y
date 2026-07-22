@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef } from "react";
+import { useCallback, useRef, useState } from "react";
 
 /**
  * 合成音效引擎 — 使用 Web Audio API，不引入外部音频文件。
@@ -42,6 +42,7 @@ export function useAudio() {
     gain: GainNode;
   } | null>(null);
   const enabledRef = useRef(true);
+  const [enabled, setEnabledState] = useState(true);
 
   const getVolume = useCallback((category: AudioCategory): number => {
     if (!enabledRef.current) return 0;
@@ -66,16 +67,23 @@ export function useAudio() {
     [getVolume],
   );
 
-  const setEnabled = useCallback((enabled: boolean) => {
-    enabledRef.current = enabled;
-    if (!enabled && ambientNodeRef.current) {
+  const setEnabled = useCallback((nextEnabled: boolean) => {
+    enabledRef.current = nextEnabled;
+    setEnabledState(nextEnabled);
+    if (!nextEnabled && ambientNodeRef.current) {
       ambientNodeRef.current.gain.gain.setTargetAtTime(
         0,
         getContext().currentTime,
         0.05,
       );
+    } else if (nextEnabled && ambientNodeRef.current) {
+      ambientNodeRef.current.gain.gain.setTargetAtTime(
+        getVolume("ambient") * 0.04,
+        getContext().currentTime,
+        0.1,
+      );
     }
-  }, []);
+  }, [getVolume]);
 
   /** 短促按钮点击 */
   const playClick = useCallback(() => {
@@ -275,6 +283,6 @@ export function useAudio() {
     stopAmbient,
     setVolume,
     setEnabled,
-    volumes: volumesRef.current,
+    enabled,
   };
 }

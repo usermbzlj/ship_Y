@@ -15,7 +15,7 @@ import { THRUSTER_IDS } from "@/lib/sim/navigation";
 import { ROTATION_RING_IDS } from "@/lib/sim/rotation";
 import { WATER_PROCESSOR_IDS } from "@/lib/sim/water";
 import { MAINTENANCE_ASSET_IDS } from "@/lib/sim/maintenance";
-import type { ViewId, ForceField, TimelineEvent, SystemCard } from "./types";
+import type { ViewId, ForceField, SystemCard } from "./types";
 
 // ─── 星图数据 ─────────────────────────────────────────────────
 
@@ -108,30 +108,6 @@ export const REACTOR_MODE_SET = new Set<string>(REACTOR_MODES);
 // ─── 时间线 ───────────────────────────────────────────────────
 
 export const MAX_TIMELINE_EVENTS = 500;
-
-export const INITIAL_EVENTS: TimelineEvent[] = [
-  {
-    id: 1,
-    at: "T−03:40",
-    source: "跃迁工程部",
-    text: "三组场线圈通过冷态自检，误差低于 0.018%。",
-    tone: "nominal",
-  },
-  {
-    id: 2,
-    at: "T−02:15",
-    source: "乘客事务部",
-    text: "首批轮值清醒名单已完成医疗复核。",
-    tone: "nominal",
-  },
-  {
-    id: 3,
-    at: "T−00:42",
-    source: "舰长 AI",
-    text: "等待最高指令签发。所有执行权限保持冻结。",
-    tone: "watch",
-  },
-];
 
 export const INITIAL_SYSTEMS: SystemCard[] = [
   {
@@ -291,43 +267,6 @@ export const AI_ROSTER = [
     model: "轻量模型",
     state: "处理生活服务队列",
     cadence: "12 小时",
-  },
-];
-
-// ─── 乘客占位（未连接 Worker 时的预览） ───────────────────────
-
-export const PASSENGERS = [
-  {
-    name: "周弦",
-    role: "材料工程师",
-    cabin: "A-17-042",
-    state: "清醒",
-    trust: 74,
-    note: "对舰长 AI 保持谨慎信任",
-  },
-  {
-    name: "沈绫",
-    role: "儿科医生",
-    cabin: "B-04-116",
-    state: "休眠",
-    trust: 91,
-    note: "医疗应急唤醒序列 07",
-  },
-  {
-    name: "罗德里格斯",
-    role: "生态农艺师",
-    cabin: "A-21-008",
-    state: "清醒",
-    trust: 63,
-    note: "要求扩大农业环供电配额",
-  },
-  {
-    name: "韩祁",
-    role: "独立记者",
-    cabin: "B-11-033",
-    state: "清醒",
-    trust: 41,
-    note: "持续申请访问舰内事故记录",
   },
 ];
 

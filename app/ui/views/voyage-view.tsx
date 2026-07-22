@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import type {
   ShipState,
   SystemTone,
@@ -37,6 +38,8 @@ export function VoyageView({
   navigation: NavigationTelemetry | null;
   rotation: RotationTelemetry["observed"] | null;
 }) {
+  const [directiveExpanded, setDirectiveExpanded] = useState(false);
+  const directiveIsLong = directive.length > 48;
   const originSystem = STAR_SYSTEMS.find((system) => system.id === origin)!;
   const destinationSystem = STAR_SYSTEMS.find(
     (system) => system.id === destination,
@@ -305,7 +308,27 @@ export function VoyageView({
             </div>
           )}
         </div>
-        <div className="directive-strip">
+        <div
+          className={`directive-strip${directiveExpanded ? " expanded" : ""}`}
+          onClick={
+            directiveIsLong
+              ? () => setDirectiveExpanded((value) => !value)
+              : undefined
+          }
+          onKeyDown={
+            directiveIsLong
+              ? (event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    setDirectiveExpanded((value) => !value);
+                  }
+                }
+              : undefined
+          }
+          role={directiveIsLong ? "button" : undefined}
+          tabIndex={directiveIsLong ? 0 : undefined}
+          aria-expanded={directiveIsLong ? directiveExpanded : undefined}
+        >
           <span className="directive-seal">最高指令</span>
           <p>{directive}</p>
         </div>
@@ -363,7 +386,7 @@ export function VoyageView({
                 {system.tone === "critical"
                   ? "告警"
                   : system.tone === "watch"
-                    ? "进行"
+                    ? "关注"
                     : "正常"}
               </StatusPill>
             </div>

@@ -79,12 +79,7 @@ import {
   BATTERY_CONTROL_MODE_SET,
   REACTOR_MODES,
   REACTOR_MODE_SET,
-  MAX_TIMELINE_EVENTS,
-  INITIAL_EVENTS,
-  INITIAL_SYSTEMS,
   FORCE_FIELDS,
-  AI_ROSTER,
-  PASSENGERS,
   MAX_CAPTAIN_WORLD_COMMANDS_PER_CYCLE,
   AUTHORIZED_CONTROLLER_RECORD_DELAY_SECONDS,
   AUTHORIZED_MANIFEST_RECORD_DELAY_SECONDS,
@@ -691,15 +686,31 @@ export function MissionControl() {
   const [directive, setDirective] = useState(
     "以乘员存续为最高原则，将远穹号安全送达目标星系；允许舰长根据实际风险自主规划航路与清醒比例。",
   );
-  const [events, setEvents] = useState<TimelineEvent[]>(INITIAL_EVENTS);
+  const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [eventFilter, setEventFilter] = useState<"all" | SystemTone>("all");
-  const [toast, setToast] = useState("");
+  const [eventRailOpen, setEventRailOpen] = useState(false);
+  const [loadConfirmOpen, setLoadConfirmOpen] = useState(false);
+  const [toast, setToast] = useState<{
+    message: string;
+    persistent?: boolean;
+  } | null>(null);
+  const showToast = useCallback(
+    (message: string, options?: { persistent?: boolean }) => {
+      setToast({ message, persistent: options?.persistent });
+    },
+    [],
+  );
+  const [hasLocalSave, setHasLocalSave] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem("farhorizon-save") !== null;
+  });
   const [lastSaveTime, setLastSaveTime] = useState<string | null>(null);
   const [activeAlerts, setActiveAlerts] = useState<ActiveAlert[]>([]);
   const knownAlertIds = useRef(new Set<string>());
   const audio = useAudio();
+  // 固定种子：程序化异常在协调层确定性复现，不依赖墙钟。
   const proceduralScheduler = useRef(
-    new ProceduralEventScheduler(Date.now() & 0xffffffff),
+    new ProceduralEventScheduler(0x5941_5248),
   );
   const eventId = useRef(10);
   const knownMaintenanceCompletionIds = useRef(new Set<string>());
@@ -751,6 +762,13 @@ export function MissionControl() {
   >([]);
   const discardedCaptainCommandRequests = useRef(new Set<string>());
   const finalReportRequested = useRef(false);
+  const injectCausalEventRef = useRef<
+    (
+      eventType: string,
+      label: string,
+      options?: { actor?: string },
+    ) => void
+  >(() => {});
   const appendCaptainCommandEvent = useCallback(
     (
       elapsedSeconds: number,
@@ -849,7 +867,7 @@ export function MissionControl() {
       );
       activeCaptainWorldCommandQueue.current = null;
       setPaused(true);
-      setToast("舰长命令队列停止：物理引擎状态不可用。");
+      showToast("舰长命令队列停止：物理引擎状态不可用。");
       return;
     }
 
@@ -925,7 +943,7 @@ export function MissionControl() {
       requestId,
     };
     worker.postMessage(command);
-    setToast("物理事务已静止，正在封装一致性快照……");
+    showToast("物理事务已静止，正在封装一致性快照……");
   }, []);
 
   useEffect(() => {
@@ -988,7 +1006,7 @@ export function MissionControl() {
           activeCaptainWorldCommandQueue.current = null;
           captainInvocationKeys.current.delete(queue.triggerKey);
           setPaused(true);
-          setToast(`舰长命令队列停止：${event.message}`);
+          showToast(`舰长命令队列停止：${event.message}`);
           requestSaveSnapshotWhenQuiescent();
           return;
         }
@@ -1001,18 +1019,19 @@ export function MissionControl() {
           ) {
             setPaused(false);
           }
-          setToast(`一致性存档失败：${event.message}`);
+          showToast(`一致性存档失败：${event.message}`, { persistent: true });
           return;
         }
         if (pendingLoad.current?.requestId === event.requestId) {
           pendingLoad.current = null;
-          setToast(
+          showToast(
             `存档恢复被拒绝，当前世界保持不变：${event.message}`,
+            { persistent: true },
           );
           return;
         }
         setPaused(true);
-        setToast(`物理引擎拒绝操作：${event.message}`);
+        showToast(`物理引擎拒绝操作：${event.message}`);
         return;
       }
       if (event.type === "snapshot") {
@@ -1035,13 +1054,14 @@ export function MissionControl() {
           JSON.stringify(save),
         );
         setLastSaveTime(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }));
+        setHasLocalSave(true);
         if (
           !pendingSave.metadata.paused &&
           !latestMissionEnded.current
         ) {
           setPaused(false);
         }
-        setToast("完整本地存档已写入。");
+        showToast("完整本地存档已写入。");
         return;
       }
       if (event.type === "final-report") {
@@ -1082,7 +1102,7 @@ export function MissionControl() {
         setFinalReport(null);
         setEndReportDismissed(false);
         finalReportRequested.current = false;
-        setToast("物理、人员与命令审计状态已原子恢复。");
+        showToast("物理、人员与命令审计状态已原子恢复。");
       }
       setSimulationSeconds(event.payload.elapsedSeconds);
       latestSimulationSeconds.current = event.payload.elapsedSeconds;
@@ -1147,6 +1167,13 @@ export function MissionControl() {
           if (procEvent.severity === "warning" || procEvent.severity === "critical") {
             audio.playAlertWatch();
           }
+          if (procEvent.interventionEventType) {
+            injectCausalEventRef.current(
+              procEvent.interventionEventType,
+              procEvent.message,
+              { actor: "environment:procedural" },
+            );
+          }
         }
       }
 
@@ -1186,16 +1213,20 @@ export function MissionControl() {
       }
       if (event.type === "intervention") {
         const timelineEventId = ++eventId.current;
+        const actor = event.payload.record.actor;
+        const source = actor.startsWith("environment")
+          ? "外部异常 / 因果链"
+          : "玩家 / 上帝模式";
         setEvents((current) =>
           prependTimelineEvent(current, {
             id: timelineEventId,
             at: formatDuration(event.payload.elapsedSeconds),
-            source: "玩家 / 上帝模式",
+            source,
             text: `外部干预已提交物理账本：${event.payload.record.reason}`,
             tone: "critical",
           }),
         );
-        setToast(`外部注入已记账：${event.payload.record.id}`);
+        showToast(`外部注入已记账：${event.payload.record.id}`);
       }
       if (event.type === "ship-command") {
         const queue = activeCaptainWorldCommandQueue.current;
@@ -1225,7 +1256,7 @@ export function MissionControl() {
             tone: "nominal",
           }),
         );
-        setToast(event.payload.result.summary);
+        showToast(event.payload.result.summary);
         if (event.payload.result.journeyStatus === "arrived") {
           setPaused(true);
           setMissionEnded(true);
@@ -1307,7 +1338,7 @@ export function MissionControl() {
         captainInvocationKeys.current.delete(queue.triggerKey);
       }
       setPaused(true);
-      setToast(`仿真线程异常：${event.message}`);
+      showToast(`仿真线程异常：${event.message}`);
     };
 
     return () => {
@@ -1387,8 +1418,8 @@ export function MissionControl() {
   ]);
 
   useEffect(() => {
-    if (!toast) return;
-    const timer = window.setTimeout(() => setToast(""), 2_400);
+    if (!toast || toast.persistent) return;
+    const timer = window.setTimeout(() => setToast(null), 2_400);
     return () => window.clearTimeout(timer);
   }, [toast]);
 
@@ -2840,7 +2871,7 @@ export function MissionControl() {
             tone: "critical",
           }),
         );
-        setToast(`舰长调用暂停：${message}`);
+        showToast(`舰长调用暂停：${message}`);
         setLlmCallPhase("error");
         setPaused(true);
       } finally {
@@ -3040,7 +3071,7 @@ export function MissionControl() {
             setLlmStatus(statusPayload.llm);
           }
         }
-        setToast(
+        showToast(
           `${candidate.observation.displayName} 的私人终端记录已更新。`,
         );
       } catch (error) {
@@ -3053,7 +3084,7 @@ export function MissionControl() {
         );
         const message =
           error instanceof Error ? error.message : String(error);
-        setToast(
+        showToast(
           `关键乘客 ${candidate.observation.displayName} 调用延后重试：${message}`,
         );
       } finally {
@@ -3099,7 +3130,7 @@ export function MissionControl() {
         tone,
       }),
     );
-    setToast(`${source}：${text}`);
+    showToast(`${source}：${text}`);
   };
 
   const startMission = () => {
@@ -3107,19 +3138,21 @@ export function MissionControl() {
       pendingSaveBarrier.current !== null ||
       pendingSaves.current.size > 0
     ) {
-      setToast("请等待当前一致性存档完成后再签发新任务。");
+      showToast("请等待当前一致性存档完成后再签发新任务。", {
+        persistent: true,
+      });
       return;
     }
     if (origin === destination) {
-      setToast("出发地与目的地不能相同。");
+      showToast("出发地与目的地不能相同。");
       return;
     }
     if (!directive.trim()) {
-      setToast("最高指令不能为空。");
+      showToast("最高指令不能为空。");
       return;
     }
     if (!workerRef.current) {
-      setToast("物理引擎尚未完成装载，请稍后重试。");
+      showToast("物理引擎尚未完成装载，请稍后重试。");
       return;
     }
     const command: SimulationWorkerCommand = {
@@ -3169,7 +3202,7 @@ export function MissionControl() {
       pendingSaveBarrier.current !== null ||
       pendingSaves.current.size > 0
     ) {
-      setToast("一致性存档已在进行，请等待完成。");
+      showToast("一致性存档已在进行，请等待完成。", { persistent: true });
       return;
     }
     cancelKeyPassengerCall();
@@ -3198,11 +3231,12 @@ export function MissionControl() {
         JSON.stringify(save),
       );
       setLastSaveTime(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }));
-      setToast("任务配置已保存到本机。");
+      setHasLocalSave(true);
+      showToast("任务配置已保存到本机。");
       return;
     }
     if (!engineState || !workerRef.current) {
-      setToast("物理引擎仍在建立一致性状态，请稍后存档。");
+      showToast("物理引擎仍在建立一致性状态，请稍后存档。");
       return;
     }
     const queue = activeCaptainWorldCommandQueue.current;
@@ -3218,7 +3252,7 @@ export function MissionControl() {
     pendingSaveBarrier.current = { metadata: saveMetadata };
     setPaused(true);
     requestSaveSnapshotWhenQuiescent();
-    setToast(
+    showToast(
       stepInFlight.current ||
         activeCaptainWorldCommandQueue.current !== null
         ? "正在等待在途物理事务完成后建立存档屏障……"
@@ -3226,17 +3260,34 @@ export function MissionControl() {
     );
   };
 
-  const loadGame = () => {
+  const requestLoadGame = () => {
     if (
       pendingSaveBarrier.current !== null ||
       pendingSaves.current.size > 0
     ) {
-      setToast("请等待当前一致性存档完成后再加载。");
+      showToast("请等待当前一致性存档完成后再加载。", { persistent: true });
       return;
     }
     const raw = window.localStorage.getItem("farhorizon-save");
     if (!raw) {
-      setToast("尚未找到本地存档。");
+      showToast("尚未找到本地存档。", { persistent: true });
+      return;
+    }
+    setLoadConfirmOpen(true);
+  };
+
+  const confirmLoadGame = () => {
+    setLoadConfirmOpen(false);
+    if (
+      pendingSaveBarrier.current !== null ||
+      pendingSaves.current.size > 0
+    ) {
+      showToast("请等待当前一致性存档完成后再加载。", { persistent: true });
+      return;
+    }
+    const raw = window.localStorage.getItem("farhorizon-save");
+    if (!raw) {
+      showToast("尚未找到本地存档。", { persistent: true });
       return;
     }
     try {
@@ -3287,7 +3338,7 @@ export function MissionControl() {
           snapshot: save.runtimeSnapshot,
         };
         workerRef.current.postMessage(command);
-        setToast("正在原子校验并恢复完整运行时……");
+        showToast("正在原子校验并恢复完整运行时……");
         return;
       } else {
         knownMaintenanceCompletionIds.current.clear();
@@ -3325,9 +3376,9 @@ export function MissionControl() {
         setEndReportDismissed(false);
         finalReportRequested.current = false;
       }
-      setToast("任务配置已恢复。");
+      showToast("任务配置已恢复。");
     } catch {
-      setToast("存档格式损坏或版本过旧，未执行加载。");
+      showToast("存档格式损坏或版本过旧，未执行加载。", { persistent: true });
     }
   };
 
@@ -3339,11 +3390,13 @@ export function MissionControl() {
       pendingSaveBarrier.current !== null ||
       pendingSaves.current.size > 0
     ) {
-      setToast("一致性存档期间暂不接受新的外部干预。");
+      showToast("一致性存档期间暂不接受新的外部干预。", {
+        persistent: true,
+      });
       return;
     }
     if (!missionStarted || !workerRef.current) {
-      setToast("必须先签发最高指令，才能干预正在运行的世界。");
+      showToast("必须先签发最高指令，才能干预正在运行的世界。");
       return;
     }
     const command: SimulationWorkerCommand = {
@@ -3358,12 +3411,16 @@ export function MissionControl() {
     setLlmCallPhase("idle");
     worldEpoch.current += 1;
     workerRef.current.postMessage(command);
-    setToast(`正在执行并校验：${eventText}`);
+    showToast(`正在执行并校验：${eventText}`);
   };
 
-  const injectCausalEvent = (eventType: string, label: string) => {
+  const injectCausalEvent = (
+    eventType: string,
+    label: string,
+    options?: { actor?: string },
+  ) => {
     const common = {
-      actor: "player:god-mode",
+      actor: options?.actor ?? "player:god-mode",
       metadata: {
         mode: "causal-event",
         eventType,
@@ -3537,12 +3594,16 @@ export function MissionControl() {
     submitIntervention(request, `已触发因果事件：${label}`);
   };
 
+  useEffect(() => {
+    injectCausalEventRef.current = injectCausalEvent;
+  });
+
   const forceOverride = (
     field: (typeof FORCE_FIELDS)[number],
     value: number,
   ) => {
     if (!engineState) {
-      setToast("尚无可覆写的物理快照。");
+      showToast("尚无可覆写的物理快照。");
       return;
     }
 
@@ -3599,6 +3660,21 @@ export function MissionControl() {
     );
   };
 
+  const simStatus = missionEnded
+    ? { tone: "paused", text: "航程已结束 · 控制台只读" }
+    : llmCallPhase === "waiting"
+      ? { tone: "waiting", text: "时间已冻结 · 等待舰长关键决策" }
+      : missionStarted && !llmStatus?.ready
+        ? {
+            tone: "blocked",
+            text: "物理可继续 · 关键 AI 决策等待本机 LLM 密钥",
+          }
+        : paused && missionStarted
+          ? { tone: "paused", text: "模拟已暂停 · Space 继续" }
+          : missionStarted
+            ? { tone: "live", text: "模拟推进中" }
+            : { tone: "paused", text: "等待签发最高指令" };
+
   return (
     <main className={`game-shell${activeAlerts.some((a) => !a.acknowledged && a.level === "critical") ? " alert-active" : ""}`}>
       <div className="noise-layer" />
@@ -3635,16 +3711,26 @@ export function MissionControl() {
                 ? "目标安全区已确认"
                 : llmCallPhase === "waiting"
                   ? "等待舰长关键决策"
-                  : missionStarted
-                    ? "最高指令生效"
-                    : "任务尚未签发"}
+                  : missionStarted && !llmStatus?.ready
+                    ? "缺少 LLM 密钥"
+                    : missionStarted
+                      ? paused
+                        ? "模拟已暂停"
+                        : "最高指令生效"
+                      : "任务尚未签发"}
             </strong>
             <small>
               {missionEnded
                 ? "航程结束 · 等待人类接管"
-                : missionStarted
-                  ? "舰长拥有全舰指挥权"
-                  : "执行权限已冻结"}
+                : llmCallPhase === "waiting"
+                  ? "时间已冻结"
+                  : missionStarted && !llmStatus?.ready
+                    ? "关键 AI 决策需本机密钥"
+                    : missionStarted
+                      ? paused
+                        ? "按 Space 继续模拟"
+                        : "舰长拥有全舰指挥权"
+                      : "执行权限已冻结"}
             </small>
           </div>
         </div>
@@ -3652,8 +3738,24 @@ export function MissionControl() {
           <button type="button" onClick={saveGame}>
             存档
           </button>
-          <button type="button" onClick={loadGame}>
+          <button type="button" onClick={requestLoadGame}>
             读取
+          </button>
+          <button
+            type="button"
+            className={`audio-mute-btn${audio.enabled ? "" : " is-muted"}`}
+            onClick={() => {
+              if (audio.enabled) {
+                audio.playClick();
+                audio.setEnabled(false);
+              } else {
+                audio.setEnabled(true);
+                audio.playClick();
+              }
+            }}
+            title="静音开关"
+          >
+            {audio.enabled ? "声" : "静音"}
           </button>
           {lastSaveTime && (
             <span className="last-save-time" title="上次存档时间">
@@ -3672,6 +3774,8 @@ export function MissionControl() {
               aria-current={
                 activeView === item.id ? "page" : undefined
               }
+              aria-disabled={!missionStarted}
+              disabled={!missionStarted}
               key={item.id}
               onClick={() => setActiveView(item.id)}
               type="button"
@@ -3735,11 +3839,16 @@ export function MissionControl() {
                         : "1D/s"}
               </button>
             ))}
+            <span className="hotkey-hint">1–5 倍率 · Space 暂停</span>
             <button
               className={`pause-button${llmCallPhase === "waiting" ? " thinking" : ""}`}
               onClick={() => { setPaused((value) => !value); audio.playClick(); }}
               type="button"
-              title="快捷键 Space"
+              title={
+                missionStarted && !llmStatus?.ready && paused
+                  ? "模拟已暂停 · 缺少本机 LLM 密钥"
+                  : "快捷键 Space"
+              }
               disabled={
                 !missionStarted ||
                 missionEnded ||
@@ -3755,6 +3864,14 @@ export function MissionControl() {
                     : "⏸ 暂停"}
             </button>
           </div>
+        </div>
+
+        <div
+          className="sim-status-strip"
+          data-tone={simStatus.tone}
+          role="status"
+        >
+          {simStatus.text}
         </div>
 
         <div className="view-stage">
@@ -3815,7 +3932,24 @@ export function MissionControl() {
         </div>
       </section>
 
-      <aside className="event-rail" aria-label="事件时间线">
+      <button
+        type="button"
+        className="event-rail-toggle"
+        aria-expanded={eventRailOpen}
+        onClick={() => setEventRailOpen((value) => !value)}
+      >
+        事件 {events.length}
+      </button>
+      <button
+        type="button"
+        className={`event-rail-backdrop${eventRailOpen ? " is-open" : ""}`}
+        aria-label="关闭事件时间线"
+        onClick={() => setEventRailOpen(false)}
+      />
+      <aside
+        className={`event-rail${eventRailOpen ? " is-open" : ""}`}
+        aria-label="事件时间线"
+      >
         <div className="event-rail-heading">
           <div>
             <span className="eyebrow">EVENT STREAM</span>
@@ -3973,7 +4107,25 @@ export function MissionControl() {
                   ? "8 个固定部门端点已就绪"
                   : "尚未配置全部云端密钥；可启动物理纵切，但关键 AI 决策将等待"}
               </strong>
+              {!llmStatus?.ready && (
+                <div className="llm-guidance">
+                  配置云端密钥后重启开发服务。DeepSeek 快捷启动：
+                  <code>npm run dev:deepseek</code>
+                  ；或复制 <code>.env.example</code> 为 <code>.env.local</code>{" "}
+                  填写
+                  <code>SHIP_*_LLM_API_KEY</code>。详见 README「配置云端 LLM」。
+                </div>
+              )}
             </div>
+            {hasLocalSave && (
+              <button
+                className="launch-load-button"
+                onClick={requestLoadGame}
+                type="button"
+              >
+                读取本机存档
+              </button>
+            )}
             <button
               className="launch-button"
               onClick={startMission}
@@ -3983,6 +4135,36 @@ export function MissionControl() {
               <span>签发并移交全舰指挥权</span>
               <strong>EXECUTE DIRECTIVE</strong>
             </button>
+          </div>
+        </div>
+      )}
+
+      {loadConfirmOpen && (
+        <div
+          className="launch-layer"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="load-confirm-title"
+        >
+          <div className="launch-card">
+            <div className="launch-card-heading">
+              <span className="launch-number">↺</span>
+              <div>
+                <span className="eyebrow">LOCAL SAVE / 本地存档</span>
+                <h2 id="load-confirm-title">读取本地存档</h2>
+                <p>
+                  将覆盖当前会话中的航程进度、事件与 AI 状态。此操作不可撤销。
+                </p>
+              </div>
+            </div>
+            <div className="end-actions">
+              <button type="button" onClick={() => setLoadConfirmOpen(false)}>
+                取消
+              </button>
+              <button type="button" onClick={confirmLoadGame}>
+                确认读取
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -4084,8 +4266,19 @@ export function MissionControl() {
       )}
 
       {toast && (
-        <div className="toast" role="status">
-          {toast}
+        <div
+          className={`toast${toast.persistent ? " is-persistent" : ""}`}
+          role="status"
+        >
+          {toast.message}
+          <button
+            type="button"
+            className="toast-dismiss"
+            aria-label="关闭提示"
+            onClick={() => setToast(null)}
+          >
+            ×
+          </button>
         </div>
       )}
     </main>

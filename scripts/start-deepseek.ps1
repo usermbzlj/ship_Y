@@ -1,3 +1,6 @@
+# Preferred cross-platform entry: npm run dev:deepseek (Node launcher).
+# This PowerShell script remains a Windows alternative via npm run dev:deepseek:ps1.
+
 param(
   [string]$CredentialFile = "",
   [string]$HostAddress = "127.0.0.1",

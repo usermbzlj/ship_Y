@@ -5,7 +5,6 @@ import type {
   PassengerHighlightTelemetry,
   KeyPassengerPrivateNote,
 } from "../types";
-import { PASSENGERS } from "../constants";
 import { formatDuration } from "../utils";
 import { StatusPill } from "../components/status-pill";
 
@@ -26,49 +25,38 @@ export function PeopleView({
   const privateNoteByPassengerId = new Map(
     privateNotes.map((note) => [note.passengerId, note]),
   );
-  const displayedPassengers =
-    highlights.length > 0
-      ? highlights.map((person) => {
-          const privateNote = privateNoteByPassengerId.get(
-            person.passengerId,
-          );
-          return {
-            id: person.passengerId,
-            name: person.name,
-            role: person.occupation,
-            cabin: person.cabinId,
-            zoneId: person.zoneId,
-            zoneCondition: person.zoneCondition,
-            zoneObservation:
-              person.lifeState === "hibernating"
-                ? "休眠舱内 · 分配区非实时位置"
-                : person.lifeState === "deceased"
-                  ? "个人区域记录已封存"
-                  : person.zoneObservedPressurePa === null
-                    ? "区域遥测等待中"
-                    : `${(person.zoneObservedPressurePa / 1_000).toFixed(1)} kPa · ${person.zoneObservationAgeSeconds?.toFixed(0) ?? "?"}s`,
-            state:
-              person.lifeState === "awake"
-                ? "清醒"
-                : person.lifeState === "hibernating"
-                  ? "休眠"
-                  : "死亡",
-            trust: Math.round(person.trust * 100),
-            note:
-              person.lifeState === "deceased"
-                ? "个人记录已封存"
-                : privateNote
-                  ? `私人终端 · ${formatDuration(privateNote.createdAtSimulationSeconds)}：${privateNote.text.slice(0, 220)}`
-                  : `身体 ${(person.physicalHealth * 100).toFixed(0)}% · 压力 ${(person.stress * 100).toFixed(0)}% · 等待私人终端轮询`,
-          };
-        })
-      : PASSENGERS.map((person) => ({
-          ...person,
-          id: `preview:${person.cabin}`,
-          zoneId: "待映射",
-          zoneCondition: "offline" as const,
-          zoneObservation: "区域遥测等待中",
-        }));
+  const displayedPassengers = highlights.map((person) => {
+    const privateNote = privateNoteByPassengerId.get(person.passengerId);
+    return {
+      id: person.passengerId,
+      name: person.name,
+      role: person.occupation,
+      cabin: person.cabinId,
+      zoneId: person.zoneId,
+      zoneCondition: person.zoneCondition,
+      zoneObservation:
+        person.lifeState === "hibernating"
+          ? "休眠舱内 · 分配区非实时位置"
+          : person.lifeState === "deceased"
+            ? "个人区域记录已封存"
+            : person.zoneObservedPressurePa === null
+              ? "区域遥测等待中"
+              : `${(person.zoneObservedPressurePa / 1_000).toFixed(1)} kPa · ${person.zoneObservationAgeSeconds?.toFixed(0) ?? "?"}s`,
+      state:
+        person.lifeState === "awake"
+          ? "清醒"
+          : person.lifeState === "hibernating"
+            ? "休眠"
+            : "死亡",
+      trust: Math.round(person.trust * 100),
+      note:
+        person.lifeState === "deceased"
+          ? "个人记录已封存"
+          : privateNote
+            ? `私人终端 · ${formatDuration(privateNote.createdAtSimulationSeconds)}：${privateNote.text.slice(0, 220)}`
+            : `身体 ${(person.physicalHealth * 100).toFixed(0)}% · 压力 ${(person.stress * 100).toFixed(0)}% · 等待私人终端轮询`,
+    };
+  });
   return (
     <section className="view-grid people-view" aria-label="乘员状态">
       <div className="panel population-panel">
@@ -113,7 +101,10 @@ export function PeopleView({
           </div>
           <div>
             <span>社会压力</span>
-            <strong>{morale > 0.75 ? "中低" : morale > 0.5 ? "偏高" : "危险"}</strong>
+            <strong>
+              {morale > 0.75 ? "中低" : morale > 0.5 ? "偏高" : "危险"} ·{" "}
+              {(morale * 100).toFixed(0)}%
+            </strong>
           </div>
           <div>
             <span>休眠舱占用</span>
@@ -131,58 +122,67 @@ export function PeopleView({
           </div>
         </div>
         <div className="passenger-list">
-          {displayedPassengers.map((passenger) => (
-            <article className="passenger-row" key={passenger.id}>
-              <div className="avatar">{passenger.name.slice(0, 1)}</div>
-              <div>
-                <strong>{passenger.name}</strong>
-                <span>
-                  {passenger.role} · {passenger.cabin} ·{" "}
-                  {passenger.zoneId}
-                </span>
-                <p>{passenger.note}</p>
-              </div>
-              <div className="passenger-state">
-                <StatusPill
-                  tone={
-                    passenger.state === "死亡" ||
-                    (passenger.state === "清醒" &&
-                      passenger.zoneCondition === "critical")
-                      ? "critical"
+          {displayedPassengers.length === 0 ? (
+            <div className="passenger-empty-note panel-note">
+              <strong>关键槽位已预留 · 列表为空</strong>
+              <p>
+                32 个固定关键乘客槽位已登记，当前尚无遥测入库。任务启动后，当乘员清醒时将开始私人终端轮询；在此之前本列表保持空白，不会显示占位乘客。
+              </p>
+            </div>
+          ) : (
+            displayedPassengers.map((passenger) => (
+              <article className="passenger-row" key={passenger.id}>
+                <div className="avatar">{passenger.name.slice(0, 1)}</div>
+                <div>
+                  <strong>{passenger.name}</strong>
+                  <span>
+                    {passenger.role} · {passenger.cabin} ·{" "}
+                    {passenger.zoneId}
+                  </span>
+                  <p>{passenger.note}</p>
+                </div>
+                <div className="passenger-state">
+                  <StatusPill
+                    tone={
+                      passenger.state === "死亡" ||
+                      (passenger.state === "清醒" &&
+                        passenger.zoneCondition === "critical")
+                        ? "critical"
+                        : passenger.state === "清醒" &&
+                            passenger.zoneCondition === "nominal"
+                          ? "nominal"
+                          : "watch"
+                    }
+                  >
+                    {passenger.state === "清醒" &&
+                    passenger.zoneCondition === "critical"
+                      ? "清醒 · 区域危险"
                       : passenger.state === "清醒" &&
-                          passenger.zoneCondition === "nominal"
-                        ? "nominal"
-                        : "watch"
-                  }
-                >
-                  {passenger.state === "清醒" &&
-                  passenger.zoneCondition === "critical"
-                    ? "清醒 · 区域危险"
-                    : passenger.state === "清醒" &&
-                        passenger.zoneCondition === "watch"
-                      ? "清醒 · 区域关注"
-                      : passenger.state}
-                </StatusPill>
-                <span>信任 {passenger.trust}</span>
-                <span>
-                  {passenger.state === "休眠"
-                    ? "休眠舱生命保障"
-                    : passenger.state === "死亡"
-                      ? "区域记录封存"
-                      : `区域 ${
-                          passenger.zoneCondition === "nominal"
-                            ? "正常"
-                            : passenger.zoneCondition === "watch"
-                              ? "关注"
-                              : passenger.zoneCondition === "critical"
-                                ? "危险"
-                                : "离线"
-                        }`}
-                </span>
-                <span>{passenger.zoneObservation}</span>
-              </div>
-            </article>
-          ))}
+                          passenger.zoneCondition === "watch"
+                        ? "清醒 · 区域关注"
+                        : passenger.state}
+                  </StatusPill>
+                  <span>信任 {passenger.trust}</span>
+                  <span>
+                    {passenger.state === "休眠"
+                      ? "休眠舱生命保障"
+                      : passenger.state === "死亡"
+                        ? "区域记录封存"
+                        : `区域 ${
+                            passenger.zoneCondition === "nominal"
+                              ? "正常"
+                              : passenger.zoneCondition === "watch"
+                                ? "关注"
+                                : passenger.zoneCondition === "critical"
+                                  ? "危险"
+                                  : "离线"
+                          }`}
+                  </span>
+                  <span>{passenger.zoneObservation}</span>
+                </div>
+              </article>
+            ))
+          )}
         </div>
       </div>
     </section>

@@ -1,6 +1,6 @@
 # 《远航》本地 TypeScript 引擎架构
 
-> 文档状态：目标架构 v1.2（已同步运行时快照 v15 / 本地存档 v18）  
+> 文档状态：目标架构 v1.2（已同步运行时快照 v15 / 本地存档 v18 / 任务控制台 UX）  
 > 对应产品规格：[PRODUCT_SPEC.md](./PRODUCT_SPEC.md)  
 > 目标运行方式：单机、单用户、本地 Web 应用  
 > 核心原则：确定性、单一真值源、物理因果优先、轻依赖、可逐步替换  
@@ -28,7 +28,8 @@
 
 | 区域 | 当前实现 | 已验证能力 |
 |---|---|---|
-| 游戏界面 | `app/mission-control.tsx` | 起点、终点与最高指令；航程、舰体、乘员、AI、上帝模式五个主视图；暂停、倍率、手动存取、最多 `500` 条的全舰事件时间线与抵达报告 |
+| 游戏界面 | `app/mission-control.tsx`、`app/ui/views/*`、`app/ui/procedural-events.ts`、`app/ui/use-audio.ts`、`app/globals.css` | 全屏签发层（`launch-layer`）：任务开始前侧栏导航禁用、事件时间线为空；签发后五主视图（航程 / 舰体 / 乘员 / AI 观察 / 人工干预），舰体区使用 `detail-view` + `topology-grid`；时间倍率 `1800` / `3600` / `7200` / `21600` / `86400`（UI 标签 `30m/s`–`1D/s`），快捷键 `1`–`5` 与 `Space` 暂停；`sim-status-strip` 四态：`live` / `waiting` / `blocked` / `paused`；事件轨最多保留 `500` 条，窄屏（`≤1100px`）折叠为 `event-rail` 抽屉（切换钮 + 背景遮罩）；上帝干预内联确认条、读档覆盖确认对话框；乘员页对 `32` 个关键槽位在遥测入库前显示诚实空态；主音量静音、可关闭持久 toast、可展开最高指令条；签发卡含 LLM 缺密钥指引与本机存档探测（`localStorage` 键 `farhorizon-save`）；暂停、倍率、手动存取与抵达报告 |
+| 程序化事件 | `app/ui/procedural-events.ts`、`app/mission-control.tsx` | React 协调层固定种子调度器（种子未写入存档、新航程未重播种）；`7` 类事件；仅 `micrometeoroid`、`coolant-pump-seizure`（`equipment-wear` 触发）、`stellar-flare`（`radiation-event` 触发）经 `actor: "environment:procedural"` 注入 Worker 物理因果；其余类型（传感器漂移、乘客社会、休眠并发症、配电波动等）主要写入叙事时间线；干预回执在时间线区分来源：`environment:*` →「外部异常 / 因果链」，`player:god-mode` →「玩家 / 上帝模式」 |
 | Worker 运行时 | `lib/sim/worker.ts`、`lib/sim/protocol.ts` | Worker 是物理世界单一写入者；支持初始化、推进、干预、舰船命令、检查、快照、恢复和最终报告 |
 | 确定性基础 | `lib/sim/index.ts`、`lib/sim/worker.ts` | 整数微秒时钟、种子随机流、确定性事件队列、多速率调度、状态校验和快照精确续跑；核心、人员、舱室、冷却、电力、导航、旋转、水、维修九域公共切片正常不超过 `60 s`，推进活动或旋转环失衡、故障、非 `speed-hold` 控制时不超过 `1 s`，导航活动积分内部使用 `0.1 s` 子步 |
 | 聚合系统 | `lib/sim/index.ts` | 环境、休眠、跃迁充能和航程的降阶更新；电力、大气、热与水使用 `external-network`，正式 Worker 的人口使用 `external-roster`，只接收对应物理域或个体名册的权威投影 |
@@ -202,6 +203,8 @@ tests/
 ```
 
 拆分应在功能接入时渐进进行，不为了目录整齐一次性重写已经通过测试的代码。`lib/sim/index.ts` 与 `lib/llm/index.ts` 在迁移期继续作为稳定入口。
+
+当前任务控制台已把 UI 拆到 `app/ui/`（`views/`、`components/`、工具与常量），`app/mission-control.tsx` 仍承担 Worker/LLM 协调、存档屏障与页面组合，不是单一展示 monolith。
 
 ## 5. 权威状态与确定性
 
@@ -1278,10 +1281,14 @@ LLM 提示构建器只接收 `ObservationSnapshot`，类型层面禁止传入 `W
 
 - 星图、路线规划、常规推进、六自由度和人工重力；
 - 成熟跃迁设备流程和多段航程；
-- 程序化事件与社会事件；
+- 完整程序化事件库与社会级联（火灾、疫情、罢工等）；
 - 改道、安全港、成功、失败和玩家终止；
 - 抵达即结束；
 - 每名乘客的体验结论和群体分歧。
+
+**部分已实现**：React 协调层 `ProceduralEventScheduler`（`7` 类、固定种子）与 `3` 条经 `environment:procedural` 的物理因果注入（微流星体、冷却泵卡死、恒星耀斑）；其余类型主要为叙事时间线条目。
+
+**仍缺**：规格级完整事件库（火灾 / 疫情 / 罢工等）、社会级联、调度器状态写入快照、按航程重播种。
 
 当前已接通起点、终点、最高指令、分段跃迁能耗与废热、里程、抵达即结束、幸存者统计和代表性乘客评价，也具备局部惯性系中的六自由度火炬推进与双反向旋转环人工重力纵切。跃迁完成会创建新的导航 frame epoch，保持速度、姿态、角速度、环速、磨损和库存连续，重基准导航—旋转交换账并隔离旧延迟导航样本。星图位置、总距离和航段估算仍是轻量场景数据；尚无真实星历/轨道导航、恒星级坐标与局部 frame 的真实变换、完整旋转结构/人员后果、改道/安全港、完整失败结局和系统化社会事件。
 

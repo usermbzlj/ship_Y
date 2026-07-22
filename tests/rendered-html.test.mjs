@@ -60,7 +60,13 @@ test("production source contains a real worker-backed simulator, not starter UI"
   assert.match(simulationWorker, /SimulationEngine/);
   assert.match(simulationWorker, /applyExternalIntervention/);
   assert.match(css, /\.launch-layer/);
+  assert.match(css, /\.sim-status-strip/);
+  assert.match(css, /\.event-rail-toggle/);
+  assert.match(css, /\.god-confirm-bar/);
   assert.match(css, /prefers-reduced-motion:\s*reduce/);
+  assert.match(missionControl, /environment:procedural/);
+  assert.match(missionControl, /farhorizon-save/);
+  assert.match(missionControl, /sim-status-strip/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   assert.doesNotMatch(missionControl, /SkeletonPreview/);
 
@@ -69,5 +75,7 @@ test("production source contains a real worker-backed simulator, not starter UI"
   );
   await access(new URL("../docs/PRODUCT_SPEC.md", import.meta.url));
   await access(new URL("../docs/ENGINE_ARCHITECTURE.md", import.meta.url));
+  await access(new URL("../scripts/start-deepseek.mjs", import.meta.url));
+  await access(new URL("../scripts/check-env.mjs", import.meta.url));
   await access(projectRoot);
 });

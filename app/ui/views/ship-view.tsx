@@ -17,7 +17,7 @@ export function ShipView({
   compartments,
   cooling,
   electrical,
-  rotation,
+  rotation: _rotation,
   waterRecovery,
   maintenance,
 }: {
@@ -127,8 +127,8 @@ export function ShipView({
     : [];
 
   return (
-    <section className="view-grid ship-view" aria-label="舰体系统">
-      <div className="panel hull-panel">
+    <section className="view-grid detail-view" aria-label="舰体系统">
+      <div className="panel topology-panel">
         <div className="panel-heading">
           <div>
             <span className="eyebrow">HULL INTEGRITY / 结构</span>
@@ -144,8 +144,8 @@ export function ShipView({
                   : "48 区正常"}
           </StatusPill>
         </div>
-        <div className="hull-topology">
-          <div className="topology-node topology-node-generator">
+        <div className="topology-grid">
+          <div className="topology-core">
             <span>聚变发电</span>
             <strong>
               {electrical?.observed.totalReactorOutputKw != null
