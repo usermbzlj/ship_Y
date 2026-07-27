@@ -1146,11 +1146,15 @@ textarea:focus-visible {
 
 .ship-schematic {
   position: relative;
-  min-height: 205px;
+  display: flex;
+  min-height: 220px;
   flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 56px;
   overflow: hidden;
   background:
-    radial-gradient(circle at 51% 48%, rgba(69, 103, 105, 0.15), transparent 37%),
+    radial-gradient(circle at 50% 50%, rgba(69, 103, 105, 0.15), transparent 42%),
     linear-gradient(rgba(81, 109, 111, 0.035) 1px, transparent 1px),
     linear-gradient(90deg, rgba(81, 109, 111, 0.035) 1px, transparent 1px);
   background-size:
@@ -1159,120 +1163,33 @@ textarea:focus-visible {
     22px 22px;
 }
 
-.ship-schematic::before {
-  position: absolute;
-  top: 50%;
-  right: 8%;
-  left: 8%;
-  height: 1px;
-  content: "";
-  background: rgba(150, 192, 189, 0.12);
-}
-
-.ship-spine {
-  position: absolute;
-  top: calc(50% - 5px);
-  right: 17%;
-  left: 12%;
-  height: 10px;
-  clip-path: polygon(0 50%, 7% 0, 94% 0, 100% 50%, 94% 100%, 7% 100%);
-  background: linear-gradient(90deg, #859b9a, #415456 70%, #273638);
-  box-shadow: 0 0 14px rgba(150, 192, 189, 0.2);
-}
-
-.ship-shield {
-  position: absolute;
-  z-index: 2;
-  top: calc(50% - 25px);
-  left: 10%;
-  width: 16px;
-  height: 50px;
-  border-left: 5px solid #82918f;
-  border-radius: 50%;
-  filter: drop-shadow(0 0 7px rgba(180, 207, 202, 0.18));
-}
-
 .ship-ring {
-  position: absolute;
-  z-index: 3;
-  top: 50%;
-  width: 28px;
-  height: 104px;
-  border: 3px solid #819796;
+  position: relative;
+  width: 72px;
+  height: 72px;
+  border: 2px solid #819796;
   border-radius: 50%;
-  transform: translateY(-50%);
   box-shadow:
-    inset 0 0 10px rgba(150, 192, 189, 0.12),
-    0 0 10px rgba(150, 192, 189, 0.12);
-}
-
-.ship-ring::after {
-  position: absolute;
-  top: 48%;
-  right: -10px;
-  left: -10px;
-  height: 3px;
-  content: "";
-  background: #45595b;
+    inset 0 0 12px rgba(150, 192, 189, 0.1),
+    0 0 12px rgba(150, 192, 189, 0.1);
 }
 
 .ship-ring span {
   position: absolute;
-  top: -16px;
+  top: 50%;
   left: 50%;
   color: var(--dim);
-  font: 500 7px/1 var(--font-mono);
-  transform: translateX(-50%);
+  font: 500 11px/1 var(--font-mono);
+  letter-spacing: 0.08em;
+  transform: translate(-50%, -50%);
 }
 
 .ring-alpha {
-  left: 40%;
+  border-color: #8aa5a3;
 }
 
 .ring-beta {
-  left: 54%;
-}
-
-.ship-core {
-  position: absolute;
-  z-index: 4;
-  top: calc(50% - 12px);
-  left: 46%;
-  width: 24px;
-  height: 24px;
-  border: 1px solid var(--amber);
-  background: #182023;
-  transform: rotate(45deg);
-  box-shadow: 0 0 15px rgba(230, 173, 72, 0.2);
-}
-
-.ship-engine {
-  position: absolute;
-  right: 13%;
-  width: 25px;
-  height: 7px;
-  clip-path: polygon(0 0, 100% 24%, 100% 76%, 0 100%);
-  background: #415355;
-}
-
-.engine-one {
-  top: calc(50% - 17px);
-}
-
-.engine-two {
-  top: calc(50% - 3px);
-}
-
-.engine-three {
-  top: calc(50% + 11px);
-}
-
-.ship-axis {
-  position: absolute;
-  top: 20px;
-  bottom: 20px;
-  left: 50%;
-  border-left: 1px dashed rgba(150, 192, 189, 0.1);
+  border-color: #6f8b8a;
 }
 
 .ship-facts {
@@ -1283,11 +1200,11 @@ textarea:focus-visible {
 
 .ship-facts > div {
   display: flex;
-  min-height: 55px;
+  min-height: 64px;
   flex-direction: column;
   justify-content: center;
-  gap: 5px;
-  padding-left: 15px;
+  gap: 8px;
+  padding: 10px 18px;
 }
 
 .ship-facts > div + div {
@@ -1307,6 +1224,10 @@ textarea:focus-visible {
 .population-metrics strong {
   color: #b9c8c5;
   font: 500 11px/1 var(--font-mono);
+}
+
+.ship-facts strong {
+  font-size: 14px;
 }
 
 .survival-pressure {
@@ -4445,7 +4366,17 @@ textarea:focus-visible {
   }
 
   .ship-facts > div {
-    padding-left: 10px;
+    padding: 8px 12px;
+  }
+
+  .ship-schematic {
+    gap: 36px;
+    min-height: 180px;
+  }
+
+  .ship-ring {
+    width: 60px;
+    height: 60px;
   }
 
   .event-list,
@@ -5077,16 +5008,12 @@ button:active:not(:disabled) {
   }
 }
 
-/* 旋转环动画 — 舰体示意图 */
-.ship-ring {
-  transition: transform 0.5s ease;
-}
-
+/* 旋转环动画 — 居住环对转指示 */
 .ship-ring .ring-spin-marker {
   position: absolute;
-  inset: -3px;
-  border: 1px solid transparent;
-  border-top-color: rgba(150, 192, 189, 0.55);
+  inset: -4px;
+  border: 2px solid transparent;
+  border-top-color: rgba(150, 192, 189, 0.65);
   border-radius: 50%;
   pointer-events: none;
   opacity: 0;
@@ -5097,6 +5024,10 @@ button:active:not(:disabled) {
   animation: ring-spin var(--ring-period, 30s) linear infinite;
 }
 
+.ship-ring.ring-spinning.ring-spin-reverse .ring-spin-marker {
+  animation-direction: reverse;
+}
+
 @keyframes ring-spin {
   from {
     transform: rotate(0deg);
@@ -5104,11 +5035,6 @@ button:active:not(:disabled) {
   to {
     transform: rotate(360deg);
   }
-}
-
-.ring-alpha span,
-.ring-beta span {
-  display: inline-block;
 }
 
 .ship-schematic-note {

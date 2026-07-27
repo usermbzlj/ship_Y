@@ -47,16 +47,25 @@ test("server-renders the Far Horizon mission shell", async () => {
 });
 
 test("production source contains a real worker-backed simulator, not starter UI", async () => {
-  const [page, layout, missionControl, simulationWorker, packageJson, css, peopleView] =
-    await Promise.all([
-      readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
-      readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
-      readFile(new URL("../app/mission-control.tsx", import.meta.url), "utf8"),
-      readFile(new URL("../lib/sim/worker.ts", import.meta.url), "utf8"),
-      readFile(new URL("../package.json", import.meta.url), "utf8"),
-      readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
-      readFile(new URL("../app/ui/views/people-view.tsx", import.meta.url), "utf8"),
-    ]);
+  const [
+    page,
+    layout,
+    missionControl,
+    simulationWorker,
+    simulationInterventions,
+    packageJson,
+    css,
+    peopleView,
+  ] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/mission-control.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../lib/sim/worker.ts", import.meta.url), "utf8"),
+    readFile(new URL("../lib/sim/interventions.ts", import.meta.url), "utf8"),
+    readFile(new URL("../package.json", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+    readFile(new URL("../app/ui/views/people-view.tsx", import.meta.url), "utf8"),
+  ]);
 
   assert.match(page, /<MissionControl \/>/);
   assert.match(layout, /lang="zh-CN"/);
@@ -70,7 +79,8 @@ test("production source contains a real worker-backed simulator, not starter UI"
   assert.match(css, /\.event-rail-toggle/);
   assert.match(css, /\.god-confirm-bar/);
   assert.match(css, /prefers-reduced-motion:\s*reduce/);
-  assert.match(simulationWorker, /environment:procedural/);
+  // 程序化事件仍以 environment:procedural 身份注入物理因果；构造逻辑已下沉到 interventions。
+  assert.match(simulationInterventions, /environment:procedural/);
   assert.match(simulationWorker, /ProceduralWorldScheduler/);
   assert.match(simulationWorker, /SimulationTimeDirector/);
   assert.match(missionControl, /local-save-idb/);

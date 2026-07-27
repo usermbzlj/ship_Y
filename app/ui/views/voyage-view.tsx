@@ -402,17 +402,19 @@ export function VoyageView({
         <div className="panel-heading compact">
           <div>
             <span className="eyebrow">STARBOARD TACTICAL</span>
-            <h2>远穹号 · 舰体姿态</h2>
+            <h2>远穹号 · 居住环转速</h2>
           </div>
           <span className="micro-code">
             船长 {SHIP_DESIGN_LENGTH_M} m · 规格说明（非实时账本） · 2,120 人
           </span>
         </div>
-        <div className="ship-schematic" aria-label="远穹号舰体示意">
-          <div className="ship-shield" />
-          <div className="ship-spine" />
+        <div className="ship-schematic" aria-label="居住环对转转速指示">
           <div
-            className={`ship-ring ring-alpha${ringASpinPeriod ? " ring-spinning" : ""}`}
+            className={`ship-ring ring-alpha${ringASpinPeriod ? " ring-spinning" : ""}${
+              observedRingA?.relativeRpm != null && observedRingA.relativeRpm < 0
+                ? " ring-spin-reverse"
+                : ""
+            }`}
             style={
               ringASpinPeriod
                 ? ({
@@ -425,7 +427,11 @@ export function VoyageView({
             <span>A</span>
           </div>
           <div
-            className={`ship-ring ring-beta${ringBSpinPeriod ? " ring-spinning" : ""}`}
+            className={`ship-ring ring-beta${ringBSpinPeriod ? " ring-spinning" : ""}${
+              observedRingB?.relativeRpm != null && observedRingB.relativeRpm < 0
+                ? " ring-spin-reverse"
+                : ""
+            }`}
             style={
               ringBSpinPeriod
                 ? ({
@@ -437,11 +443,6 @@ export function VoyageView({
             <i className="ring-spin-marker" aria-hidden="true" />
             <span>B</span>
           </div>
-          <div className="ship-core" />
-          <div className="ship-engine engine-one" />
-          <div className="ship-engine engine-two" />
-          <div className="ship-engine engine-three" />
-          <div className="ship-axis" />
         </div>
         <div className="ship-facts">
           <div>
@@ -467,8 +468,8 @@ export function VoyageView({
         </div>
         <p className="panel-note ship-schematic-note">
           {observedRingA?.relativeRpm != null && observedRingB?.relativeRpm != null
-            ? `环示意转速 A ${observedRingA.relativeRpm >= 0 ? "+" : ""}${observedRingA.relativeRpm.toFixed(3)} · B ${observedRingB.relativeRpm >= 0 ? "+" : ""}${observedRingB.relativeRpm.toFixed(3)} rpm · 示意，非姿态解算`
-            : "示意，非姿态解算"}
+            ? `观测转速 A ${observedRingA.relativeRpm >= 0 ? "+" : ""}${observedRingA.relativeRpm.toFixed(3)} · B ${observedRingB.relativeRpm >= 0 ? "+" : ""}${observedRingB.relativeRpm.toFixed(3)} rpm · 延迟降级观测值，非真值`
+            : "双环转速为延迟降级观测值；尚未建立读数"}
         </p>
       </div>
 
