@@ -3,7 +3,7 @@
  *
  * Replaces the React setInterval "hope the next tick arrives" model with:
  * - named pause tokens (ui / llm / save / mission-end / …)
- * - owed simulated seconds (no silent tick drops)
+ * - no catch-up debt (a slow solver never makes later world time jump)
  * - requested vs effective time scale (fidelity may clamp)
  * - explicit observation scales including 1× realtime
  */
@@ -30,9 +30,6 @@ export const TIME_SCALE_LABELS: Record<TimeScalePreset, string> = {
 /** Soft cap: how much sim time one heartbeat may attempt before splitting. */
 export const MAX_SIM_SECONDS_PER_HEARTBEAT = 86_400;
 
-/** How much unpaid sim debt we retain across heartbeats (avoid unbounded catch-up). */
-export const MAX_OWED_SIM_SECONDS = 7 * 86_400;
-
 export type PauseTokenId =
   | "ui"
   | "llm-waiting"
@@ -50,12 +47,12 @@ export interface TimeDirectorSnapshot {
   totalSimSecondsAdvanced: number;
   lastEffectiveTimeScale: number;
   fidelityLocked: boolean;
-  /** Sim seconds discarded by the MAX_OWED_SIM_SECONDS cap (cumulative). */
+  /** Sim seconds not advanced because the effective rate was lower (cumulative). */
   droppedSimSecondsCumulative: number;
 }
 
 export interface HeartbeatAdvancePlan {
-  /** Wall seconds this heartbeat contributes (already includes debt conversion). */
+  /** Wall seconds from this heartbeat that the solver should attempt. */
   wallSecondsToRun: number;
   /** Requested scale before fidelity clamp. */
   requestedTimeScale: number;
@@ -71,7 +68,7 @@ export interface HeartbeatAdvanceResult {
   wallSecondsConsumed: number;
   simSecondsAdvanced: number;
   owedSimSeconds: number;
-  /** Sim seconds dropped this beat because owed debt exceeded the cap. */
+  /** Sim seconds not advanced this beat; reported and never replayed later. */
   droppedSimSecondsThisBeat: number;
   fidelityLocked: boolean;
   paused: boolean;
@@ -105,6 +102,8 @@ export function nearestTimeScalePreset(value: number): TimeScalePreset {
 export class SimulationTimeDirector {
   private timeScaleValue: number;
   private readonly pauseTokensValue = new Set<string>();
+  // Retained in snapshots/telemetry for v1 compatibility. The linear-time
+  // director never carries debt into a later heartbeat.
   private owedSimSecondsValue = 0;
   private totalWallSecondsAdvancedValue = 0;
   private totalSimSecondsAdvancedValue = 0;
@@ -174,9 +173,8 @@ export class SimulationTimeDirector {
   }
 
   /**
-   * Convert a wall-clock heartbeat into an advance plan.
-   * Unpaid simulated seconds from prior fidelity clamps are folded into the
-   * synthetic wall budget so catch-up remains possible within the per-beat cap.
+   * Convert a wall-clock heartbeat into an advance plan. Each heartbeat stands
+   * alone: missed or fidelity-limited time is never replayed later.
    */
   planHeartbeat(wallSecondsElapsed: number): HeartbeatAdvancePlan {
     assertFiniteNonNegative(wallSecondsElapsed, "wallSecondsElapsed");
@@ -192,8 +190,7 @@ export class SimulationTimeDirector {
     }
 
     const freshSim = wallSecondsElapsed * this.timeScaleValue;
-    const desiredSim = freshSim + this.owedSimSecondsValue;
-    const cappedSim = Math.min(desiredSim, MAX_SIM_SECONDS_PER_HEARTBEAT);
+    const cappedSim = Math.min(freshSim, MAX_SIM_SECONDS_PER_HEARTBEAT);
     const wallSecondsToRun = cappedSim / this.timeScaleValue;
 
     return {
@@ -206,8 +203,8 @@ export class SimulationTimeDirector {
   }
 
   /**
-   * Record what the coupled step actually achieved.
-   * Shortfall vs (fresh wall×scale + prior debt) becomes the next owed balance.
+   * Record what the coupled step actually achieved. Any shortfall is measured
+   * for diagnostics and discarded, never banked as future catch-up time.
    */
   commitHeartbeat(input: {
     wallSecondsElapsed: number;
@@ -237,17 +234,14 @@ export class SimulationTimeDirector {
     }
 
     const freshSim = input.wallSecondsElapsed * input.requestedTimeScale;
-    const desiredSim = freshSim + this.owedSimSecondsValue;
     const advancedSim =
       input.wallSecondsRequested * input.effectiveTimeScale;
-    const rawOwed = Math.max(0, desiredSim - advancedSim);
     const droppedSimSecondsThisBeat = Math.max(
       0,
-      rawOwed - MAX_OWED_SIM_SECONDS,
+      freshSim - advancedSim,
     );
-    const owed = Math.min(MAX_OWED_SIM_SECONDS, rawOwed);
 
-    this.owedSimSecondsValue = owed;
+    this.owedSimSecondsValue = 0;
     this.droppedSimSecondsCumulativeValue += droppedSimSecondsThisBeat;
     this.totalWallSecondsAdvancedValue += input.wallSecondsElapsed;
     this.totalSimSecondsAdvancedValue += advancedSim;
@@ -260,7 +254,7 @@ export class SimulationTimeDirector {
       effectiveTimeScale: input.effectiveTimeScale,
       wallSecondsConsumed: input.wallSecondsRequested,
       simSecondsAdvanced: advancedSim,
-      owedSimSeconds: this.owedSimSecondsValue,
+      owedSimSeconds: 0,
       droppedSimSecondsThisBeat,
       fidelityLocked: this.fidelityLockedValue,
       paused: false,
@@ -268,7 +262,7 @@ export class SimulationTimeDirector {
     };
   }
 
-  /** Drop owed debt (e.g. after mission end or explicit scrub). */
+  /** Compatibility no-op for callers and v1 snapshots from the former debt model. */
   clearOwedSimSeconds(): void {
     this.owedSimSecondsValue = 0;
   }
@@ -319,7 +313,9 @@ export class SimulationTimeDirector {
     for (const token of snapshot.pauseTokens) {
       director.acquirePauseToken(String(token));
     }
-    director.owedSimSecondsValue = snapshot.owedSimSeconds;
+    // Older v1 saves may contain catch-up debt. Discard it on restore so a
+    // loaded game resumes with the selected linear slope instead of jumping.
+    director.owedSimSecondsValue = 0;
     director.totalWallSecondsAdvancedValue = snapshot.totalWallSecondsAdvanced;
     director.totalSimSecondsAdvancedValue = snapshot.totalSimSecondsAdvanced;
     director.lastEffectiveTimeScaleValue = snapshot.lastEffectiveTimeScale;

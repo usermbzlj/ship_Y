@@ -17,11 +17,30 @@
  * closes to floating-point tolerance.
  */
 
-export const COOLING_SNAPSHOT_VERSION = 5 as const;
+/**
+ * Per-loop habitat thermal delivery spurs are a minimal faultable edge (not a
+ * full coolant pipe network): cabin heat-pump cooling delivered to that ring's
+ * zones is scaled by effectiveHabitatThermalDeliveryFraction; undelivered
+ * demand is ledgered as energy shortfall.
+ */
+export const COOLING_SNAPSHOT_VERSION = 6 as const;
+export const COOLING_SNAPSHOT_VERSIONS = [5, 6] as const;
 export const COOLING_MICROSECONDS_PER_SECOND = 1_000_000;
 
 export const COOLING_LOOP_IDS = ["loop-a", "loop-b"] as const;
 export type CoolingLoopId = (typeof COOLING_LOOP_IDS)[number];
+
+export const HABITAT_THERMAL_DELIVERY_SPUR_IDS = [
+  "cooling-spur-a",
+  "cooling-spur-b",
+] as const;
+export type HabitatThermalDeliverySpurId =
+  (typeof HABITAT_THERMAL_DELIVERY_SPUR_IDS)[number];
+export type HabitatThermalDeliverySpurCondition =
+  | "nominal"
+  | "degraded"
+  | "stuck-closed";
+export type CoolingHabitatRing = "a" | "b";
 
 export const THERMAL_NODE_IDS = [
   "thermal-bus",
@@ -85,6 +104,12 @@ export interface ThermalNode {
   heatCapacityJPerK: number;
 }
 
+export interface HabitatThermalDeliverySpur {
+  id: HabitatThermalDeliverySpurId;
+  condition: HabitatThermalDeliverySpurCondition;
+  commandedOpenFraction: number;
+}
+
 export interface CoolingLoop {
   id: CoolingLoopId;
   label: string;
@@ -93,6 +118,10 @@ export interface CoolingLoop {
   radiatorId: RadiatorId;
   coolantNodeId: ThermalNodeId;
   radiatorNodeId: ThermalNodeId;
+  /** Ring habitat thermal delivery spur (heat pump → cabin zones). */
+  habitatThermalDeliverySpur: HabitatThermalDeliverySpur;
+  /** Last heat-pump delivery shortfall attributed to the spur (J). */
+  lastHabitatThermalDeliveryShortfallJ: number;
 }
 
 export interface CoolantPump {
@@ -180,10 +209,12 @@ export interface ThermalEnergyLedger {
   externalEnergyJ: number;
   externalEnergyBySourceJ: ExternalThermalEnergyBySourceJ;
   numericalResidualJ: number;
+  /** Cumulative requested habitat cooling the spurs did not deliver (J). */
+  undeliveredHabitatCoolingJ: number;
 }
 
 export interface CoolingNetworkSnapshot {
-  snapshotVersion: typeof COOLING_SNAPSHOT_VERSION;
+  snapshotVersion: (typeof COOLING_SNAPSHOT_VERSIONS)[number];
   elapsedMicroseconds: number;
   revision: number;
   externalSpaceTemperatureK: number;
@@ -296,6 +327,10 @@ export type ThermalSensorPatch = Partial<
   >
 >;
 
+export type HabitatThermalDeliverySpurPatch = Partial<
+  Pick<HabitatThermalDeliverySpur, "commandedOpenFraction" | "condition">
+>;
+
 const STEFAN_BOLTZMANN_W_PER_M2_K4 = 5.670_374_419e-8;
 const DEFAULT_SPACE_TEMPERATURE_K = 3;
 const MAX_PHYSICS_SUBSTEP_MICROSECONDS = 5 * COOLING_MICROSECONDS_PER_SECOND;
@@ -306,6 +341,24 @@ const NATURAL_CIRCULATION_FRACTION = 0.03;
 const MAX_CONDUCTANCE_W_PER_K = 10_000_000;
 const MAX_TEMPERATURE_K = 5_000;
 const MAX_THERMAL_POWER_W = 10_000_000_000;
+const DEGRADED_HABITAT_THERMAL_DELIVERY_MULTIPLIER = 0.5;
+
+const SPUR_BY_LOOP: Readonly<
+  Record<CoolingLoopId, HabitatThermalDeliverySpurId>
+> = {
+  "loop-a": "cooling-spur-a",
+  "loop-b": "cooling-spur-b",
+};
+const LOOP_BY_SPUR: Readonly<
+  Record<HabitatThermalDeliverySpurId, CoolingLoopId>
+> = {
+  "cooling-spur-a": "loop-a",
+  "cooling-spur-b": "loop-b",
+};
+const RING_BY_LOOP: Readonly<Record<CoolingLoopId, CoolingHabitatRing>> = {
+  "loop-a": "a",
+  "loop-b": "b",
+};
 
 const BASELINE_SENSOR_SPECS: readonly Readonly<{
   id: string;
@@ -591,6 +644,41 @@ function radiatorConditionFractions(
   }
 }
 
+function habitatThermalSpurConditionMultiplier(
+  condition: HabitatThermalDeliverySpurCondition,
+): number {
+  switch (condition) {
+    case "nominal":
+      return 1;
+    case "degraded":
+      return DEGRADED_HABITAT_THERMAL_DELIVERY_MULTIPLIER;
+    case "stuck-closed":
+      return 0;
+  }
+}
+
+export function effectiveHabitatThermalDeliveryFraction(
+  spur: Pick<
+    HabitatThermalDeliverySpur,
+    "commandedOpenFraction" | "condition"
+  >,
+): number {
+  return (
+    spur.commandedOpenFraction *
+    habitatThermalSpurConditionMultiplier(spur.condition)
+  );
+}
+
+function createNominalHabitatThermalSpur(
+  loopId: CoolingLoopId,
+): HabitatThermalDeliverySpur {
+  return {
+    id: SPUR_BY_LOOP[loopId],
+    condition: "nominal",
+    commandedOpenFraction: 1,
+  };
+}
+
 function limitedPairwiseEnergyJ(
   first: ThermalNode,
   second: ThermalNode,
@@ -677,6 +765,8 @@ function makeBaselineLoops(): CoolingLoop[] {
       radiatorId: "radiator-wing-a",
       coolantNodeId: "coolant-a",
       radiatorNodeId: "radiator-a",
+      habitatThermalDeliverySpur: createNominalHabitatThermalSpur("loop-a"),
+      lastHabitatThermalDeliveryShortfallJ: 0,
     },
     {
       id: "loop-b",
@@ -686,6 +776,8 @@ function makeBaselineLoops(): CoolingLoop[] {
       radiatorId: "radiator-wing-b",
       coolantNodeId: "coolant-b",
       radiatorNodeId: "radiator-b",
+      habitatThermalDeliverySpur: createNominalHabitatThermalSpur("loop-b"),
+      lastHabitatThermalDeliveryShortfallJ: 0,
     },
   ];
 }
@@ -826,6 +918,7 @@ export function createBaselineCoolingSnapshot(
       externalEnergyJ: 0,
       externalEnergyBySourceJ: makeEmptyExternalThermalEnergyBySource(),
       numericalResidualJ: 0,
+      undeliveredHabitatCoolingJ: 0,
     },
   };
 }
@@ -860,6 +953,8 @@ function validateLoop(value: unknown, expected: CoolingLoop, label: string): voi
       "radiatorId",
       "coolantNodeId",
       "radiatorNodeId",
+      "habitatThermalDeliverySpur",
+      "lastHabitatThermalDeliveryShortfallJ",
     ],
     label,
   );
@@ -876,6 +971,39 @@ function validateLoop(value: unknown, expected: CoolingLoop, label: string): voi
     }
   }
   assertNonEmptyString(value.label, `${label}.label`);
+  assertNonNegative(
+    value.lastHabitatThermalDeliveryShortfallJ,
+    `${label}.lastHabitatThermalDeliveryShortfallJ`,
+  );
+  assertRecord(
+    value.habitatThermalDeliverySpur,
+    `${label}.habitatThermalDeliverySpur`,
+  );
+  assertExactKeys(
+    value.habitatThermalDeliverySpur,
+    ["id", "condition", "commandedOpenFraction"],
+    `${label}.habitatThermalDeliverySpur`,
+  );
+  if (
+    value.habitatThermalDeliverySpur.id !==
+    expected.habitatThermalDeliverySpur.id
+  ) {
+    throw new Error(
+      `${label}.habitatThermalDeliverySpur.id must be ${expected.habitatThermalDeliverySpur.id}`,
+    );
+  }
+  if (LOOP_BY_SPUR[value.habitatThermalDeliverySpur.id as HabitatThermalDeliverySpurId] !== value.id) {
+    throw new Error(`${label} habitat thermal delivery spur topology is invalid`);
+  }
+  assertEnum(
+    value.habitatThermalDeliverySpur.condition,
+    ["nominal", "degraded", "stuck-closed"],
+    `${label}.habitatThermalDeliverySpur.condition`,
+  );
+  assertFraction(
+    value.habitatThermalDeliverySpur.commandedOpenFraction,
+    `${label}.habitatThermalDeliverySpur.commandedOpenFraction`,
+  );
 }
 
 function validatePump(value: unknown, expectedId: string, label: string): void {
@@ -1236,6 +1364,7 @@ function validateLedger(value: unknown, label: string): void {
       "externalEnergyJ",
       "externalEnergyBySourceJ",
       "numericalResidualJ",
+      "undeliveredHabitatCoolingJ",
     ],
     label,
   );
@@ -1284,6 +1413,10 @@ function validateLedger(value: unknown, label: string): void {
     );
   }
   assertFinite(value.numericalResidualJ, `${label}.numericalResidualJ`);
+  assertNonNegative(
+    value.undeliveredHabitatCoolingJ,
+    `${label}.undeliveredHabitatCoolingJ`,
+  );
 }
 
 export function validateCoolingSnapshot(
@@ -1470,6 +1603,51 @@ function createBaselineCoolingSnapshotForValidation(): Pick<
         lastAppliedPowerW: 57_200_000,
       },
     ],
+  };
+}
+
+function migrateCoolingSnapshot(value: unknown): CoolingNetworkSnapshot {
+  assertRecord(value, "snapshot");
+  const version = value.snapshotVersion;
+  if (
+    !(COOLING_SNAPSHOT_VERSIONS as readonly unknown[]).includes(version)
+  ) {
+    throw new Error("unsupported cooling snapshot version");
+  }
+  if (version === COOLING_SNAPSHOT_VERSION) {
+    return value as unknown as CoolingNetworkSnapshot;
+  }
+
+  const baselineLoops = makeBaselineLoops();
+  const loops = Array.isArray(value.loops) ? value.loops : [];
+  const migratedLoops = loops.map((loop, index) => {
+    assertRecord(loop, `snapshot.loops[${index}]`);
+    const expected = baselineLoops[index];
+    const raw = loop as unknown as CoolingLoop & {
+      habitatThermalDeliverySpur?: HabitatThermalDeliverySpur;
+      lastHabitatThermalDeliveryShortfallJ?: number;
+    };
+    return {
+      ...raw,
+      habitatThermalDeliverySpur:
+        raw.habitatThermalDeliverySpur ??
+        createNominalHabitatThermalSpur(expected.id),
+      lastHabitatThermalDeliveryShortfallJ:
+        raw.lastHabitatThermalDeliveryShortfallJ ?? 0,
+    };
+  });
+  assertRecord(value.ledger, "snapshot.ledger");
+  const ledger = value.ledger as unknown as ThermalEnergyLedger & {
+    undeliveredHabitatCoolingJ?: number;
+  };
+  return {
+    ...(value as unknown as CoolingNetworkSnapshot),
+    snapshotVersion: COOLING_SNAPSHOT_VERSION,
+    loops: migratedLoops as CoolingLoop[],
+    ledger: {
+      ...ledger,
+      undeliveredHabitatCoolingJ: ledger.undeliveredHabitatCoolingJ ?? 0,
+    },
   };
 }
 
@@ -1694,6 +1872,79 @@ export class CoolingThermalNetwork {
     validateCoolingSnapshot(next);
     this.stateValue = next;
     return cloneData(source);
+  }
+
+  configureHabitatThermalDeliverySpur(
+    id: HabitatThermalDeliverySpurId,
+    patch: HabitatThermalDeliverySpurPatch,
+  ): HabitatThermalDeliverySpur {
+    const loopId = LOOP_BY_SPUR[id];
+    if (!loopId) {
+      throw new Error(`unknown habitat thermal delivery spur: ${id}`);
+    }
+    const next = this.snapshot();
+    const loop = findById(next.loops, loopId, "cooling loop");
+    const spur = loop.habitatThermalDeliverySpur;
+    if (spur.id !== id) {
+      throw new Error(`unknown habitat thermal delivery spur: ${id}`);
+    }
+    if (patch.commandedOpenFraction !== undefined) {
+      assertFraction(
+        patch.commandedOpenFraction,
+        `${id}.commandedOpenFraction`,
+      );
+      spur.commandedOpenFraction = patch.commandedOpenFraction;
+    }
+    if (patch.condition !== undefined) {
+      assertEnum(
+        patch.condition,
+        ["nominal", "degraded", "stuck-closed"],
+        `${id}.condition`,
+      );
+      spur.condition = patch.condition;
+    }
+    next.revision += 1;
+    validateCoolingSnapshot(next);
+    this.stateValue = next;
+    return cloneData(spur);
+  }
+
+  getHabitatThermalDeliverySpur(
+    id: HabitatThermalDeliverySpurId,
+  ): HabitatThermalDeliverySpur {
+    const loopId = LOOP_BY_SPUR[id];
+    if (!loopId) {
+      throw new Error(`unknown habitat thermal delivery spur: ${id}`);
+    }
+    const loop = findById(this.stateValue.loops, loopId, "cooling loop");
+    return cloneData(loop.habitatThermalDeliverySpur);
+  }
+
+  /**
+   * Record heat-pump cooling demand the habitat thermal spur did not deliver.
+   * Does not invent phantom heat; shortfall is bookkeeping only.
+   */
+  recordHabitatThermalDeliveryShortfall(
+    id: HabitatThermalDeliverySpurId,
+    shortfallJ: number,
+  ): void {
+    assertNonNegative(shortfallJ, "habitat thermal delivery shortfall");
+    const loopId = LOOP_BY_SPUR[id];
+    if (!loopId) {
+      throw new Error(`unknown habitat thermal delivery spur: ${id}`);
+    }
+    const loop = findById(this.stateValue.loops, loopId, "cooling loop");
+    loop.lastHabitatThermalDeliveryShortfallJ = shortfallJ;
+    this.stateValue.ledger.undeliveredHabitatCoolingJ += shortfallJ;
+    validateCoolingSnapshot(this.stateValue);
+  }
+
+  habitatRingForSpur(id: HabitatThermalDeliverySpurId): CoolingHabitatRing {
+    const loopId = LOOP_BY_SPUR[id];
+    if (!loopId) {
+      throw new Error(`unknown habitat thermal delivery spur: ${id}`);
+    }
+    return RING_BY_LOOP[loopId];
   }
 
   configureSensor(
@@ -2185,9 +2436,10 @@ export class CoolingThermalNetwork {
   ): CoolingThermalNetwork {
     const parsed: unknown =
       typeof source === "string" ? JSON.parse(source) : cloneData(source);
-    validateCoolingSnapshot(parsed);
+    const migrated = migrateCoolingSnapshot(parsed);
+    validateCoolingSnapshot(migrated);
     const restored = new CoolingThermalNetwork({ seed: 0 });
-    restored.stateValue = cloneData(parsed);
+    restored.stateValue = cloneData(migrated);
     return restored;
   }
 }

@@ -993,6 +993,51 @@ function assignTwoBusNetTransferPowerKw(
     second.batteryPowerKw;
 }
 
+/**
+ * Spread island leftover generation across buses. Prefer generation share;
+ * if the island has no counted generation, share by charge uptake, else equally.
+ * Never drop curtail when generationPowerKw === 0 — that orphans watts from the
+ * global gen+bat−served−curt identity while local buses can still close via tie flow.
+ */
+function attributeIslandCurtailedPowerKw(
+  snapshot: ElectricalNetworkSnapshot,
+  island: readonly ElectricalBusId[],
+  curtailedPowerKw: number,
+  generationPowerKw: number,
+): void {
+  if (curtailedPowerKw <= 0 || island.length === 0) return;
+  if (generationPowerKw > 0) {
+    for (const busId of island) {
+      const bus = findById(snapshot.buses, busId, "electrical bus");
+      bus.curtailedPowerKw =
+        curtailedPowerKw * (bus.generationPowerKw / generationPowerKw);
+    }
+    return;
+  }
+  const chargeUptakeByBusId = new Map<ElectricalBusId, number>();
+  let totalChargeUptakeKw = 0;
+  for (const busId of island) {
+    const bus = findById(snapshot.buses, busId, "electrical bus");
+    const uptakeKw = Math.max(0, -bus.batteryPowerKw);
+    chargeUptakeByBusId.set(busId, uptakeKw);
+    totalChargeUptakeKw += uptakeKw;
+  }
+  if (totalChargeUptakeKw > 0) {
+    for (const busId of island) {
+      const bus = findById(snapshot.buses, busId, "electrical bus");
+      bus.curtailedPowerKw =
+        curtailedPowerKw *
+        ((chargeUptakeByBusId.get(busId) ?? 0) / totalChargeUptakeKw);
+    }
+    return;
+  }
+  const shareKw = curtailedPowerKw / island.length;
+  for (const busId of island) {
+    findById(snapshot.buses, busId, "electrical bus").curtailedPowerKw =
+      shareKw;
+  }
+}
+
 function dispatchPower(
   snapshot: ElectricalNetworkSnapshot,
   deltaHours: number,
@@ -1185,12 +1230,14 @@ function dispatchPower(
         (total, load) => total + load.unservedPowerKw,
         0,
       );
-      bus.curtailedPowerKw =
-        generationPowerKw > 0
-          ? curtailedPowerKw *
-            (bus.generationPowerKw / generationPowerKw)
-          : 0;
+      bus.curtailedPowerKw = 0;
     }
+    attributeIslandCurtailedPowerKw(
+      snapshot,
+      island,
+      curtailedPowerKw,
+      generationPowerKw,
+    );
 
     if (island.length === 1) {
       const bus = findById(snapshot.buses, island[0], "electrical bus");
@@ -1263,6 +1310,29 @@ function dispatchPower(
     (total, load) => total + load.servedPowerKw,
     0,
   );
+  const batteryPowerKw = snapshot.batteries.reduce(
+    (total, battery) => total + battery.lastPowerKw,
+    0,
+  );
+  const attributedCurtailedPowerKw = snapshot.buses.reduce(
+    (total, bus) => total + bus.curtailedPowerKw,
+    0,
+  );
+  if (Math.abs(attributedCurtailedPowerKw - totalCurtailedPowerKw) > 1e-6) {
+    throw new Error(
+      `dispatchPower curtail attribution lost watts: attributed ${attributedCurtailedPowerKw}, island total ${totalCurtailedPowerKw}`,
+    );
+  }
+  const dispatchBalanceErrorKw =
+    generationPowerKw +
+    batteryPowerKw -
+    servedPowerKw -
+    attributedCurtailedPowerKw;
+  if (Math.abs(dispatchBalanceErrorKw) > 1e-6) {
+    throw new Error(
+      `dispatchPower instantaneous balance failed: ${dispatchBalanceErrorKw}`,
+    );
+  }
   const demandedLoadEnergyKWhById = emptyLoadEnergyRecord();
   const servedLoadEnergyKWhById = emptyLoadEnergyRecord();
   for (const load of snapshot.loads) {
@@ -2232,11 +2302,22 @@ export function validateElectricalSnapshot(
           reactor.breakerId,
           "reactor breaker",
         );
-        return reactor.busId === bus.id && breakerIsClosed(breaker);
+        return (
+          reactor.busId === bus.id &&
+          reactor.condition !== "tripped" &&
+          breakerIsClosed(breaker)
+        );
       })
       .reduce((total, reactor) => total + reactor.outputKw, 0);
     const expectedBatteryPowerKw = snapshot.batteries
-      .filter((battery) => battery.busId === bus.id)
+      .filter((battery) => {
+        const breaker = findById(
+          snapshot.breakers,
+          battery.breakerId,
+          "battery breaker",
+        );
+        return battery.busId === bus.id && breakerIsClosed(breaker);
+      })
       .reduce((total, battery) => total + battery.lastPowerKw, 0);
     const expectedDemandedPowerKw = busLoads.reduce(
       (total, load) => total + effectiveLoadDemandPowerKw(load),
@@ -2370,7 +2451,12 @@ export function validateElectricalSnapshot(
       reactor.breakerId,
       "reactor breaker",
     );
-    return total + (breakerIsClosed(breaker) ? reactor.outputKw : 0);
+    return (
+      total +
+      (reactor.condition !== "tripped" && breakerIsClosed(breaker)
+        ? reactor.outputKw
+        : 0)
+    );
   }, 0);
   if (Math.abs(generationPowerKw - connectedGenerationKw) > 1e-6) {
     throw new Error("bus generation does not match connected reactors");
@@ -3336,7 +3422,21 @@ export class ShipElectricalNetwork {
   ): ShipElectricalNetwork {
     const parsed: unknown =
       typeof source === "string" ? JSON.parse(source) : cloneData(source);
-    validateElectricalSnapshot(parsed);
+    try {
+      validateElectricalSnapshot(parsed);
+    } catch (firstError) {
+      // Instantaneous served/curtail/battery flow fields are derived. If a
+      // corrupt save double-counts surplus as both charge and curtail, rebuild
+      // those fields from setpoints (deltaHours=0 transfers no energy) and
+      // accept the healed snapshot. Leave already-valid charging states alone
+      // so engine.power aggregates stay aligned on mission restore.
+      try {
+        dispatchPower(parsed as ElectricalNetworkSnapshot, 0);
+        validateElectricalSnapshot(parsed);
+      } catch {
+        throw firstError;
+      }
+    }
     const restored = new ShipElectricalNetwork({ seed: 0 });
     restored.stateValue = cloneData(parsed);
     return restored;

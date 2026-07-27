@@ -8,22 +8,21 @@ import {
   useState,
 } from "react";
 import type { ExternalInterventionRequest, ShipState } from "@/lib/sim";
-import type { RingControlMode } from "@/lib/sim/rotation";
-import type { ReactorMode } from "@/lib/sim/electrical";
-import type { BatteryControlMode } from "@/lib/sim/electrical";
-import type { ZoneId } from "@/lib/sim/compartments";
-import type { AirHandlerId } from "@/lib/sim/compartments";
-import type { CoolantPumpId } from "@/lib/sim/cooling";
-import type {
-  ElectricalBatteryId,
-  ElectricalBreakerId,
-  ElectricalLoadId,
-  FusionReactorId,
-} from "@/lib/sim/electrical";
-import type { ThrusterId } from "@/lib/sim/navigation";
-import type { RotationRingId } from "@/lib/sim/rotation";
-import type { WaterProcessorId } from "@/lib/sim/water";
-import type { MaintenanceAssetId } from "@/lib/sim/maintenance";
+import {
+  listActionableUnattendedMaintenanceFaults,
+  evaluateMaintenanceSchedulingFeasibility,
+  isCaptainWorldCommandSoftRejectMessage,
+} from "@/lib/sim/maintenance";
+import {
+  ATMOSPHERE_RESERVE_LEDGER_SEMANTICS,
+  captainHullThreatBlocksJump,
+  projectCaptainHullThreatObservation,
+  projectCaptainJumpThermalEstimate,
+  projectCaptainPressureZoneAlerts,
+} from "@/lib/sim/captain-observation";
+import {
+  type CaptainOperationsSnapshot,
+} from "@/lib/sim/captain-operations";
 import {
   KeyPassengerPollScheduler,
   type KeyPassengerPrivateNote,
@@ -34,6 +33,7 @@ import type {
   CoolingTelemetry,
   ElectricalTelemetry,
   FinalJourneyReport,
+  HullConsequenceTelemetry,
   MaintenanceTelemetry,
   NavigationTelemetry,
   PassengerHighlightTelemetry,
@@ -43,6 +43,8 @@ import type {
   SimulationWorkerSurvivalTelemetry,
   SimulationWorkerTimeControlTelemetry,
   WaterRecoveryTelemetry,
+  ZoneMoodTelemetry,
+  PassengerCircleTelemetry,
 } from "@/lib/sim/protocol";
 
 // ─── 从拆分模块导入 ───────────────────────────────────────────
@@ -52,46 +54,32 @@ import type {
   LlmCallPhase,
   TimelineEvent,
   LlmRuntimeStatus,
-  LlmInvokeResult,
   LlmInvokeRoutePayload,
   CaptainDeviceReceiptSummary,
   LocalSave,
   GodAssistSessionHandle,
 } from "@/app/ui/types";
 import {
+  getManualSave,
+  hasManualSave,
+  isQuotaExceededError,
+  migrateLocalStorageSaveOnce,
+  putManualSave,
+  putManualSaveToLocalStorageFallback,
+} from "@/lib/persist/local-save-idb";
+import {
+  estimateMinLegs,
+  MAX_JUMP_LEG_LY,
+  routeDistanceLy,
+} from "@/lib/astro/star-catalog";
+import {
   STAR_SYSTEMS,
   NAV_ITEMS,
-  THRUSTER_ID_SET,
-  FUSION_REACTOR_ID_SET,
-  COOLANT_PUMP_ID_SET,
-  ELECTRICAL_LOAD_ID_SET,
-  ELECTRICAL_BREAKER_ID_SET,
-  ELECTRICAL_BATTERY_ID_SET,
-  ROTATION_RING_ID_SET,
-  AIR_HANDLER_ID_SET,
-  WATER_PROCESSOR_ID_SET,
-  MAINTENANCE_ASSET_ID_SET,
-  RING_CONTROL_MODES,
-  RING_CONTROL_MODE_SET,
-  BATTERY_CONTROL_MODES,
-  BATTERY_CONTROL_MODE_SET,
-  REACTOR_MODES,
-  REACTOR_MODE_SET,
   FORCE_FIELDS,
   MAX_CAPTAIN_WORLD_COMMANDS_PER_CYCLE,
   AUTHORIZED_CONTROLLER_RECORD_DELAY_SECONDS,
   AUTHORIZED_MANIFEST_RECORD_DELAY_SECONDS,
   AUTHORIZED_RECORD_HISTORY_LIMIT,
-  AIR_HANDLER_IDS,
-  COOLANT_PUMP_IDS,
-  ELECTRICAL_BATTERY_IDS,
-  ELECTRICAL_BREAKER_IDS,
-  ELECTRICAL_LOAD_IDS,
-  FUSION_REACTOR_IDS,
-  THRUSTER_IDS,
-  ROTATION_RING_IDS,
-  WATER_PROCESSOR_IDS,
-  MAINTENANCE_ASSET_IDS,
 } from "@/app/ui/constants";
 import {
   formatDuration,
@@ -113,18 +101,98 @@ import {
   detectAlerts,
   type ActiveAlert,
 } from "@/app/ui/components/alert-banner";
+import { DecisionTheater } from "@/app/ui/components/decision-theater";
 import { EventRail } from "@/app/ui/components/event-rail";
 import { TimeControlBar } from "@/app/ui/components/time-control-bar";
 import { MissionClock } from "@/app/ui/components/mission-clock";
 import { ConsoleStatusStrip } from "@/app/ui/components/console-status-strip";
 import { useAudio } from "@/app/ui/use-audio";
 import { TIME_SCALE_PRESETS } from "@/lib/sim/director";
-
-type ShipWorldCommand = Extract<
-  SimulationWorkerCommand,
-  { type: "ship-command" }
->["command"];
-
+import {
+  CAPTAIN_CONSULTATION_PARTIAL_FAILURE_MESSAGE,
+  isCaptainConsultationHardFailure,
+  parseCaptainConsultationRequest,
+  partitionCaptainConsultationAttempts,
+  type CaptainConsultationAttempt,
+} from "@/lib/llm/captain-consultation";
+import {
+  IDLE_DECISION_THEATER_STATE,
+  decisionTheaterHeadline,
+  reduceDecisionTheater,
+  type DecisionTheaterEvent,
+  type DecisionTheaterState,
+} from "@/lib/llm/decision-theater";
+import {
+  RECORD_CAPTAIN_LOG_TOOL_NAME,
+  appendCaptainJournalEntry,
+  createCaptainJournalSnapshot,
+  parseCaptainLogToolCall,
+  renderCaptainJournalPromptBlock,
+  validateCaptainJournalSnapshot,
+  type CaptainJournalSnapshot,
+} from "@/lib/llm/captain-journal";
+import {
+  SET_WATCH_CONDITION_TOOL_NAME,
+  applyCaptainWatchCondition,
+  captainWatchTriggerKey,
+  createCaptainWatchSnapshot,
+  evaluateCaptainWatches,
+  parseSetWatchConditionToolCall,
+  renderCaptainWatchPromptBlock,
+  validateCaptainWatchSnapshot,
+  type CaptainWatchSnapshot,
+} from "@/lib/llm/captain-watch";
+import {
+  FILE_DISSENT_TOOL_NAME,
+  createDepartmentStandingSnapshot,
+  parseFileDissentToolCall,
+  recordDepartmentConsultation,
+  recordDepartmentDissent,
+  renderCaptainDissentLedgerPromptBlock,
+  renderDepartmentStandingPromptBlock,
+  renderPeerPositionsPromptBlock,
+  validateDepartmentStandingSnapshot,
+  type DepartmentStandingSnapshot,
+} from "@/lib/llm/department-standing";
+import {
+  FILE_GRIEVANCE_TOOL_NAME,
+  PASSENGER_CIRCLE_LIMIT,
+  SHARE_RUMOR_TOOL_NAME,
+  createPassengerSocietySnapshot,
+  markRumorsHeard,
+  parseFileGrievanceToolCall,
+  parseShareRumorToolCall,
+  pruneStaleRumors,
+  recordPassengerRumor,
+  renderPassengerSocietyPromptBlock,
+  selectOverheardRumors,
+  validatePassengerSocietySnapshot,
+  type PassengerSocietySnapshot,
+} from "@/lib/llm/passenger-society";
+import type { ShipWorldCommand } from "@/lib/llm/captain-world-tools";
+import {
+  CAPTAIN_WORLD_TOOLS,
+  CAPTAIN_CONSULTATION_TOOL,
+  RECORD_CAPTAIN_LOG_TOOL,
+  SET_WATCH_CONDITION_TOOL,
+  FILE_DISSENT_TOOL,
+  FILE_PASSENGER_GRIEVANCE_TOOL,
+  SHARE_PASSENGER_RUMOR_TOOL,
+  parseCaptainWorldToolCall,
+} from "@/lib/llm/captain-world-tools";
+import {
+  passengerConditionBand,
+  passengerStressBand,
+  passengerTrustBand,
+  isFiniteNumber,
+  extractCaptainWatchMetricSample,
+} from "@/lib/llm/captain-watch-metrics";
+import {
+  captainDecisionAdvancesRoutineSchedule,
+  completedCaptainDecisionCoversDeadline,
+  computeNextCaptainRoutineDeadline,
+  isCaptainRoutineDue,
+} from "@/lib/sim/captain-schedule";
 
 
 type AuthorizedControllerRecord = {
@@ -136,6 +204,7 @@ type AuthorizedControllerRecord = {
   jumpControllerState: ShipState["journey"]["status"];
   completedJumpLogCount: number;
   jumpDriveChargeEstimateKWh: number;
+  jumpDriveCapacityKWh: number;
 };
 
 type AuthorizedManifestRecord = {
@@ -180,472 +249,9 @@ type CaptainWorldCommandQueue = {
   nextIndex: number;
   activeRequestId: string | null;
   receipts: CaptainDeviceReceiptSummary[];
+  advancesRoutineSchedule: boolean;
   resumeAfterCompletion: boolean;
 };
-
-type CaptainWorldToolParseResult =
-  | { ok: true; command: ShipWorldCommand }
-  | { ok: false; reason: string };
-
-function parseCaptainWorldToolCall(
-  toolCall: LlmInvokeResult["toolCalls"][number],
-  journeyStatus: ShipState["journey"]["status"],
-  remainingDistance: number,
-): CaptainWorldToolParseResult {
-  const argumentsObject =
-    typeof toolCall.arguments === "object" &&
-    toolCall.arguments !== null
-      ? (toolCall.arguments as Record<string, unknown>)
-      : {};
-
-  if (toolCall.name === "execute_jump") {
-    if (journeyStatus !== "ready") {
-      return {
-        ok: false,
-        reason: "跃迁控制器尚未进入 ready 状态",
-      };
-    }
-    const requested = argumentsObject.distanceLightYears;
-    if (
-      typeof requested !== "number" ||
-      !Number.isFinite(requested) ||
-      requested < 0.1 ||
-      requested > 5 ||
-      remainingDistance < 0.1
-    ) {
-      return {
-        ok: false,
-        reason: "distanceLightYears 必须在 0.1 至 5 光年范围内",
-      };
-    }
-    return {
-      ok: true,
-      command: {
-        kind: "execute-jump",
-        actorAgentId: "captain",
-        distanceLightYears: Math.min(requested, remainingDistance),
-      },
-    };
-  }
-
-  if (toolCall.name === "set_awake_target") {
-    const targetAwake = argumentsObject.targetAwake;
-    if (
-      typeof targetAwake !== "number" ||
-      !Number.isSafeInteger(targetAwake) ||
-      targetAwake < 0 ||
-      targetAwake > 2_120
-    ) {
-      return {
-        ok: false,
-        reason: "targetAwake 必须是 0 至 2120 的整数",
-      };
-    }
-    return {
-      ok: true,
-      command: {
-        kind: "set-awake-target",
-        actorAgentId: "captain",
-        targetAwake,
-      },
-    };
-  }
-
-  if (toolCall.name === "isolate_pressure_zone") {
-    const zoneId = argumentsObject.zoneId;
-    if (
-      typeof zoneId !== "string" ||
-      !/^[AB]-(0[1-9]|1[0-9]|2[0-4])$/.test(zoneId)
-    ) {
-      return {
-        ok: false,
-        reason: "zoneId 必须是 A-01 至 B-24 的固定压力区",
-      };
-    }
-    return {
-      ok: true,
-      command: {
-        kind: "isolate-pressure-zone",
-        actorAgentId: "captain",
-        zoneId: zoneId as ZoneId,
-      },
-    };
-  }
-
-  if (toolCall.name === "set_air_handler_control") {
-    const airHandlerId = argumentsObject.airHandlerId;
-    const commandedFlowFraction =
-      argumentsObject.commandedFlowFraction;
-    const scrubberEnabled = argumentsObject.scrubberEnabled;
-    if (
-      typeof airHandlerId !== "string" ||
-      !AIR_HANDLER_ID_SET.has(airHandlerId) ||
-      typeof commandedFlowFraction !== "number" ||
-      !Number.isFinite(commandedFlowFraction) ||
-      commandedFlowFraction < 0 ||
-      commandedFlowFraction > 1 ||
-      typeof scrubberEnabled !== "boolean"
-    ) {
-      return {
-        ok: false,
-        reason: "空气处理机 ID、循环风量或吸附器开关无效",
-      };
-    }
-    return {
-      ok: true,
-      command: {
-        kind: "set-air-handler-control",
-        actorAgentId: "captain",
-        airHandlerId: airHandlerId as AirHandlerId,
-        commandedFlowFraction,
-        scrubberEnabled,
-      },
-    };
-  }
-
-  if (toolCall.name === "set_water_processor_control") {
-    const processorId = argumentsObject.processorId;
-    const commandedThroughputFraction =
-      argumentsObject.commandedThroughputFraction;
-    if (
-      typeof processorId !== "string" ||
-      !WATER_PROCESSOR_ID_SET.has(processorId) ||
-      typeof commandedThroughputFraction !== "number" ||
-      !Number.isFinite(commandedThroughputFraction) ||
-      commandedThroughputFraction < 0 ||
-      commandedThroughputFraction > 1
-    ) {
-      return {
-        ok: false,
-        reason: "水回收机 ID 或处理量指令无效",
-      };
-    }
-    return {
-      ok: true,
-      command: {
-        kind: "set-water-processor-control",
-        actorAgentId: "captain",
-        processorId: processorId as WaterProcessorId,
-        commandedThroughputFraction,
-      },
-    };
-  }
-
-  if (toolCall.name === "schedule_maintenance") {
-    const assetId = argumentsObject.assetId;
-    if (
-      typeof assetId !== "string" ||
-      !MAINTENANCE_ASSET_ID_SET.has(assetId)
-    ) {
-      return {
-        ok: false,
-        reason: "assetId 必须是固定维修资产 ID",
-      };
-    }
-    return {
-      ok: true,
-      command: {
-        kind: "schedule-maintenance",
-        actorAgentId: "captain",
-        assetId: assetId as MaintenanceAssetId,
-      },
-    };
-  }
-
-  if (toolCall.name === "schedule_thruster_pulse") {
-    const thrusterId = argumentsObject.thrusterId;
-    const throttleFraction = argumentsObject.throttleFraction;
-    const durationSeconds = argumentsObject.durationSeconds;
-    const startDelaySeconds = argumentsObject.startDelaySeconds;
-    if (
-      typeof thrusterId !== "string" ||
-      !THRUSTER_ID_SET.has(thrusterId) ||
-      typeof throttleFraction !== "number" ||
-      !Number.isFinite(throttleFraction) ||
-      throttleFraction < 0 ||
-      throttleFraction > 1 ||
-      typeof durationSeconds !== "number" ||
-      !Number.isFinite(durationSeconds) ||
-      durationSeconds <= 0 ||
-      durationSeconds > 600 ||
-      typeof startDelaySeconds !== "number" ||
-      !Number.isFinite(startDelaySeconds) ||
-      startDelaySeconds < 0 ||
-      startDelaySeconds > 3_600
-    ) {
-      return {
-        ok: false,
-        reason: "推进器、节流、持续时间或启动延迟超出控制器边界",
-      };
-    }
-    return {
-      ok: true,
-      command: {
-        kind: "schedule-thruster-pulse",
-        actorAgentId: "captain",
-        thrusterId: thrusterId as ThrusterId,
-        throttleFraction,
-        durationSeconds,
-        startDelaySeconds,
-      },
-    };
-  }
-
-  if (toolCall.name === "schedule_thruster_maneuver") {
-    const rawPulses = argumentsObject.pulses;
-    if (
-      !Array.isArray(rawPulses) ||
-      rawPulses.length === 0 ||
-      rawPulses.length > 18
-    ) {
-      return {
-        ok: false,
-        reason: "pulses 必须包含 1 至 18 个推进器脉冲",
-      };
-    }
-    const pulses = rawPulses.flatMap((rawPulse) => {
-      if (typeof rawPulse !== "object" || rawPulse === null) {
-        return [];
-      }
-      const pulse = rawPulse as Record<string, unknown>;
-      const thrusterId = pulse.thrusterId;
-      const throttleFraction = pulse.throttleFraction;
-      const durationSeconds = pulse.durationSeconds;
-      const startDelaySeconds = pulse.startDelaySeconds;
-      if (
-        typeof thrusterId !== "string" ||
-        !THRUSTER_ID_SET.has(thrusterId) ||
-        typeof throttleFraction !== "number" ||
-        !Number.isFinite(throttleFraction) ||
-        throttleFraction < 0 ||
-        throttleFraction > 1 ||
-        typeof durationSeconds !== "number" ||
-        !Number.isFinite(durationSeconds) ||
-        durationSeconds <= 0 ||
-        durationSeconds > 600 ||
-        typeof startDelaySeconds !== "number" ||
-        !Number.isFinite(startDelaySeconds) ||
-        startDelaySeconds < 0 ||
-        startDelaySeconds > 3_600
-      ) {
-        return [];
-      }
-      return [
-        {
-          thrusterId: thrusterId as ThrusterId,
-          throttleFraction,
-          durationSeconds,
-          startDelaySeconds,
-        },
-      ];
-    });
-    if (pulses.length !== rawPulses.length) {
-      return {
-        ok: false,
-        reason: "机动计划中至少一个推进器脉冲参数无效",
-      };
-    }
-    return {
-      ok: true,
-      command: {
-        kind: "schedule-thruster-maneuver",
-        actorAgentId: "captain",
-        pulses,
-      },
-    };
-  }
-
-  if (toolCall.name === "set_reactor_target") {
-    const reactorId = argumentsObject.reactorId;
-    const targetOutputKw = argumentsObject.targetOutputKw;
-    if (
-      typeof reactorId !== "string" ||
-      !FUSION_REACTOR_ID_SET.has(reactorId) ||
-      typeof targetOutputKw !== "number" ||
-      !Number.isFinite(targetOutputKw) ||
-      targetOutputKw < 0 ||
-      targetOutputKw > 225_000
-    ) {
-      return {
-        ok: false,
-        reason: "反应堆 ID 或目标功率超出设备边界",
-      };
-    }
-    return {
-      ok: true,
-      command: {
-        kind: "set-reactor-target",
-        actorAgentId: "captain",
-        reactorId: reactorId as FusionReactorId,
-        targetOutputKw,
-      },
-    };
-  }
-
-  if (toolCall.name === "set_reactor_mode") {
-    const reactorId = argumentsObject.reactorId;
-    const mode = argumentsObject.mode;
-    if (
-      typeof reactorId !== "string" ||
-      !FUSION_REACTOR_ID_SET.has(reactorId) ||
-      typeof mode !== "string" ||
-      !REACTOR_MODE_SET.has(mode)
-    ) {
-      return {
-        ok: false,
-        reason: "反应堆 ID 或运行模式无效",
-      };
-    }
-    return {
-      ok: true,
-      command: {
-        kind: "set-reactor-mode",
-        actorAgentId: "captain",
-        reactorId: reactorId as FusionReactorId,
-        mode: mode as ReactorMode,
-      },
-    };
-  }
-
-  if (toolCall.name === "set_cooling_pump_speed") {
-    const pumpId = argumentsObject.pumpId;
-    const commandedSpeedFraction =
-      argumentsObject.commandedSpeedFraction;
-    if (
-      typeof pumpId !== "string" ||
-      !COOLANT_PUMP_ID_SET.has(pumpId) ||
-      typeof commandedSpeedFraction !== "number" ||
-      !Number.isFinite(commandedSpeedFraction) ||
-      commandedSpeedFraction < 0 ||
-      commandedSpeedFraction > 1
-    ) {
-      return {
-        ok: false,
-        reason: "冷却泵 ID 或转速指令无效",
-      };
-    }
-    return {
-      ok: true,
-      command: {
-        kind: "set-cooling-pump-speed",
-        actorAgentId: "captain",
-        pumpId: pumpId as CoolantPumpId,
-        commandedSpeedFraction,
-      },
-    };
-  }
-
-  if (toolCall.name === "set_electrical_load_enabled") {
-    const loadId = argumentsObject.loadId;
-    const enabled = argumentsObject.enabled;
-    if (
-      typeof loadId !== "string" ||
-      !ELECTRICAL_LOAD_ID_SET.has(loadId) ||
-      typeof enabled !== "boolean"
-    ) {
-      return {
-        ok: false,
-        reason: "配电负载 ID 或 enabled 参数无效",
-      };
-    }
-    return {
-      ok: true,
-      command: {
-        kind: "set-electrical-load-enabled",
-        actorAgentId: "captain",
-        loadId: loadId as ElectricalLoadId,
-        enabled,
-      },
-    };
-  }
-
-  if (toolCall.name === "set_electrical_breaker") {
-    const breakerId = argumentsObject.breakerId;
-    const commandedClosed = argumentsObject.commandedClosed;
-    if (
-      typeof breakerId !== "string" ||
-      !ELECTRICAL_BREAKER_ID_SET.has(breakerId) ||
-      typeof commandedClosed !== "boolean"
-    ) {
-      return {
-        ok: false,
-        reason: "断路器 ID 或 commandedClosed 参数无效",
-      };
-    }
-    return {
-      ok: true,
-      command: {
-        kind: "set-electrical-breaker",
-        actorAgentId: "captain",
-        breakerId: breakerId as ElectricalBreakerId,
-        commandedClosed,
-      },
-    };
-  }
-
-  if (toolCall.name === "set_battery_mode") {
-    const batteryId = argumentsObject.batteryId;
-    const mode = argumentsObject.mode;
-    if (
-      typeof batteryId !== "string" ||
-      !ELECTRICAL_BATTERY_ID_SET.has(batteryId) ||
-      typeof mode !== "string" ||
-      !BATTERY_CONTROL_MODE_SET.has(mode)
-    ) {
-      return {
-        ok: false,
-        reason: "储能组 ID 或控制模式无效",
-      };
-    }
-    return {
-      ok: true,
-      command: {
-        kind: "set-battery-mode",
-        actorAgentId: "captain",
-        batteryId: batteryId as ElectricalBatteryId,
-        mode: mode as BatteryControlMode,
-      },
-    };
-  }
-
-  if (toolCall.name === "set_habitat_ring_control") {
-    const ringId = argumentsObject.ringId;
-    const controlMode = argumentsObject.controlMode;
-    const targetRelativeRpm = argumentsObject.targetRelativeRpm;
-    if (
-      typeof ringId !== "string" ||
-      !ROTATION_RING_ID_SET.has(ringId) ||
-      typeof controlMode !== "string" ||
-      !RING_CONTROL_MODE_SET.has(controlMode) ||
-      typeof targetRelativeRpm !== "number" ||
-      !Number.isFinite(targetRelativeRpm) ||
-      targetRelativeRpm < -12 ||
-      targetRelativeRpm > 12
-    ) {
-      return {
-        ok: false,
-        reason: "居住环 ID、控制模式或相对转速目标超出设备边界",
-      };
-    }
-    return {
-      ok: true,
-      command: {
-        kind: "set-habitat-ring-control",
-        actorAgentId: "captain",
-        ringId: ringId as RotationRingId,
-        controlMode: controlMode as RingControlMode,
-        targetRelativeRpm,
-      },
-    };
-  }
-
-  return {
-    ok: false,
-    reason: "工具不在舰长世界命令白名单中",
-  };
-}
-
-
 
 
 export function MissionControl() {
@@ -669,12 +275,20 @@ export function MissionControl() {
     useState<WaterRecoveryTelemetry | null>(null);
   const [maintenanceState, setMaintenanceState] =
     useState<MaintenanceTelemetry | null>(null);
+  const [hullConsequenceState, setHullConsequenceState] =
+    useState<HullConsequenceTelemetry | null>(null);
+  const [operationsState, setOperationsState] =
+    useState<CaptainOperationsSnapshot | null>(null);
   const [commandBusState, setCommandBusState] =
     useState<CommandBusTelemetry | null>(null);
   const [timeControl, setTimeControl] =
     useState<SimulationWorkerTimeControlTelemetry | null>(null);
   const [survival, setSurvival] =
     useState<SimulationWorkerSurvivalTelemetry | null>(null);
+  const [zoneMood, setZoneMood] = useState<ZoneMoodTelemetry[]>([]);
+  const [passengerCircles, setPassengerCircles] = useState<
+    PassengerCircleTelemetry[]
+  >([]);
   const [passengerHighlights, setPassengerHighlights] = useState<
     PassengerHighlightTelemetry[]
   >([]);
@@ -684,6 +298,11 @@ export function MissionControl() {
     useState<LlmRuntimeStatus | null>(null);
   const [llmCallPhase, setLlmCallPhase] =
     useState<LlmCallPhase>("idle");
+  const [decisionTheater, setDecisionTheater] =
+    useState<DecisionTheaterState>(IDLE_DECISION_THEATER_STATE);
+  const decisionTheaterRef = useRef<DecisionTheaterState>(
+    IDLE_DECISION_THEATER_STATE,
+  );
   const [captainDecisionLog, setCaptainDecisionLog] = useState<
     import("@/app/ui/types").CaptainDecisionEntry[]
   >([]);
@@ -710,12 +329,57 @@ export function MissionControl() {
     },
     [],
   );
-  const [hasLocalSave, setHasLocalSave] = useState(() => {
-    if (typeof window === "undefined") return false;
-    return window.localStorage.getItem("farhorizon-save") !== null;
-  });
+  const [hasLocalSave, setHasLocalSave] = useState(false);
   const [lastSaveTime, setLastSaveTime] = useState<string | null>(null);
+  const markSaveWritten = useCallback(() => {
+    setLastSaveTime(
+      new Date().toLocaleTimeString("zh-CN", {
+        hour: "2-digit",
+        minute: "2-digit",
+      }),
+    );
+    setHasLocalSave(true);
+  }, []);
+  const persistManualSave = useCallback(
+    async (
+      save: LocalSave,
+      options?: { successToast?: string },
+    ): Promise<boolean> => {
+      try {
+        await putManualSave(save);
+        markSaveWritten();
+        if (options?.successToast) {
+          showToast(options.successToast);
+        }
+        return true;
+      } catch (error) {
+        try {
+          await putManualSaveToLocalStorageFallback(save);
+          markSaveWritten();
+          showToast("IndexedDB 不可用，已回退 localStorage");
+          return true;
+        } catch (fallbackError) {
+          const quota =
+            isQuotaExceededError(error) ||
+            isQuotaExceededError(fallbackError);
+          showToast(
+            quota
+              ? "存档空间不足，无法写入本机。"
+              : "本机存档写入失败（IndexedDB 不可用）。",
+            { persistent: true },
+          );
+          return false;
+        }
+      }
+    },
+    [markSaveWritten, showToast],
+  );
   const [activeAlerts, setActiveAlerts] = useState<ActiveAlert[]>([]);
+  const [shipFocus, setShipFocus] = useState<{
+    zoneId: string | null;
+    ringId: "A" | "B" | null;
+    token: number;
+  }>({ zoneId: null, ringId: null, token: 0 });
   const knownAlertIds = useRef(new Set<string>());
   const audio = useAudio();
   const {
@@ -725,12 +389,23 @@ export function MissionControl() {
   } = audio;
   const knownProceduralEventIds = useRef(new Set<string>());
   const eventId = useRef(10);
+  const llmWaitingEventLoggedRef = useRef(false);
+  const fidelityLimitedEventLoggedRef = useRef(false);
   const knownMaintenanceCompletionIds = useRef(new Set<string>());
   const workerRef = useRef<Worker | null>(null);
   const pendingSaves = useRef(
     new Map<
       string,
       { metadata: Omit<LocalSave, "runtimeSnapshot"> }
+    >(),
+  );
+  const pendingInterventions = useRef(
+    new Map<
+      string,
+      {
+        resolve: () => void;
+        reject: (error: Error) => void;
+      }
     >(),
   );
   const pendingSaveBarrier = useRef<{
@@ -746,6 +421,73 @@ export function MissionControl() {
   const latestStateRevision = useRef<number | null>(null);
   const latestSimulationSeconds = useRef(0);
   const latestMissionEnded = useRef(false);
+  const captainRoutineSeconds = useRef(21_600);
+  const nextCaptainRoutineAtSimulationSeconds = useRef<number | null>(
+    null,
+  );
+  const [
+    nextCaptainRoutineDeadline,
+    setNextCaptainRoutineDeadline,
+  ] = useState<number | null>(null);
+  const updateNextCaptainRoutineDeadline = useCallback(
+    (value: number | null) => {
+      nextCaptainRoutineAtSimulationSeconds.current = value;
+      setNextCaptainRoutineDeadline(value);
+    },
+    [],
+  );
+  const captainJournalSnapshotRef = useRef<CaptainJournalSnapshot>(
+    createCaptainJournalSnapshot(),
+  );
+  const [captainJournalSnapshot, setCaptainJournalSnapshot] =
+    useState<CaptainJournalSnapshot>(() => createCaptainJournalSnapshot());
+  const updateCaptainJournalSnapshot = useCallback(
+    (value: CaptainJournalSnapshot) => {
+      captainJournalSnapshotRef.current = value;
+      setCaptainJournalSnapshot(value);
+    },
+    [],
+  );
+  const captainWatchSnapshotRef = useRef<CaptainWatchSnapshot>(
+    createCaptainWatchSnapshot(),
+  );
+  const [captainWatchSnapshot, setCaptainWatchSnapshot] =
+    useState<CaptainWatchSnapshot>(() => createCaptainWatchSnapshot());
+  const updateCaptainWatchSnapshot = useCallback(
+    (value: CaptainWatchSnapshot) => {
+      captainWatchSnapshotRef.current = value;
+      setCaptainWatchSnapshot(value);
+    },
+    [],
+  );
+  const departmentStandingSnapshotRef = useRef<DepartmentStandingSnapshot>(
+    createDepartmentStandingSnapshot(),
+  );
+  const [departmentStandingSnapshot, setDepartmentStandingSnapshot] =
+    useState<DepartmentStandingSnapshot>(() =>
+      createDepartmentStandingSnapshot(),
+    );
+  const updateDepartmentStandingSnapshot = useCallback(
+    (value: DepartmentStandingSnapshot) => {
+      departmentStandingSnapshotRef.current = value;
+      setDepartmentStandingSnapshot(value);
+    },
+    [],
+  );
+  const passengerSocietySnapshotRef = useRef<PassengerSocietySnapshot>(
+    createPassengerSocietySnapshot(),
+  );
+  const [passengerSocietySnapshot, setPassengerSocietySnapshot] =
+    useState<PassengerSocietySnapshot>(() =>
+      createPassengerSocietySnapshot(),
+    );
+  const updatePassengerSocietySnapshot = useCallback(
+    (value: PassengerSocietySnapshot) => {
+      passengerSocietySnapshotRef.current = value;
+      setPassengerSocietySnapshot(value);
+    },
+    [],
+  );
   const worldEpoch = useRef(0);
   const keyPassengerScheduler = useRef(
     new KeyPassengerPollScheduler(),
@@ -756,9 +498,8 @@ export function MissionControl() {
   const authorizedManifestRecordHistory = useRef<
     AuthorizedManifestRecord[]
   >([]);
-  const stepInFlight = useRef(false);
+  const activePhysicsRequestId = useRef<string | null>(null);
   const lastHeartbeatWallMs = useRef<number | null>(null);
-  const owedWallSecondsRef = useRef(0);
   const captainCallInFlight = useRef(false);
   const keyPassengerCallInFlight = useRef(false);
   const captainDecisionSequence = useRef(0);
@@ -781,8 +522,8 @@ export function MissionControl() {
       eventType: string,
       label: string,
       options?: { actor?: string },
-    ) => void
-  >(() => {});
+    ) => Promise<void>
+  >(async () => {});
   const godAssistSessionRef = useRef<GodAssistSessionHandle | null>(null);
   const handleGodAssistSessionChange = useCallback(
     (session: GodAssistSessionHandle | null) => {
@@ -831,6 +572,23 @@ export function MissionControl() {
     },
     [],
   );
+  const releaseCaptainDecisionPause = useCallback(
+    (phase: Exclude<LlmCallPhase, "waiting"> = "idle") => {
+      sendTimeControl({ releasePauseTokens: ["llm-waiting"] });
+      setLlmCallPhase(phase);
+    },
+    [sendTimeControl],
+  );
+  const emitDecisionTheater = useCallback(
+    (event: DecisionTheaterEvent) => {
+      setDecisionTheater((previous) => {
+        const next = reduceDecisionTheater(previous, event);
+        decisionTheaterRef.current = next;
+        return next;
+      });
+    },
+    [],
+  );
   const finishCaptainWorldCommandQueue = useCallback(
     (queue: CaptainWorldCommandQueue) => {
       if (activeCaptainWorldCommandQueue.current !== queue) {
@@ -840,6 +598,19 @@ export function MissionControl() {
         (left, right) => left.ordinal - right.ordinal,
       );
       activeCaptainWorldCommandQueue.current = null;
+      if (queue.advancesRoutineSchedule) {
+        updateNextCaptainRoutineDeadline(
+          computeNextCaptainRoutineDeadline(
+            latestSimulationSeconds.current,
+            captainRoutineSeconds.current,
+          ),
+        );
+      }
+      emitDecisionTheater({
+        type: "world_resumed",
+        cycleToken: queue.cycleToken,
+      });
+      releaseCaptainDecisionPause();
       // ─── 决策日志：记录执行回执 ─────────────────────────
       setCaptainDecisionLog((prev) =>
         prev.map((entry) =>
@@ -856,14 +627,19 @@ export function MissionControl() {
         setPaused(false);
       }
     },
-    [],
+    [
+      emitDecisionTheater,
+      releaseCaptainDecisionPause,
+      updateNextCaptainRoutineDeadline,
+    ],
   );
   const dispatchNextCaptainWorldCommand = useCallback(() => {
     const queue = activeCaptainWorldCommandQueue.current;
     if (
       !queue ||
       queue.activeRequestId !== null ||
-      queue.worldEpoch !== worldEpoch.current
+      queue.worldEpoch !== worldEpoch.current ||
+      activePhysicsRequestId.current !== null
     ) {
       return;
     }
@@ -904,10 +680,7 @@ export function MissionControl() {
           "watch",
         );
       }
-      latestCaptainDeviceReceipts.current = [...queue.receipts].sort(
-        (left, right) => left.ordinal - right.ordinal,
-      );
-      activeCaptainWorldCommandQueue.current = null;
+      finishCaptainWorldCommandQueue(queue);
       setPaused(true);
       showToast("舰长命令队列停止：物理引擎状态不可用。");
       return;
@@ -916,6 +689,13 @@ export function MissionControl() {
     requestSequence.current += 1;
     const requestId = `captain-queue-${requestSequence.current}`;
     queue.activeRequestId = requestId;
+    emitDecisionTheater({
+      type: "command_dispatched",
+      cycleToken: queue.cycleToken,
+      ordinal: item.ordinal,
+      toolName: item.toolName,
+      total: queue.commands.length,
+    });
     const command: SimulationWorkerCommand = {
       type: "ship-command",
       requestId,
@@ -928,9 +708,11 @@ export function MissionControl() {
       expectedStateRevision,
       command: item.command,
     };
+    activePhysicsRequestId.current = requestId;
     worker.postMessage(command);
   }, [
     appendCaptainCommandEvent,
+    emitDecisionTheater,
     finishCaptainWorldCommandQueue,
     showToast,
   ]);
@@ -948,6 +730,8 @@ export function MissionControl() {
   }, []);
   const cancelCaptainDecision = useCallback(() => {
     const active = activeCaptainDecision.current;
+    const theaterToken =
+      active?.token ?? decisionTheaterRef.current.cycleToken;
     active?.controller.abort();
     if (active) {
       captainInvocationKeys.current.delete(active.triggerKey);
@@ -955,7 +739,14 @@ export function MissionControl() {
     activeCaptainDecision.current = null;
     captainCallInFlight.current = false;
     clearCaptainWorldCommandQueue();
-  }, [clearCaptainWorldCommandQueue]);
+    // 取消必须立刻清场，不能留下悬挂的演出阶段。
+    emitDecisionTheater({ type: "abort", cycleToken: theaterToken });
+    releaseCaptainDecisionPause();
+  }, [
+    clearCaptainWorldCommandQueue,
+    emitDecisionTheater,
+    releaseCaptainDecisionPause,
+  ]);
   const cancelKeyPassengerCall = useCallback(() => {
     const active = activeKeyPassengerCall.current;
     active?.controller.abort();
@@ -969,7 +760,7 @@ export function MissionControl() {
     if (
       !barrier ||
       !worker ||
-      stepInFlight.current ||
+      activePhysicsRequestId.current !== null ||
       captainCallInFlight.current ||
       keyPassengerCallInFlight.current ||
       activeCaptainWorldCommandQueue.current !== null ||
@@ -1001,7 +792,9 @@ export function MissionControl() {
 
     worker.onmessage = (message: MessageEvent<SimulationWorkerEvent>) => {
       const event = message.data;
-      stepInFlight.current = false;
+      if (activePhysicsRequestId.current === event.requestId) {
+        activePhysicsRequestId.current = null;
+      }
       if (
         discardedCaptainCommandRequests.current.delete(
           event.requestId,
@@ -1021,9 +814,33 @@ export function MissionControl() {
             status: "rejected",
             summary: event.message,
           });
+          emitDecisionTheater({
+            type: "command_receipt",
+            cycleToken: queue.cycleToken,
+            ordinal: failed.ordinal,
+            toolName: failed.toolName,
+            status: "rejected",
+            summary: event.message,
+            wallClockAtMs: Date.now(),
+          });
+          if (isCaptainWorldCommandSoftRejectMessage(event.message)) {
+            appendCaptainCommandEvent(
+              latestSimulationSeconds.current,
+              `${failed.toolName} 被设备执行层拒绝：${event.message}（本条拒绝后队列继续）`,
+              "watch",
+            );
+            queue.nextIndex += 1;
+            queue.activeRequestId = null;
+            showToast(`舰长命令被拒绝，队列继续：${event.message}`);
+            dispatchNextCaptainWorldCommand();
+            requestSaveSnapshotWhenQuiescent();
+            return;
+          }
+          const hardStopHint =
+            "可解除暂停后继续观察；本轮后续命令已跳过";
           appendCaptainCommandEvent(
             latestSimulationSeconds.current,
-            `${failed.toolName} 被设备执行层拒绝：${event.message}`,
+            `${failed.toolName} 被设备执行层拒绝：${event.message}。${hardStopHint}`,
             "critical",
           );
           for (const skipped of queue.commands.slice(
@@ -1035,21 +852,19 @@ export function MissionControl() {
               toolName: skipped.toolName,
               commandKind: skipped.command.kind,
               status: "skipped",
-              summary: "前序命令失败，队列按顺序停止",
+              summary: `前序命令硬失败，队列已停止（${hardStopHint}）`,
             });
             appendCaptainCommandEvent(
               latestSimulationSeconds.current,
-              `${skipped.toolName} 未执行：前序命令失败，确定性队列已停止。`,
+              `${skipped.toolName} 未执行：前序命令硬失败，确定性队列已停止。`,
               "watch",
             );
           }
-          latestCaptainDeviceReceipts.current = [
-            ...queue.receipts,
-          ].sort((left, right) => left.ordinal - right.ordinal);
-          activeCaptainWorldCommandQueue.current = null;
-          captainInvocationKeys.current.delete(queue.triggerKey);
+          finishCaptainWorldCommandQueue(queue);
           setPaused(true);
-          showToast(`舰长命令队列停止：${event.message}`);
+          showToast(
+            `舰长命令队列硬停止：${event.message}。${hardStopHint}`,
+          );
           requestSaveSnapshotWhenQuiescent();
           return;
         }
@@ -1075,15 +890,29 @@ export function MissionControl() {
           );
           return;
         }
+        const pendingIntervention = pendingInterventions.current.get(
+          event.requestId,
+        );
+        if (pendingIntervention) {
+          pendingInterventions.current.delete(event.requestId);
+        }
         const godAssistSession = godAssistSessionRef.current;
-        if (godAssistSession?.active && godAssistSession.onPhysicsRejection) {
+        if (
+          godAssistSession?.active &&
+          godAssistSession.onPhysicsRejection &&
+          godAssistSession.pendingRequestId === event.requestId
+        ) {
           const onPhysicsRejection = godAssistSession.onPhysicsRejection;
           godAssistSessionRef.current = {
             active: false,
             retried: true,
+            pendingRequestId: null,
             onPhysicsRejection: null,
           };
           onPhysicsRejection(event.message);
+        }
+        if (pendingIntervention) {
+          pendingIntervention.reject(new Error(event.message));
         }
         setPaused(true);
         showToast(`物理引擎拒绝操作：${event.message}`);
@@ -1104,20 +933,18 @@ export function MissionControl() {
             1_000_000,
           runtimeSnapshot: event.payload.snapshot,
         };
-        window.localStorage.setItem(
-          "farhorizon-save",
-          JSON.stringify(save),
-        );
-        setLastSaveTime(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }));
-        setHasLocalSave(true);
-        sendTimeControl({ releasePauseTokens: ["save-barrier"] });
-        if (
-          !pendingSave.metadata.paused &&
-          !latestMissionEnded.current
-        ) {
-          setPaused(false);
-        }
-        showToast("完整本地存档已写入。");
+        void (async () => {
+          await persistManualSave(save, {
+            successToast: "完整本地存档已写入。",
+          });
+          sendTimeControl({ releasePauseTokens: ["save-barrier"] });
+          if (
+            !pendingSave.metadata.paused &&
+            !latestMissionEnded.current
+          ) {
+            setPaused(false);
+          }
+        })();
         return;
       }
       if (event.type === "final-report") {
@@ -1128,8 +955,10 @@ export function MissionControl() {
         event.type === "ready" &&
         pendingLoad.current?.requestId === event.requestId
       ) {
-        const { save, keyPassengerScheduler: restoredScheduler } =
-          pendingLoad.current;
+        const {
+          save,
+          keyPassengerScheduler: restoredScheduler,
+        } = pendingLoad.current;
         pendingLoad.current = null;
         sendTimeControl({ releasePauseTokens: ["save-barrier"] });
         knownMaintenanceCompletionIds.current = new Set(
@@ -1138,6 +967,9 @@ export function MissionControl() {
             .map((task) => task.id) ?? [],
         );
         knownProceduralEventIds.current.clear();
+        knownAlertIds.current.clear();
+        setActiveAlerts([]);
+        setCaptainDecisionLog([]);
         keyPassengerScheduler.current = restoredScheduler;
         setKeyPassengerPrivateNotes(
           restoredScheduler.listPrivateNotes(),
@@ -1176,6 +1008,8 @@ export function MissionControl() {
       setRotationState(event.payload.rotation);
       setWaterRecoveryState(event.payload.waterRecovery);
       setMaintenanceState(event.payload.maintenance);
+      setHullConsequenceState(event.payload.hullConsequence);
+      setOperationsState(event.payload.operations);
 
       // ─── 警报检测 ─────────────────────────────────────────
       const newAlerts = detectAlerts(
@@ -1185,6 +1019,8 @@ export function MissionControl() {
         event.payload.compartments,
         event.payload.elapsedSeconds,
         knownAlertIds.current,
+        event.payload.rotation?.observed ?? null,
+        event.payload.hullConsequence ?? null,
       );
       if (newAlerts.length > 0) {
         for (const alert of newAlerts) {
@@ -1221,6 +1057,8 @@ export function MissionControl() {
       commandRevision.current =
         event.payload.commandBus.revision;
       setPassengerHighlights(event.payload.passengerHighlights);
+      setZoneMood(event.payload.zoneMood);
+      setPassengerCircles(event.payload.passengerCircles);
       setTimeControl(event.payload.timeControl);
       setSurvival(event.payload.survival);
 
@@ -1275,6 +1113,23 @@ export function MissionControl() {
         }
       }
       if (event.type === "intervention") {
+        const pendingIntervention = pendingInterventions.current.get(
+          event.requestId,
+        );
+        if (pendingIntervention) {
+          pendingInterventions.current.delete(event.requestId);
+          pendingIntervention.resolve();
+        }
+        const godAssistSession = godAssistSessionRef.current;
+        if (
+          godAssistSession?.active &&
+          godAssistSession.pendingRequestId === event.requestId
+        ) {
+          godAssistSessionRef.current = {
+            ...godAssistSession,
+            pendingRequestId: null,
+          };
+        }
         const timelineEventId = ++eventId.current;
         const actor = event.payload.record.actor;
         const source = actor.startsWith("environment")
@@ -1308,6 +1163,15 @@ export function MissionControl() {
           });
           queue.nextIndex += 1;
           queue.activeRequestId = null;
+          emitDecisionTheater({
+            type: "command_receipt",
+            cycleToken: queue.cycleToken,
+            ordinal: queuedItem.ordinal,
+            toolName: queuedItem.toolName,
+            status: "accepted",
+            summary: event.payload.result.summary,
+            wallClockAtMs: Date.now(),
+          });
         }
         const timelineEventId = ++eventId.current;
         setEvents((current) =>
@@ -1355,13 +1219,21 @@ export function MissionControl() {
           dispatchNextCaptainWorldCommand();
         }
       }
+      if (
+        activeCaptainWorldCommandQueue.current?.activeRequestId ===
+        null
+      ) {
+        dispatchNextCaptainWorldCommand();
+      }
       requestSaveSnapshotWhenQuiescent();
     };
 
     worker.onerror = (event) => {
-      stepInFlight.current = false;
+      activePhysicsRequestId.current = null;
       const queue = activeCaptainWorldCommandQueue.current;
       const failed = queue?.commands[queue.nextIndex];
+      const hardStopHint =
+        "可解除暂停后继续观察；本轮后续命令已跳过";
       if (queue && failed) {
         const failureSummary = `仿真线程异常：${event.message}`;
         queue.receipts.push({
@@ -1370,11 +1242,11 @@ export function MissionControl() {
           toolName: failed.toolName,
           commandKind: failed.command.kind,
           status: "rejected",
-          summary: failureSummary,
+          summary: `${failureSummary}（${hardStopHint}）`,
         });
         appendCaptainCommandEvent(
           latestSimulationSeconds.current,
-          `${failed.toolName} 未完成：${failureSummary}`,
+          `${failed.toolName} 未完成：${failureSummary}。${hardStopHint}`,
           "critical",
         );
         for (const skipped of queue.commands.slice(
@@ -1386,7 +1258,7 @@ export function MissionControl() {
             toolName: skipped.toolName,
             commandKind: skipped.command.kind,
             status: "skipped",
-            summary: "仿真线程异常，队列按顺序停止",
+            summary: `仿真线程异常，队列已停止（${hardStopHint}）`,
           });
           appendCaptainCommandEvent(
             latestSimulationSeconds.current,
@@ -1399,9 +1271,15 @@ export function MissionControl() {
         ].sort((left, right) => left.ordinal - right.ordinal);
         activeCaptainWorldCommandQueue.current = null;
         captainInvocationKeys.current.delete(queue.triggerKey);
+        emitDecisionTheater({
+          type: "fail",
+          cycleToken: queue.cycleToken,
+          message: failureSummary,
+        });
       }
+      releaseCaptainDecisionPause("error");
       setPaused(true);
-      showToast(`仿真线程异常：${event.message}`);
+      showToast(`仿真线程异常：${event.message}。${hardStopHint}`);
     };
 
     return () => {
@@ -1409,19 +1287,44 @@ export function MissionControl() {
       cancelKeyPassengerCall();
       worker.terminate();
       workerRef.current = null;
+      activePhysicsRequestId.current = null;
     };
   }, [
     appendCaptainCommandEvent,
     cancelCaptainDecision,
     cancelKeyPassengerCall,
     dispatchNextCaptainWorldCommand,
+    emitDecisionTheater,
+    finishCaptainWorldCommandQueue,
     playAlertCritical,
     playAlertWarning,
     playAlertWatch,
+    persistManualSave,
     requestSaveSnapshotWhenQuiescent,
+    releaseCaptainDecisionPause,
     sendTimeControl,
     showToast,
   ]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        await migrateLocalStorageSaveOnce();
+        const present = await hasManualSave();
+        if (!cancelled) {
+          setHasLocalSave(present);
+        }
+      } catch {
+        if (!cancelled) {
+          setHasLocalSave(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1455,6 +1358,95 @@ export function MissionControl() {
     };
   }, []);
 
+  useEffect(() => {
+    const configuredSeconds = llmStatus?.agents.find(
+      (agent) => agent.id === "captain",
+    )?.routine.systemInfoIntervalSimSeconds;
+    if (
+      configuredSeconds !== undefined &&
+      Number.isFinite(configuredSeconds)
+    ) {
+      captainRoutineSeconds.current = Math.max(30, configuredSeconds);
+    }
+  }, [llmStatus]);
+
+  const workerHasCaptainDecisionPause = Boolean(
+    timeControl?.pauseTokens.includes("llm-waiting"),
+  );
+
+  // ─── 事件轨：AI 研判暂停 / 保真度限制（每 episode 一次）──
+  useEffect(() => {
+    if (llmCallPhase === "waiting") {
+      if (llmWaitingEventLoggedRef.current) {
+        return;
+      }
+      llmWaitingEventLoggedRef.current = true;
+      const timelineEventId = ++eventId.current;
+      setEvents((current) =>
+        prependTimelineEvent(current, {
+          id: timelineEventId,
+          at: formatDuration(latestSimulationSeconds.current),
+          source: "时间控制",
+          text: "仿真已暂停 · 等待 AI 舰长研判",
+          tone: "watch",
+        }),
+      );
+      return;
+    }
+    llmWaitingEventLoggedRef.current = false;
+  }, [llmCallPhase]);
+
+  // 终态演出在解冻后保留片刻，再清场；不得在决策进行中提前清空。
+  useEffect(() => {
+    if (
+      llmCallPhase === "waiting" ||
+      decisionTheater.active ||
+      (decisionTheater.stage !== "world_resumed" &&
+        decisionTheater.stage !== "failed")
+    ) {
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      emitDecisionTheater({ type: "clear" });
+    }, 1800);
+    return () => window.clearTimeout(timer);
+  }, [
+    decisionTheater.active,
+    decisionTheater.stage,
+    emitDecisionTheater,
+    llmCallPhase,
+  ]);
+
+  useEffect(() => {
+    const limited =
+      Boolean(timeControl?.fidelityLocked) ||
+      Boolean(compartmentState?.fidelityLimited);
+    if (!missionStarted || !limited) {
+      if (!limited) {
+        fidelityLimitedEventLoggedRef.current = false;
+      }
+      return;
+    }
+    if (fidelityLimitedEventLoggedRef.current) {
+      return;
+    }
+    fidelityLimitedEventLoggedRef.current = true;
+    const timelineEventId = ++eventId.current;
+    setEvents((current) =>
+      prependTimelineEvent(current, {
+        id: timelineEventId,
+        at: formatDuration(latestSimulationSeconds.current),
+        source: "物理引擎",
+        text: "保真度锁定 · 有效推进倍率已受限",
+        tone: "watch",
+      }),
+    );
+  }, [
+    compartmentState?.fidelityLimited,
+    missionStarted,
+    timeControl?.fidelityLocked,
+  ]);
+
   // ─── 时间权威：向 Worker 同步 pause tokens / timeScale ─────
   useEffect(() => {
     if (!missionStarted || !workerRef.current) {
@@ -1487,6 +1479,47 @@ export function MissionControl() {
     paused,
     sendTimeControl,
     timeScale,
+    workerHasCaptainDecisionPause,
+  ]);
+
+  // A completed decision can share a timestamp with a routine boundary while
+  // carrying a more specific alert trigger. Recover old/stale runtime state by
+  // consuming that covered deadline before releasing an orphan decision token.
+  useEffect(() => {
+    if (
+      !missionStarted ||
+      missionEnded ||
+      llmCallPhase === "waiting" ||
+      !workerHasCaptainDecisionPause ||
+      captainCallInFlight.current ||
+      activeCaptainWorldCommandQueue.current !== null
+    ) {
+      return;
+    }
+    const deadline = nextCaptainRoutineAtSimulationSeconds.current;
+    if (
+      !isCaptainRoutineDue(simulationSeconds, deadline) ||
+      !completedCaptainDecisionCoversDeadline(
+        deadline,
+        captainDecisionLog,
+      )
+    ) {
+      return;
+    }
+    updateNextCaptainRoutineDeadline(
+      computeNextCaptainRoutineDeadline(
+        simulationSeconds,
+        captainRoutineSeconds.current,
+      ),
+    );
+  }, [
+    captainDecisionLog,
+    llmCallPhase,
+    missionEnded,
+    missionStarted,
+    simulationSeconds,
+    updateNextCaptainRoutineDeadline,
+    workerHasCaptainDecisionPause,
   ]);
 
   useEffect(() => {
@@ -1509,25 +1542,32 @@ export function MissionControl() {
       const last = lastHeartbeatWallMs.current ?? now;
       lastHeartbeatWallMs.current = now;
       const elapsedSeconds = Math.max(0, (now - last) / 1000);
-      owedWallSecondsRef.current += elapsedSeconds;
 
-      if (stepInFlight.current) return;
-      if (owedWallSecondsRef.current < 0.05) return;
+      if (activePhysicsRequestId.current !== null) return;
+      if (elapsedSeconds < 0.05) return;
 
-      const realSeconds = Math.min(1.0, Math.max(0.05, owedWallSecondsRef.current));
-      owedWallSecondsRef.current = Math.max(
-        0,
-        owedWallSecondsRef.current - realSeconds,
+      const realSeconds = Math.min(
+        1.0,
+        Math.max(0.05, elapsedSeconds),
       );
 
       requestSequence.current += 1;
-      stepInFlight.current = true;
       const command: SimulationWorkerCommand = {
         type: "step",
         requestId: `step-${requestSequence.current}`,
         realSeconds,
         timeScale,
+        blockingBoundary:
+          nextCaptainRoutineAtSimulationSeconds.current === null
+            ? undefined
+            : {
+                id: `captain-routine:${nextCaptainRoutineAtSimulationSeconds.current}`,
+                atSimulationSeconds:
+                  nextCaptainRoutineAtSimulationSeconds.current,
+                pauseToken: "llm-waiting",
+              },
       };
+      activePhysicsRequestId.current = command.requestId;
       workerRef.current.postMessage(command);
     }, 250);
     return () => {
@@ -1611,6 +1651,7 @@ export function MissionControl() {
       jumpDriveChargeEstimateKWh:
         Math.round(engineState.journey.jumpDriveChargeKWh / 1_000) *
         1_000,
+      jumpDriveCapacityKWh: engineState.journey.jumpDriveCapacityKWh,
     };
     const manifestRecord: AuthorizedManifestRecord = {
       worldEpoch: recordWorldEpoch,
@@ -1664,16 +1705,8 @@ export function MissionControl() {
     () => STAR_SYSTEMS.find((system) => system.id === destination)!,
     [destination],
   );
-  const missionDistanceLightYears = Math.max(
-    0.1,
-    Math.abs(
-      destinationSystem.distanceFromSolLy - originSystem.distanceFromSolLy,
-    ),
-  );
-  const estimatedRouteLegs = Math.max(
-    1,
-    Math.ceil(missionDistanceLightYears / 2.5),
-  );
+  const missionDistanceLightYears = routeDistanceLy(origin, destination);
+  const estimatedRouteLegs = estimateMinLegs(missionDistanceLightYears);
 
   const nextRequestId = (prefix: string) => {
     requestSequence.current += 1;
@@ -1693,9 +1726,9 @@ export function MissionControl() {
       pendingLoad.current !== null ||
       pendingSaveBarrier.current !== null ||
       pendingSaves.current.size > 0 ||
+      activePhysicsRequestId.current !== null ||
       activeCaptainWorldCommandQueue.current !== null ||
-      captainCallInFlight.current ||
-      keyPassengerCallInFlight.current
+      captainCallInFlight.current
     ) {
       return;
     }
@@ -1703,13 +1736,7 @@ export function MissionControl() {
       return;
     }
 
-    const captainRuntime = llmStatus.agents.find(
-      (agent) => agent.id === "captain",
-    );
-    const routineSeconds = Math.max(
-      30,
-      captainRuntime?.routine.systemInfoIntervalSimSeconds ?? 21_600,
-    );
+    const routineSeconds = captainRoutineSeconds.current;
     const urgentWindowSeconds = Math.min(routineSeconds, 900);
     const currentWorldEpoch = worldEpoch.current;
     const controllerRecord =
@@ -1729,29 +1756,78 @@ export function MissionControl() {
       electricalState.observed.averageBusFrequencyHz !== null &&
       (electricalState.observed.averageBusVoltageV < 10_450 ||
         electricalState.observed.averageBusFrequencyHz < 49.5);
-    const activeMaintenanceAssets = new Set(
-      maintenanceState.activeTasks.map((task) => task.assetId),
-    );
     const unattendedMaintenanceFaults =
-      maintenanceState.observedAssets.filter(
-        (asset) =>
-          asset.condition !== null &&
-          asset.condition !== "nominal" &&
-          !activeMaintenanceAssets.has(asset.assetId),
-      );
+      listActionableUnattendedMaintenanceFaults({
+        observedAssets: maintenanceState.observedAssets,
+        activeTasks: maintenanceState.activeTasks,
+        robots: maintenanceState.robots,
+        inventory: maintenanceState.inventory,
+        truthConditions: maintenanceState.truth.conditions,
+        recentlyCompletedAssetIds:
+          maintenanceState.recentCompletedTasks.map(
+            (task) => task.assetId,
+          ),
+      });
     let triggerKey = "";
     let triggerReason = "";
 
     if (!captainInvocationKeys.current.has("mission-start")) {
       triggerKey = "mission-start";
       triggerReason = "最高指令刚刚生效，需要建立首段航程与清醒计划";
-    } else if (controllerRecord?.jumpControllerState === "ready") {
+    } else if (
+      isCaptainRoutineDue(
+        simulationSeconds,
+        nextCaptainRoutineAtSimulationSeconds.current,
+      )
+    ) {
+      triggerKey = `routine:${nextCaptainRoutineAtSimulationSeconds.current}`;
+      triggerReason = "到达舰长自行设定的例行系统信息周期";
+    } else if (
+      captainHullThreatBlocksJump({
+        hullConsequence: hullConsequenceState,
+        compartments: compartmentState,
+      })
+    ) {
       const decisionWindow = Math.floor(
-        simulationSeconds / routineSeconds,
+        simulationSeconds / urgentWindowSeconds,
       );
-      triggerKey = `jump-ready:${controllerRecord.completedJumpLogCount}:${decisionWindow}`;
+      const breachCount =
+        hullConsequenceState?.activeBreachCount ??
+        compartmentState?.activeBreaches ??
+        0;
+      triggerKey = `hull-threat:${breachCount}:${decisionWindow}`;
       triggerReason =
-        "延迟跃迁控制器记录显示储能达到执行阈值，需要决定是否提交下一段跃迁命令";
+        hullConsequenceState?.jumpBlockReason ??
+        `壳体威胁：活动破口 ${breachCount} 处，跃迁联锁生效；优先隔离并 schedule_hull_repair，禁止 execute_jump`;
+    } else if (controllerRecord?.jumpControllerState === "ready") {
+      const pendingJumpThermal = projectCaptainJumpThermalEstimate({
+        thermalBusSensorK:
+          coolingState?.observed.thermalBusTemperatureK ?? null,
+        requiredChargePerJumpKWh:
+          engineState.journey.requiredChargePerJumpKWh,
+        remainingDistanceLightYears: Math.max(
+          0,
+          engineState.journey.totalDistanceLightYears -
+            engineState.journey.completedDistanceLightYears,
+        ),
+      });
+      if (pendingJumpThermal && !pendingJumpThermal.clearsInterlock) {
+        const decisionWindow = Math.floor(
+          simulationSeconds / urgentWindowSeconds,
+        );
+        triggerKey = `jump-thermal-block:${decisionWindow}`;
+        triggerReason =
+          "跃迁储能已就绪，但推进热预测超过主热汇流排安全联锁上限；需先降温/确认冷却，禁止立即 execute_jump";
+      } else {
+        const decisionWindow = Math.floor(
+          simulationSeconds / routineSeconds,
+        );
+        triggerKey = `jump-ready:${controllerRecord.completedJumpLogCount}:${decisionWindow}`;
+        triggerReason =
+          controllerRecord.completedJumpLogCount === 0
+            ? "延迟跃迁控制器记录显示储能达到执行阈值，需要决定是否提交首次跃迁；零次完成记录与完整剩余航程是首次跃迁前的正常状态"
+            : "延迟跃迁控制器记录显示储能达到执行阈值，需要决定是否提交下一段跃迁命令";
+      }
     } else if (observedPowerAlarm) {
       triggerKey = `power-deficit:${Math.floor(simulationSeconds / urgentWindowSeconds)}`;
       triggerReason = "电网出现未满足负载，需要舰长处置";
@@ -1761,7 +1837,7 @@ export function MissionControl() {
         .join(",")}:${Math.floor(simulationSeconds / urgentWindowSeconds)}`;
       triggerReason = `维修诊断总线报告 ${unattendedMaintenanceFaults
         .map((asset) => `${asset.label}:${asset.condition}`)
-        .join("、")}，且尚无活动维修任务`;
+        .join("、")}，均尚无活动维修任务，且同环维修机器人与对应备件当前均可用（可排程）`;
     } else if (
       compartmentState?.observedPressureMinPa !== null &&
       compartmentState?.observedPressureMinPa !== undefined &&
@@ -1778,20 +1854,484 @@ export function MissionControl() {
     ) {
       triggerKey = `thermal-high:${Math.floor(simulationSeconds / urgentWindowSeconds)}`;
       triggerReason = "冷却母线温度高于警戒值";
-    } else if (simulationSeconds >= routineSeconds) {
-      const routineWindow = Math.floor(
-        simulationSeconds / routineSeconds,
-      );
-      triggerKey = `routine:${routineWindow}`;
-      triggerReason = "到达舰长自行设定的例行系统信息周期";
     }
 
-    if (
-      !triggerKey ||
-      captainInvocationKeys.current.has(triggerKey)
-    ) {
+    const atmospherePressureObservation =
+      compartmentState?.observedPressureAveragePa ?? null;
+    const atmosphereZoneAlerts = projectCaptainPressureZoneAlerts(
+      compartmentState,
+      hullConsequenceState,
+    );
+    const trueRemainingDistance = Math.max(
+      0,
+      engineState.journey.totalDistanceLightYears -
+        engineState.journey.completedDistanceLightYears,
+    );
+    const hullThreatObservation =
+      projectCaptainHullThreatObservation(hullConsequenceState);
+    const jumpThermalProjection = projectCaptainJumpThermalEstimate({
+      thermalBusSensorK:
+        coolingState?.observed.thermalBusTemperatureK ?? null,
+      requiredChargePerJumpKWh:
+        engineState.journey.requiredChargePerJumpKWh,
+      remainingDistanceLightYears: trueRemainingDistance,
+      candidateDistanceLightYears: Math.min(
+        5,
+        Math.max(0.1, trueRemainingDistance || 0.1),
+      ),
+    });
+    const authorizedJumpControllerRecord = controllerRecord
+      ? {
+          availability: "available",
+          source:
+            "跃迁控制器授权记录；延迟发布并经过量化，不是即时物理真值",
+          sampledAtSimulationSeconds:
+            controllerRecord.sampledAtSimulationSeconds,
+          sampleAgeSeconds: Math.max(
+            0,
+            simulationSeconds -
+              controllerRecord.sampledAtSimulationSeconds,
+          ),
+          nominalPublicationDelaySeconds:
+            AUTHORIZED_CONTROLLER_RECORD_DELAY_SECONDS,
+          remainingDistanceEstimateLightYears:
+            controllerRecord.remainingDistanceEstimateLightYears,
+          jumpControllerState:
+            controllerRecord.jumpControllerState,
+          completedJumpLogCount:
+            controllerRecord.completedJumpLogCount,
+          jumpDriveChargeEstimateKWh:
+            controllerRecord.jumpDriveChargeEstimateKWh,
+          jumpDriveCapacityKWh:
+            controllerRecord.jumpDriveCapacityKWh,
+          routeProgressSemantics:
+            "剩余航程与完成次数只在 execute_jump 被设备接受并成功后更新；首次跃迁前零次记录与完整剩余航程正常，不要求先有历史跃迁或亚光速航段",
+          localFrameSemantics:
+            "位置/速度传感器属于常规推进的局部六自由度坐标，不是光年级航程进度，也不能据此判定仍在出发星系",
+          jumpEnergySemantics:
+            "jumpDriveChargeEstimateKWh 是跃迁专用储能；普通 A/B 电池 SOC 不是跃迁联锁门槛，最终可执行性由 execute_jump 的确定性设备联锁裁决",
+        }
+      : {
+          availability: "unavailable",
+          source:
+            "跃迁控制器授权记录尚未达到发布延迟；不得用世界真值补齐",
+          nominalPublicationDelaySeconds:
+            AUTHORIZED_CONTROLLER_RECORD_DELAY_SECONDS,
+        };
+    const authorizedCrewManifestRecord = manifestRecord
+      ? {
+          availability: "available",
+          source:
+            "人员舱单授权记录；延迟发布，不代表即时生命体征",
+          sampledAtSimulationSeconds:
+            manifestRecord.sampledAtSimulationSeconds,
+          sampleAgeSeconds: Math.max(
+            0,
+            simulationSeconds -
+              manifestRecord.sampledAtSimulationSeconds,
+          ),
+          nominalPublicationDelaySeconds:
+            AUTHORIZED_MANIFEST_RECORD_DELAY_SECONDS,
+          awakeRegistered: manifestRecord.awakeRegistered,
+          hibernatingRegistered:
+            manifestRecord.hibernatingRegistered,
+          deceasedRegistered: manifestRecord.deceasedRegistered,
+        }
+      : {
+          availability: "unavailable",
+          source:
+            "人员舱单授权记录尚未达到发布延迟；不得用世界真值补齐",
+          nominalPublicationDelaySeconds:
+            AUTHORIZED_MANIFEST_RECORD_DELAY_SECONDS,
+        };
+    const averageSensorReading = (
+      readings: number[],
+    ): number | null =>
+      readings.length === 0
+        ? null
+        : readings.reduce((total, value) => total + value, 0) /
+          readings.length;
+    const observedRingAtmosphere = (["A", "B"] as const).map(
+      (ring) => {
+        const ringZones =
+          compartmentState?.zones.filter((zone) =>
+            zone.zoneId.startsWith(`${ring}-`),
+          ) ?? [];
+        const carbonDioxideReadings = ringZones
+          .map(
+            (zone) =>
+              zone.observed.carbonDioxidePartialPressurePa,
+          )
+          .filter((value): value is number => value !== null);
+        const pressureReadings = ringZones
+          .map((zone) => zone.observed.pressurePa)
+          .filter((value): value is number => value !== null);
+        const oxygenReadings = ringZones
+          .map((zone) => zone.observed.oxygenPartialPressurePa)
+          .filter((value): value is number => value !== null);
+        return {
+          ring,
+          observedOxygenPartialPressurePa:
+            averageSensorReading(oxygenReadings),
+          observedCarbonDioxidePartialPressurePa:
+            averageSensorReading(carbonDioxideReadings),
+          observedPressurePa:
+            averageSensorReading(pressureReadings),
+          reportingZoneCount: Math.min(
+            oxygenReadings.length,
+            carbonDioxideReadings.length,
+            pressureReadings.length,
+          ),
+          oxygenReportingZoneCount: oxygenReadings.length,
+        };
+      },
+    );
+    const oxygenPartialPressureSensorPaByRing = {
+      a:
+        observedRingAtmosphere.find((entry) => entry.ring === "A")
+          ?.observedOxygenPartialPressurePa ?? null,
+      b:
+        observedRingAtmosphere.find((entry) => entry.ring === "B")
+          ?.observedOxygenPartialPressurePa ?? null,
+    };
+    const shipOxygenSensorReadings =
+      compartmentState?.zones
+        .map((zone) => zone.observed.oxygenPartialPressurePa)
+        .filter((value): value is number => value !== null) ??
+      [];
+    const oxygenPartialPressureSensorPaAverage =
+      averageSensorReading(shipOxygenSensorReadings);
+    // 与 pressureZoneAlerts / ringAtmosphereSensors 同源：compartmentState.zones[].observed（含降级/漂移）
+    const zoneAtmosphereSensorZones = compartmentState?.zones ?? [];
+    const zonePressureSensorReadings = zoneAtmosphereSensorZones
+      .map((zone) => zone.observed.pressurePa)
+      .filter((value): value is number => value !== null);
+    const zoneCarbonDioxideSensorReadings = zoneAtmosphereSensorZones
+      .map((zone) => zone.observed.carbonDioxidePartialPressurePa)
+      .filter((value): value is number => value !== null);
+    const lowestZonePressureSensorPa =
+      zonePressureSensorReadings.length === 0
+        ? null
+        : Math.min(...zonePressureSensorReadings);
+    const highestZoneCarbonDioxideSensorPa =
+      zoneCarbonDioxideSensorReadings.length === 0
+        ? null
+        : Math.max(...zoneCarbonDioxideSensorReadings);
+    // 全船平均应激：各区带 meanStress 按 awakeCount 加权，非简单平均
+    let meanPassengerStressWeightedSum = 0;
+    let meanPassengerStressAwakeTotal = 0;
+    for (const zone of zoneMood) {
+      if (
+        !isFiniteNumber(zone.awakeCount) ||
+        !isFiniteNumber(zone.meanStress) ||
+        zone.awakeCount <= 0
+      ) {
+        continue;
+      }
+      meanPassengerStressWeightedSum +=
+        zone.meanStress * zone.awakeCount;
+      meanPassengerStressAwakeTotal += zone.awakeCount;
+    }
+    const meanPassengerStress =
+      meanPassengerStressAwakeTotal > 0
+        ? meanPassengerStressWeightedSum /
+          meanPassengerStressAwakeTotal
+        : null;
+    const operationsLedger = operationsState
+      ? {
+          disclaimer:
+            "舰务运营账本投影；比传感器更完整，不是纯传感通道",
+          mission: operationsState.mission,
+          departmentOrders:
+            operationsState.departmentOrders.slice(-32),
+          grievances: operationsState.grievances,
+          recentCommunications:
+            operationsState.communications.slice(-24),
+          crewAssignments: operationsState.crewAssignments,
+          personDispositions: operationsState.personDispositions,
+          securityTeams: operationsState.securityTeams,
+          securityCases: operationsState.securityCases.slice(-24),
+          accessControls: operationsState.accessControls,
+          rationKgPerAwakePersonDay:
+            operationsState.rationKgPerAwakePersonDay,
+          waterKgPerAwakePersonDayByZone:
+            operationsState.waterKgPerAwakePersonDayByZone,
+          agricultureBays: operationsState.agricultureBays,
+          cargo: operationsState.cargo,
+          cabinAllocations: operationsState.cabinAllocations,
+          spareSubstitutions: operationsState.spareSubstitutions,
+          activeTasks: operationsState.tasks.filter(
+            (task) => task.status === "active",
+          ),
+          remoteAssets: operationsState.remoteAssets,
+          sensors: operationsState.sensors,
+          powerAllocationLimitByLoad:
+            operationsState.powerAllocationLimitByLoad,
+          atmosphereReserveKg: operationsState.atmosphereReserveKg,
+          atmosphereReserveSemantics: ATMOSPHERE_RESERVE_LEDGER_SEMANTICS,
+          oxygenGenerators: operationsState.oxygenGenerators,
+          hydrogenReserveKg: operationsState.hydrogenReserveKg,
+          foodDryKg: survival?.foodDryKg ?? null,
+          meanPassengerStress,
+        }
+      : {
+          disclaimer:
+            "舰务运营账本投影；比传感器更完整，不是纯传感通道",
+          availability: "unavailable" as const,
+        };
+    const fullAuthorizedObservation = {
+      source:
+        "混合通道：sensorView 为延迟传感；controllerCommandState 为指令态；operationsLedger 为授权舰务账本；均非上帝真值覆写通道",
+      sensorView: {
+        powerControllerAlarm:
+          electricalState.observed.averageBusVoltageV === null ||
+          electricalState.observed.averageBusFrequencyHz === null
+            ? "sensor-unavailable"
+            : observedPowerAlarm
+              ? "voltage-or-frequency-deviation"
+              : "nominal",
+        averageBusVoltageSensorV:
+          electricalState.observed.averageBusVoltageV,
+        averageBusFrequencySensorHz:
+          electricalState.observed.averageBusFrequencyHz,
+        servedPowerSensorKw:
+          electricalState.observed.totalServedPowerKw,
+        reactorOutputSensorKw:
+          electricalState.observed.totalReactorOutputKw,
+        batteryStateOfChargeSensorFraction:
+          electricalState.observed
+            .averageBatteryStateOfChargeFraction,
+        coolantSensorK:
+          coolingState?.observed.averageCoolantTemperatureK ??
+          null,
+        thermalBusSensorK:
+          coolingState?.observed.thermalBusTemperatureK ?? null,
+        coolantMassFlowSensorKgPerSecond:
+          coolingState?.observed.totalMassFlowKgPerSecond ??
+          null,
+        habitatPressureSensorPa: atmospherePressureObservation,
+        oxygenPartialPressureSensorPaByRing,
+        oxygenPartialPressureSensorPaAverage,
+        oxygenPartialPressureSensorPaA01Detail:
+          compartmentState?.zones.find(
+            (zone) => zone.zoneId === "A-01",
+          )?.observed.oxygenPartialPressurePa ?? null,
+        pressureZoneAlerts: atmosphereZoneAlerts,
+        lowestZonePressureSensorPa,
+        highestZoneCarbonDioxideSensorPa,
+        hullThreat: hullThreatObservation,
+        jumpThermalProjection,
+        waterRecoverySensors: waterRecoveryState?.observed
+          ? {
+              availability: "available",
+              sampledAtSimulationSeconds:
+                waterRecoveryState.observed
+                  .sampledAtMicroseconds / 1_000_000,
+              sampleAgeSeconds: Math.max(
+                0,
+                simulationSeconds -
+                  waterRecoveryState.observed
+                    .sampledAtMicroseconds /
+                    1_000_000,
+              ),
+              potableKgByRing:
+                waterRecoveryState.observed.potableKgByRing,
+              wastewaterKgByRing:
+                waterRecoveryState.observed.wastewaterKgByRing,
+              processorThroughputKgPerDay:
+                waterRecoveryState.observed
+                  .processorThroughputKgPerDay,
+              distributionSpurs:
+                waterRecoveryState.distributionSpurs,
+              undeliveredPotableKg:
+                waterRecoveryState.undeliveredPotableKg,
+            }
+          : {
+              availability: "sensor-unavailable",
+            },
+        habitatThermalDeliverySpurs:
+          coolingState?.habitatThermalDeliverySpurs ?? [],
+        undeliveredHabitatCoolingJ:
+          coolingState?.undeliveredHabitatCoolingJ ?? null,
+        maintenanceDiagnostics: maintenanceState
+          ? {
+              assets: maintenanceState.observedAssets.map(
+                ({
+                  assetId,
+                  label,
+                  condition,
+                  sampleAgeSeconds,
+                }) => {
+                  const truthCondition =
+                    maintenanceState.truth.conditions[assetId] ??
+                    null;
+                  const recentlyCompleted =
+                    maintenanceState.recentCompletedTasks.some(
+                      (task) => task.assetId === assetId,
+                    );
+                  const scheduleFeasibility =
+                    truthCondition === "nominal" || recentlyCompleted
+                      ? {
+                          schedulable: false as const,
+                          blockReason: "nominal-or-unknown" as const,
+                        }
+                      : evaluateMaintenanceSchedulingFeasibility({
+                          assetId,
+                          condition,
+                          activeAssetIds:
+                            maintenanceState.activeTasks,
+                          robots: maintenanceState.robots,
+                          inventory: maintenanceState.inventory,
+                        });
+                  return {
+                    assetId,
+                    label,
+                    condition,
+                    sampleAgeSeconds,
+                    truthCondition,
+                    recentlyCompleted,
+                    scheduleFeasibility,
+                  };
+                },
+              ),
+              activeTasks: maintenanceState.activeTasks.map(
+                (task) => ({
+                  taskId: task.id,
+                  assetId: task.assetId,
+                  status: task.status,
+                  blockedReason: task.blockedReason,
+                  progressFraction:
+                    task.completedWorkSeconds /
+                    task.requiredWorkSeconds,
+                  assignedCrewId: task.assignedCrewId,
+                  assignedRobotId: task.assignedRobotId,
+                }),
+              ),
+              recentCompletedTasks:
+                maintenanceState.recentCompletedTasks.map(
+                  (task) => ({
+                    taskId: task.id,
+                    assetId: task.assetId,
+                    status: task.status,
+                  }),
+                ),
+              diagnosticLagSemantics:
+                "observed 诊断有发布延迟；若 truthCondition=nominal 或 recentlyCompleted=true，禁止再 schedule_maintenance",
+              inventory: maintenanceState.inventory,
+              robots: maintenanceState.robots,
+            }
+          : { availability: "diagnostic-unavailable" },
+        ringAtmosphereSensors: observedRingAtmosphere,
+        navigationPositionSensorM:
+          navigationState.observed.positionM,
+        navigationVelocitySensorMPerS:
+          navigationState.observed.velocityMPerS,
+        navigationAttitudeSensor:
+          navigationState.observed.orientationBodyToInertial,
+        navigationAngularVelocitySensorRadPerS:
+          navigationState.observed.angularVelocityBodyRadPerS,
+        propellantMassSensorKg:
+          navigationState.observed.propellantMassKg,
+        rotationRingSensors: rotationState.observed.rings.map(
+          ({
+            id,
+            relativeRpm,
+            artificialGravityG,
+            vibrationMmPerS,
+          }) => ({
+            ringId: id,
+            relativeRpm,
+            artificialGravityG,
+            vibrationMmPerS,
+          }),
+        ),
+        rotationSensorDiagnostics: rotationState.sensors.map(
+          ({
+            ringId,
+            quantity,
+            value,
+            quality,
+            sampleAgeSeconds,
+          }) => ({
+            ringId,
+            quantity,
+            value,
+            quality,
+            sampleAgeSeconds,
+          }),
+        ),
+      },
+      delayedAuthorizedRecords: {
+        jumpControllerRecord: authorizedJumpControllerRecord,
+        crewManifestRecord: authorizedCrewManifestRecord,
+      },
+      controllerCommandState: {
+        disclaimer:
+          "指令态/控制器设定，非延迟传感器；可能与现场真值不同步",
+        airHandlers:
+          compartmentState?.airHandlers.controllers ?? [],
+        waterProcessors: waterRecoveryState?.controllers ?? [],
+        waterDistributionSpurs: (
+          waterRecoveryState?.distributionSpurs ?? []
+        ).map(
+          ({
+            spurId,
+            ring,
+            commandedOpenFraction,
+            condition,
+          }) => ({
+            spurId,
+            ring,
+            commandedOpenFraction,
+            condition,
+          }),
+        ),
+        habitatThermalDeliverySpurs: (
+          coolingState?.habitatThermalDeliverySpurs ?? []
+        ).map(
+          ({
+            spurId,
+            ring,
+            commandedOpenFraction,
+            condition,
+          }) => ({
+            spurId,
+            ring,
+            commandedOpenFraction,
+            condition,
+          }),
+        ),
+      },
+      operationsLedger,
+    };
+
+    const watchEvaluation = evaluateCaptainWatches(
+      captainWatchSnapshotRef.current,
+      extractCaptainWatchMetricSample(fullAuthorizedObservation),
+      { simulationSeconds },
+    );
+    updateCaptainWatchSnapshot(watchEvaluation.snapshot);
+    if (!triggerKey && watchEvaluation.fired.length > 0) {
+      const watchKey = captainWatchTriggerKey(watchEvaluation.fired);
+      if (watchKey) {
+        triggerKey = watchKey;
+        triggerReason = `舰长自设观察哨触发：${watchEvaluation.fired
+          .map(
+            (item) =>
+              `${item.label}${item.comparator === "above" ? "高于" : "低于"}${item.threshold}（观测 ${item.observedValue}）；${item.note}`,
+          )
+          .join("；")}`;
+      }
+    }
+
+    if (!triggerKey || captainInvocationKeys.current.has(triggerKey)) {
       return;
     }
+
+    // The world is already frozen at this exact scheduler boundary. Build the
+    // decision input from that same committed state; do not insert another
+    // simulated delivery delay between "due" and "decide".
+    const authorizedObservation = fullAuthorizedObservation;
 
     cancelCaptainDecision();
     captainDecisionSequence.current += 1;
@@ -1827,7 +2367,7 @@ export function MissionControl() {
       "舰长决策周期已由新的世界状态取代",
     );
     const staleObservationError = new Error(
-      "模型返回前世界状态已经变化；旧观测上的命令已被联锁作废",
+      "AI 研判期间世界状态发生变化；本轮命令已被联锁作废",
     );
     const assertCurrentCaptainDecision = () => {
       if (!isCurrentCaptainDecision()) {
@@ -1837,11 +2377,29 @@ export function MissionControl() {
         throw staleObservationError;
       }
     };
+    const advancesRoutineSchedule =
+      captainDecisionAdvancesRoutineSchedule({
+        triggerKey,
+        simulationSeconds,
+        deadlineSimulationSeconds:
+          nextCaptainRoutineAtSimulationSeconds.current,
+      });
+    const routineDeadlineBeforeClear =
+      nextCaptainRoutineAtSimulationSeconds.current;
+    if (advancesRoutineSchedule) {
+      updateNextCaptainRoutineDeadline(null);
+    }
     captainInvocationKeys.current.add(triggerKey);
     captainCallInFlight.current = true;
-    const resumeAfterCall = !paused;
-    setPaused(true);
+    sendTimeControl({ acquirePauseTokens: ["llm-waiting"] });
     setLlmCallPhase("waiting");
+    emitDecisionTheater({
+      type: "start",
+      cycleToken: captainDecisionToken,
+      freezeSimulationSeconds: simulationSeconds,
+      triggerReason,
+      wallClockStartedAtMs: Date.now(),
+    });
 
     // ─── 决策日志：记录触发 ─────────────────────────────────
     captainDecisionSequence.current += 1;
@@ -1861,453 +2419,379 @@ export function MissionControl() {
       ...prev,
     ].slice(0, 30));
 
-    const atmospherePressureObservation =
-      compartmentState?.observedPressureAveragePa ?? null;
-    const atmosphereZoneAlerts =
-      compartmentState?.zones
-        .filter((zone) => zone.condition !== "nominal")
-        .slice(0, 8)
-        .map((zone) => ({
-          zoneId: zone.zoneId,
-          condition: zone.condition,
-          pressureSensorPa: zone.observed.pressurePa,
-          oxygenSensorPa:
-            zone.observed.oxygenPartialPressurePa,
-          carbonDioxideSensorPa:
-            zone.observed.carbonDioxidePartialPressurePa,
-          pressureSensorQuality: zone.quality.pressure,
-          sampleAgeSeconds: zone.newestSampleAgeSeconds,
-        })) ?? [];
-    const trueRemainingDistance = Math.max(
-      0,
-      engineState.journey.totalDistanceLightYears -
-        engineState.journey.completedDistanceLightYears,
-    );
-    const authorizedJumpControllerRecord = controllerRecord
-      ? {
-          availability: "available",
-          source:
-            "跃迁控制器授权记录；延迟发布并经过量化，不是即时物理真值",
-          sampledAtSimulationSeconds:
-            controllerRecord.sampledAtSimulationSeconds,
-          sampleAgeSeconds: Math.max(
-            0,
-            simulationSeconds -
-              controllerRecord.sampledAtSimulationSeconds,
-          ),
-          nominalPublicationDelaySeconds:
-            AUTHORIZED_CONTROLLER_RECORD_DELAY_SECONDS,
-          remainingDistanceEstimateLightYears:
-            controllerRecord.remainingDistanceEstimateLightYears,
-          jumpControllerState:
-            controllerRecord.jumpControllerState,
-          completedJumpLogCount:
-            controllerRecord.completedJumpLogCount,
-          jumpDriveChargeEstimateKWh:
-            controllerRecord.jumpDriveChargeEstimateKWh,
-        }
-      : {
-          availability: "unavailable",
-          source:
-            "跃迁控制器授权记录尚未达到发布延迟；不得用世界真值补齐",
-          nominalPublicationDelaySeconds:
-            AUTHORIZED_CONTROLLER_RECORD_DELAY_SECONDS,
-        };
-    const authorizedCrewManifestRecord = manifestRecord
-      ? {
-          availability: "available",
-          source:
-            "人员舱单授权记录；延迟发布，不代表即时生命体征",
-          sampledAtSimulationSeconds:
-            manifestRecord.sampledAtSimulationSeconds,
-          sampleAgeSeconds: Math.max(
-            0,
-            simulationSeconds -
-              manifestRecord.sampledAtSimulationSeconds,
-          ),
-          nominalPublicationDelaySeconds:
-            AUTHORIZED_MANIFEST_RECORD_DELAY_SECONDS,
-          awakeRegistered: manifestRecord.awakeRegistered,
-          hibernatingRegistered:
-            manifestRecord.hibernatingRegistered,
-          deceasedRegistered: manifestRecord.deceasedRegistered,
-        }
-      : {
-          availability: "unavailable",
-          source:
-            "人员舱单授权记录尚未达到发布延迟；不得用世界真值补齐",
-          nominalPublicationDelaySeconds:
-            AUTHORIZED_MANIFEST_RECORD_DELAY_SECONDS,
-        };
-    const observedRingAtmosphere = (["A", "B"] as const).map(
-      (ring) => {
-        const ringZones =
-          compartmentState?.zones.filter((zone) =>
-            zone.zoneId.startsWith(`${ring}-`),
-          ) ?? [];
-        const carbonDioxideReadings = ringZones
-          .map(
-            (zone) =>
-              zone.observed.carbonDioxidePartialPressurePa,
-          )
-          .filter((value): value is number => value !== null);
-        const pressureReadings = ringZones
-          .map((zone) => zone.observed.pressurePa)
-          .filter((value): value is number => value !== null);
-        return {
-          ring,
-          observedCarbonDioxidePartialPressurePa:
-            carbonDioxideReadings.length === 0
-              ? null
-              : carbonDioxideReadings.reduce(
-                  (total, value) => total + value,
-                  0,
-                ) / carbonDioxideReadings.length,
-          observedPressurePa:
-            pressureReadings.length === 0
-              ? null
-              : pressureReadings.reduce(
-                  (total, value) => total + value,
-                  0,
-                ) / pressureReadings.length,
-          reportingZoneCount: Math.min(
-            carbonDioxideReadings.length,
-            pressureReadings.length,
-          ),
-        };
-      },
-    );
-    const authorizedObservation = {
-      source:
-        "仅含舰载传感器与延迟授权记录；不是世界真值，上帝模式账本不在此通道",
-      jumpControllerRecord: authorizedJumpControllerRecord,
-      crewManifestRecord: authorizedCrewManifestRecord,
-      powerControllerAlarm:
-        electricalState.observed.averageBusVoltageV === null ||
-        electricalState.observed.averageBusFrequencyHz === null
-          ? "sensor-unavailable"
-          : observedPowerAlarm
-            ? "voltage-or-frequency-deviation"
-            : "nominal",
-      averageBusVoltageSensorV:
-        electricalState.observed.averageBusVoltageV,
-      averageBusFrequencySensorHz:
-        electricalState.observed.averageBusFrequencyHz,
-      servedPowerSensorKw:
-        electricalState.observed.totalServedPowerKw,
-      reactorOutputSensorKw:
-        electricalState.observed.totalReactorOutputKw,
-      batteryStateOfChargeSensorFraction:
-        electricalState.observed
-          .averageBatteryStateOfChargeFraction,
-      coolantSensorK:
-        coolingState?.observed.averageCoolantTemperatureK ??
-        null,
-      thermalBusSensorK:
-        coolingState?.observed.thermalBusTemperatureK ?? null,
-      coolantMassFlowSensorKgPerSecond:
-        coolingState?.observed.totalMassFlowKgPerSecond ??
-        null,
-      habitatPressureSensorPa: atmospherePressureObservation,
-      oxygenPartialPressureSensorPa:
-        compartmentState?.zones.find(
-          (zone) => zone.zoneId === "A-01",
-        )?.observed.oxygenPartialPressurePa ?? null,
-      pressureZoneAlerts: atmosphereZoneAlerts,
-      airHandlerControllers:
-        compartmentState?.airHandlers.controllers ?? [],
-      waterProcessorControllers:
-        waterRecoveryState?.controllers ?? [],
-      waterRecoverySensors: waterRecoveryState?.observed
-        ? {
-            availability: "available",
-            sampledAtSimulationSeconds:
-              waterRecoveryState.observed.sampledAtMicroseconds /
-              1_000_000,
-            sampleAgeSeconds: Math.max(
-              0,
-              simulationSeconds -
-                waterRecoveryState.observed.sampledAtMicroseconds /
-                  1_000_000,
-            ),
-            potableKgByRing:
-              waterRecoveryState.observed.potableKgByRing,
-            wastewaterKgByRing:
-              waterRecoveryState.observed.wastewaterKgByRing,
-            processorThroughputKgPerDay:
-              waterRecoveryState.observed
-                .processorThroughputKgPerDay,
-          }
-        : {
-            availability: "sensor-unavailable",
-          },
-      maintenanceDiagnostics: maintenanceState
-        ? {
-            assets: maintenanceState.observedAssets.map(
-              ({
-                assetId,
-                label,
-                condition,
-                sampleAgeSeconds,
-              }) => ({
-                assetId,
-                label,
-                condition,
-                sampleAgeSeconds,
-              }),
-            ),
-            activeTasks: maintenanceState.activeTasks.map(
-              (task) => ({
-                taskId: task.id,
-                assetId: task.assetId,
-                status: task.status,
-                blockedReason: task.blockedReason,
-                progressFraction:
-                  task.completedWorkSeconds /
-                  task.requiredWorkSeconds,
-                assignedCrewId: task.assignedCrewId,
-                assignedRobotId: task.assignedRobotId,
-              }),
-            ),
-            inventory: maintenanceState.inventory,
-            robots: maintenanceState.robots,
-          }
-        : { availability: "diagnostic-unavailable" },
-      ringAtmosphereSensors: observedRingAtmosphere,
-      navigationPositionSensorM:
-        navigationState.observed.positionM,
-      navigationVelocitySensorMPerS:
-        navigationState.observed.velocityMPerS,
-      navigationAttitudeSensor:
-        navigationState.observed
-          .orientationBodyToInertial,
-      navigationAngularVelocitySensorRadPerS:
-        navigationState.observed
-          .angularVelocityBodyRadPerS,
-      propellantMassSensorKg:
-        navigationState.observed.propellantMassKg,
-      rotationRingSensors: rotationState.observed.rings.map(
-        ({
-          id,
-          relativeRpm,
-          artificialGravityG,
-          vibrationMmPerS,
-        }) => ({
-          ringId: id,
-          relativeRpm,
-          artificialGravityG,
-          vibrationMmPerS,
-        }),
-      ),
-      rotationSensorDiagnostics: rotationState.sensors.map(
-        ({
-          ringId,
-          quantity,
-          value,
-          quality,
-          sampleAgeSeconds,
-        }) => ({
-          ringId,
-          quantity,
-          value,
-          quality,
-          sampleAgeSeconds,
-        }),
-      ),
-    };
+    emitDecisionTheater({
+      type: "reading_observation",
+      cycleToken: captainDecisionToken,
+    });
+
     const authorizedObservationForAgent = (agentId: string) => {
+      const {
+        source,
+        sensorView,
+        delayedAuthorizedRecords,
+        controllerCommandState,
+        operationsLedger,
+      } = authorizedObservation;
       switch (agentId) {
         case "navigation":
           return {
-            source: authorizedObservation.source,
-            powerControllerAlarm:
-              authorizedObservation.powerControllerAlarm,
-            jumpControllerRecord:
-              authorizedObservation.jumpControllerRecord,
-            rotationRingSensors:
-              authorizedObservation.rotationRingSensors,
-            rotationSensorDiagnostics:
-              authorizedObservation.rotationSensorDiagnostics,
-            positionSensorM:
-              authorizedObservation.navigationPositionSensorM,
-            velocitySensorMPerS:
-              authorizedObservation.navigationVelocitySensorMPerS,
-            attitudeSensor:
-              authorizedObservation.navigationAttitudeSensor,
-            angularVelocitySensorRadPerS:
-              authorizedObservation
-                .navigationAngularVelocitySensorRadPerS,
-            propellantMassSensorKg:
-              authorizedObservation.propellantMassSensorKg,
+            source,
+            sensorView: {
+              powerControllerAlarm: sensorView.powerControllerAlarm,
+              rotationRingSensors: sensorView.rotationRingSensors,
+              rotationSensorDiagnostics:
+                sensorView.rotationSensorDiagnostics,
+              positionSensorM: sensorView.navigationPositionSensorM,
+              velocitySensorMPerS:
+                sensorView.navigationVelocitySensorMPerS,
+              attitudeSensor: sensorView.navigationAttitudeSensor,
+              angularVelocitySensorRadPerS:
+                sensorView.navigationAngularVelocitySensorRadPerS,
+              propellantMassSensorKg:
+                sensorView.propellantMassSensorKg,
+              hullThreat: sensorView.hullThreat,
+              jumpThermalProjection:
+                sensorView.jumpThermalProjection,
+            },
+            delayedAuthorizedRecords: {
+              jumpControllerRecord:
+                delayedAuthorizedRecords.jumpControllerRecord,
+            },
+            operationsLedger,
           };
         case "medical":
           return {
-            source: authorizedObservation.source,
-            habitatPressureSensorPa:
-              authorizedObservation.habitatPressureSensorPa,
-            oxygenPartialPressureSensorPa:
-              authorizedObservation.oxygenPartialPressureSensorPa,
-            pressureZoneAlerts:
-              authorizedObservation.pressureZoneAlerts,
-            crewManifestRecord:
-              authorizedObservation.crewManifestRecord,
+            source,
+            sensorView: {
+              habitatPressureSensorPa:
+                sensorView.habitatPressureSensorPa,
+              oxygenPartialPressureSensorPaByRing:
+                sensorView.oxygenPartialPressureSensorPaByRing,
+              oxygenPartialPressureSensorPaAverage:
+                sensorView.oxygenPartialPressureSensorPaAverage,
+              oxygenPartialPressureSensorPaA01Detail:
+                sensorView.oxygenPartialPressureSensorPaA01Detail,
+              pressureZoneAlerts: sensorView.pressureZoneAlerts,
+            },
+            delayedAuthorizedRecords: {
+              crewManifestRecord:
+                delayedAuthorizedRecords.crewManifestRecord,
+            },
+            operationsLedger,
           };
         case "life-support":
           return {
-            source: authorizedObservation.source,
-            habitatPressureSensorPa:
-              authorizedObservation.habitatPressureSensorPa,
-            oxygenPartialPressureSensorPa:
-              authorizedObservation.oxygenPartialPressureSensorPa,
-            pressureZoneAlerts:
-              authorizedObservation.pressureZoneAlerts,
-            airHandlerControllers:
-              authorizedObservation.airHandlerControllers,
-            waterProcessorControllers:
-              authorizedObservation.waterProcessorControllers,
-            waterRecoverySensors:
-              authorizedObservation.waterRecoverySensors,
-            ringAtmosphereSensors:
-              authorizedObservation.ringAtmosphereSensors,
-            powerControllerAlarm:
-              authorizedObservation.powerControllerAlarm,
+            source,
+            sensorView: {
+              habitatPressureSensorPa:
+                sensorView.habitatPressureSensorPa,
+              oxygenPartialPressureSensorPaByRing:
+                sensorView.oxygenPartialPressureSensorPaByRing,
+              oxygenPartialPressureSensorPaAverage:
+                sensorView.oxygenPartialPressureSensorPaAverage,
+              oxygenPartialPressureSensorPaA01Detail:
+                sensorView.oxygenPartialPressureSensorPaA01Detail,
+              pressureZoneAlerts: sensorView.pressureZoneAlerts,
+              hullThreat: sensorView.hullThreat,
+              waterRecoverySensors:
+                sensorView.waterRecoverySensors,
+              habitatThermalDeliverySpurs:
+                sensorView.habitatThermalDeliverySpurs,
+              undeliveredHabitatCoolingJ:
+                sensorView.undeliveredHabitatCoolingJ,
+              ringAtmosphereSensors:
+                sensorView.ringAtmosphereSensors,
+              powerControllerAlarm: sensorView.powerControllerAlarm,
+            },
+            controllerCommandState,
+            operationsLedger,
           };
         case "engineering":
           return {
-            source: authorizedObservation.source,
-            powerControllerAlarm:
-              authorizedObservation.powerControllerAlarm,
-            averageBusVoltageSensorV:
-              authorizedObservation.averageBusVoltageSensorV,
-            averageBusFrequencySensorHz:
-              authorizedObservation
-                .averageBusFrequencySensorHz,
-            servedPowerSensorKw:
-              authorizedObservation.servedPowerSensorKw,
-            reactorOutputSensorKw:
-              authorizedObservation.reactorOutputSensorKw,
-            batteryStateOfChargeSensorFraction:
-              authorizedObservation
-                .batteryStateOfChargeSensorFraction,
-            coolantSensorK:
-              authorizedObservation.coolantSensorK,
-            thermalBusSensorK:
-              authorizedObservation.thermalBusSensorK,
-            coolantMassFlowSensorKgPerSecond:
-              authorizedObservation.coolantMassFlowSensorKgPerSecond,
-            pressureZoneAlerts:
-              authorizedObservation.pressureZoneAlerts,
-            airHandlerControllers:
-              authorizedObservation.airHandlerControllers,
-            waterProcessorControllers:
-              authorizedObservation.waterProcessorControllers,
-            waterRecoverySensors:
-              authorizedObservation.waterRecoverySensors,
-            ringAtmosphereSensors:
-              authorizedObservation.ringAtmosphereSensors,
-            jumpControllerRecord:
-              authorizedObservation.jumpControllerRecord,
-            rotationRingSensors:
-              authorizedObservation.rotationRingSensors,
-            rotationSensorDiagnostics:
-              authorizedObservation.rotationSensorDiagnostics,
-            maintenanceDiagnostics:
-              authorizedObservation.maintenanceDiagnostics,
+            source,
+            sensorView: {
+              powerControllerAlarm: sensorView.powerControllerAlarm,
+              averageBusVoltageSensorV:
+                sensorView.averageBusVoltageSensorV,
+              averageBusFrequencySensorHz:
+                sensorView.averageBusFrequencySensorHz,
+              servedPowerSensorKw: sensorView.servedPowerSensorKw,
+              reactorOutputSensorKw:
+                sensorView.reactorOutputSensorKw,
+              batteryStateOfChargeSensorFraction:
+                sensorView.batteryStateOfChargeSensorFraction,
+              coolantSensorK: sensorView.coolantSensorK,
+              thermalBusSensorK: sensorView.thermalBusSensorK,
+              coolantMassFlowSensorKgPerSecond:
+                sensorView.coolantMassFlowSensorKgPerSecond,
+              pressureZoneAlerts: sensorView.pressureZoneAlerts,
+              hullThreat: sensorView.hullThreat,
+              jumpThermalProjection:
+                sensorView.jumpThermalProjection,
+              waterRecoverySensors:
+                sensorView.waterRecoverySensors,
+              habitatThermalDeliverySpurs:
+                sensorView.habitatThermalDeliverySpurs,
+              undeliveredHabitatCoolingJ:
+                sensorView.undeliveredHabitatCoolingJ,
+              ringAtmosphereSensors:
+                sensorView.ringAtmosphereSensors,
+              oxygenPartialPressureSensorPaByRing:
+                sensorView.oxygenPartialPressureSensorPaByRing,
+              oxygenPartialPressureSensorPaAverage:
+                sensorView.oxygenPartialPressureSensorPaAverage,
+              rotationRingSensors: sensorView.rotationRingSensors,
+              rotationSensorDiagnostics:
+                sensorView.rotationSensorDiagnostics,
+              maintenanceDiagnostics:
+                sensorView.maintenanceDiagnostics,
+            },
+            delayedAuthorizedRecords: {
+              jumpControllerRecord:
+                delayedAuthorizedRecords.jumpControllerRecord,
+            },
+            controllerCommandState,
+            operationsLedger,
           };
         default:
           return {
-            source: authorizedObservation.source,
-            powerControllerAlarm:
-              authorizedObservation.powerControllerAlarm,
+            source,
+            sensorView: {
+              powerControllerAlarm: sensorView.powerControllerAlarm,
+            },
+            operationsLedger,
           };
       }
     };
-    const consultantIds = triggerKey.startsWith("jump-ready")
-      ? ["navigation", "engineering"]
-      : triggerKey.startsWith("maintenance-fault")
-        ? ["engineering"]
-      : triggerKey.startsWith("pressure-low")
-        ? ["life-support", "engineering"]
-        : triggerKey.startsWith("power-deficit") ||
-            triggerKey.startsWith("thermal-high")
-          ? ["engineering"]
-          : triggerKey === "mission-start"
-            ? ["navigation", "medical"]
-            : [];
+    // Consultation is a captain decision, never a trigger-based system default.
+    // Departments are invoked only after consult_departments names them.
+    const consultantIds: string[] = [];
+    const missionProvenance = {
+      origin: originSystem.name,
+      destination: destinationSystem.name,
+      plannedRouteDistanceLightYears: missionDistanceLightYears,
+      estimatedRouteLegs,
+      distanceProvenance:
+        "日心三维欧氏航距（lib/astro/star-catalog）；方位为赤道近似，非精密星历",
+      routeProgressModel:
+        "光年级航程只由成功的 execute_jump 推进；首次跃迁不要求先有常规推进或已完成跃迁记录",
+      elapsedSimSeconds: simulationSeconds,
+    };
     void (async () => {
-      try {
-        const departmentResults = await Promise.all(
-          consultantIds.map(async (agentId) => {
-            assertCurrentCaptainDecision();
-            const configuredDiscussionDepth =
-              llmStatus.agents.find(
-                (agent) => agent.id === agentId,
-              )?.routine.discussionDepth ?? 1;
-            const discussionDepth = Number.isSafeInteger(
-              configuredDiscussionDepth,
-            )
-              ? Math.max(
-                  1,
-                  Math.min(2, configuredDiscussionDepth),
-                )
-              : 1;
-            const response = await fetch("/api/llm/invoke", {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              signal: decisionController.signal,
-              body: JSON.stringify({
-                intent: "captain-consultation",
-                consultantId: agentId,
-                invocation: {
-                  messages: [
-                    {
-                      role: "user",
-                      content: {
-                      request: DEPARTMENT_CONSULTATION_REQUEST,
-                      event: triggerReason,
-                      highestDirective: directive,
-                      mission: {
-                        origin: originSystem.name,
-                        destination: destinationSystem.name,
-                        plannedRouteDistanceLightYears:
-                          missionDistanceLightYears,
-                        estimatedRouteLegs,
-                        distanceProvenance:
-                          "玩家选定的轻量场景航距；当前版本不是真实星历解算",
-                        elapsedSimSeconds: simulationSeconds,
-                      },
-                      authorizedObservation:
-                        authorizedObservationForAgent(agentId),
-                      },
-                    },
-                  ],
-                  metadata: {
-                    triggerKey,
-                    consultationFor: "captain",
-                  },
-                  discussion: {
-                    depth: discussionDepth,
-                    round: 1,
-                  },
-                },
-              }),
-            });
-            assertCurrentCaptainDecision();
-            const payload =
-              (await response.json()) as LlmInvokeRoutePayload;
-            assertCurrentCaptainDecision();
-            if (!response.ok || !payload.result) {
-              throw new Error(
-                payload.error?.message ??
-                  `${agentId} 部门端点返回 HTTP ${response.status}`,
-              );
-            }
-            return payload.result;
+      let consultationDegradedAnnounced = false;
+      const announceConsultationDegradation = (
+        failures: Array<{ departmentId: string; message: string }>,
+        sourcePrefix: string,
+      ) => {
+        if (failures.length === 0) {
+          return;
+        }
+        for (const failure of failures) {
+          const agent = llmStatus.agents.find(
+            (candidate) => candidate.id === failure.departmentId,
+          );
+          const softEventId = ++eventId.current;
+          setEvents((current) =>
+            prependTimelineEvent(current, {
+              id: softEventId,
+              at: formatDuration(simulationSeconds),
+              source: `${sourcePrefix} / ${agent?.role ?? failure.departmentId}`,
+              text: `咨询失败（已跳过）：${failure.message}`,
+              tone: "watch",
+            }),
+          );
+        }
+        if (consultationDegradedAnnounced) {
+          return;
+        }
+        consultationDegradedAnnounced = true;
+        const degradeEventId = ++eventId.current;
+        setEvents((current) =>
+          prependTimelineEvent(current, {
+            id: degradeEventId,
+            at: formatDuration(simulationSeconds),
+            source: "舰长 AI / 乾枢",
+            text: CAPTAIN_CONSULTATION_PARTIAL_FAILURE_MESSAGE,
+            tone: "watch",
           }),
         );
+        setCaptainDecisionLog((previous) =>
+          previous.map((entry) =>
+            entry.id === decisionLogId
+              ? {
+                  ...entry,
+                  consultationNote:
+                    CAPTAIN_CONSULTATION_PARTIAL_FAILURE_MESSAGE,
+                }
+              : entry,
+          ),
+        );
+      };
+      try {
+        const initialAttempts = await Promise.all(
+          consultantIds.map(
+            async (
+              agentId,
+            ): Promise<
+              CaptainConsultationAttempt<
+                NonNullable<LlmInvokeRoutePayload["result"]>
+              >
+            > => {
+              try {
+                assertCurrentCaptainDecision();
+                const configuredDiscussionDepth =
+                  llmStatus.agents.find(
+                    (agent) => agent.id === agentId,
+                  )?.routine.discussionDepth ?? 1;
+                const discussionDepth = Number.isSafeInteger(
+                  configuredDiscussionDepth,
+                )
+                  ? Math.max(
+                      1,
+                      Math.min(2, configuredDiscussionDepth),
+                    )
+                  : 1;
+                const departmentStandingPrompt =
+                  renderDepartmentStandingPromptBlock(
+                    departmentStandingSnapshotRef.current,
+                    agentId,
+                    { nowSimulationSeconds: simulationSeconds },
+                  );
+                const response = await fetch("/api/llm/invoke", {
+                  method: "POST",
+                  headers: { "content-type": "application/json" },
+                  signal: decisionController.signal,
+                  body: JSON.stringify({
+                    intent: "captain-consultation",
+                    consultantId: agentId,
+                    invocation: {
+                      messages: [
+                        {
+                          role: "user",
+                          content: {
+                          request: DEPARTMENT_CONSULTATION_REQUEST,
+                          event: triggerReason,
+                          highestDirective: directive,
+                          mission: missionProvenance,
+                          authorizedObservation:
+                            authorizedObservationForAgent(agentId),
+                          ...(departmentStandingPrompt
+                            ? { standing: departmentStandingPrompt }
+                            : {}),
+                          },
+                        },
+                      ],
+                      tools: [FILE_DISSENT_TOOL],
+                      metadata: {
+                        triggerKey,
+                        consultationFor: "captain",
+                      },
+                      discussion: {
+                        depth: discussionDepth,
+                        round: 1,
+                      },
+                    },
+                  }),
+                });
+                assertCurrentCaptainDecision();
+                const payload =
+                  (await response.json()) as LlmInvokeRoutePayload;
+                assertCurrentCaptainDecision();
+                if (!response.ok || !payload.result) {
+                  throw new Error(
+                    payload.error?.message ??
+                      `${agentId} 部门端点返回 HTTP ${response.status}`,
+                  );
+                }
+                const agentRole =
+                  llmStatus.agents.find(
+                    (candidate) => candidate.id === agentId,
+                  )?.role ?? agentId;
+                emitDecisionTheater({
+                  type: "department_spoke",
+                  cycleToken: captainDecisionToken,
+                  round: 0,
+                  departmentId: agentId,
+                  role: agentRole,
+                  text: compactLlmTimelineText(
+                    payload.result.text,
+                    320,
+                    "部门返回了空白建议。",
+                  ),
+                  wallClockAtMs: Date.now(),
+                });
+                return { ok: true, value: payload.result };
+              } catch (error) {
+                if (
+                  !isCurrentCaptainDecision() ||
+                  isCaptainConsultationHardFailure(error, [
+                    supersededDecisionError,
+                    staleObservationError,
+                  ])
+                ) {
+                  throw error;
+                }
+                return { ok: false, departmentId: agentId, error };
+              }
+            },
+          ),
+        );
+        const initialPartition =
+          partitionCaptainConsultationAttempts(initialAttempts);
+        announceConsultationDegradation(
+          initialPartition.failures,
+          "部门 AI",
+        );
+        let departmentResults = initialPartition.results;
         assertCurrentCaptainDecision();
+        const applyDepartmentStandingFromResult = (
+          result: NonNullable<LlmInvokeRoutePayload["result"]>,
+          sourceLabel: string,
+        ) => {
+          updateDepartmentStandingSnapshot(
+            recordDepartmentConsultation(
+              departmentStandingSnapshotRef.current,
+              {
+                departmentId: result.agentId,
+                simulationSeconds,
+                stance: result.text,
+              },
+            ),
+          );
+          for (const toolCall of result.toolCalls.filter(
+            (candidate) => candidate.name === FILE_DISSENT_TOOL_NAME,
+          )) {
+            const parsed = parseFileDissentToolCall(toolCall.arguments);
+            if (!parsed.ok) {
+              const dissentEventId = ++eventId.current;
+              setEvents((current) =>
+                prependTimelineEvent(current, {
+                  id: dissentEventId,
+                  at: formatDuration(simulationSeconds),
+                  source: `${sourceLabel} / 异议`,
+                  text: `file_dissent 未写入：${parsed.reason}`,
+                  tone: "watch",
+                }),
+              );
+              continue;
+            }
+            const recorded = recordDepartmentDissent(
+              departmentStandingSnapshotRef.current,
+              {
+                departmentId: result.agentId,
+                simulationSeconds,
+                severity: parsed.draft.severity,
+                summary: parsed.draft.summary,
+                captainDecisionOrdinal:
+                  captainJournalSnapshotRef.current.nextOrdinal,
+              },
+            );
+            updateDepartmentStandingSnapshot(recorded.snapshot);
+          }
+        };
         for (const result of departmentResults) {
           assertCurrentCaptainDecision();
+          applyDepartmentStandingFromResult(result, "部门 AI");
           const agent = llmStatus.agents.find(
             (candidate) => candidate.id === result.agentId,
           );
@@ -2350,6 +2834,29 @@ export function MissionControl() {
         );
 
         assertCurrentCaptainDecision();
+        let captainDecisionTools: Array<{
+          name: string;
+          description?: string;
+          inputSchema?: unknown;
+        }> = [];
+        const captainJournalPrompt = renderCaptainJournalPromptBlock(
+          captainJournalSnapshotRef.current,
+          { nowSimulationSeconds: simulationSeconds },
+        );
+        const captainWatchPrompt = renderCaptainWatchPromptBlock(
+          captainWatchSnapshotRef.current,
+          { nowSimulationSeconds: simulationSeconds },
+        );
+        const captainDissentLedgerPrompt =
+          renderCaptainDissentLedgerPromptBlock(
+            departmentStandingSnapshotRef.current,
+            { nowSimulationSeconds: simulationSeconds },
+          );
+        emitDecisionTheater({
+          type: "captain_deliberating",
+          cycleToken: captainDecisionToken,
+          pass: "initial",
+        });
         const response = await fetch("/api/llm/invoke", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -2363,16 +2870,7 @@ export function MissionControl() {
                   content: {
                   event: triggerReason,
                   highestDirective: directive,
-                  mission: {
-                    origin: originSystem.name,
-                    destination: destinationSystem.name,
-                    plannedRouteDistanceLightYears:
-                      missionDistanceLightYears,
-                    estimatedRouteLegs,
-                    distanceProvenance:
-                      "玩家选定的轻量场景航距；当前版本不是真实星历解算",
-                    elapsedSimSeconds: simulationSeconds,
-                  },
+                  mission: missionProvenance,
                   authorizedObservation,
                   recentDeviceReceipts: {
                     source: "上一轮舰长工具调用的设备执行层回执",
@@ -2386,360 +2884,25 @@ export function MissionControl() {
                         "固定部门模型报告；未经设备执行确认",
                     }),
                   ),
+                  ...(captainJournalPrompt
+                    ? { memory: captainJournalPrompt }
+                    : {}),
+                  ...(captainWatchPrompt
+                    ? { watch: captainWatchPrompt }
+                    : {}),
+                  ...(captainDissentLedgerPrompt
+                    ? { dissentLedger: captainDissentLedgerPrompt }
+                    : {}),
                   instruction: CAPTAIN_DECISION_INSTRUCTION,
                   },
                 },
               ],
-              tools: [
-              {
-                name: "execute_jump",
-                description:
-                  "向真实跃迁控制器提交一次0.1至5光年的启动命令。仅当储能与联锁就绪时设备才会执行，并会消耗储能、产生废热。",
-                inputSchema: {
-                  type: "object",
-                  additionalProperties: false,
-                  required: ["distanceLightYears"],
-                  properties: {
-                    distanceLightYears: {
-                      type: "number",
-                      minimum: 0.1,
-                      maximum: 5,
-                    },
-                  },
-                },
-              },
-              {
-                name: "set_awake_target",
-                description:
-                  "向医疗与休眠系统提交清醒人数目标；系统只会按舱位、人员和小时级医疗流程分批排程，不会直接改写人员状态。",
-                inputSchema: {
-                  type: "object",
-                  additionalProperties: false,
-                  required: ["targetAwake"],
-                  properties: {
-                    targetAwake: {
-                      type: "integer",
-                      minimum: 0,
-                      maximum: 2120,
-                    },
-                  },
-                },
-              },
-              {
-                name: "isolate_pressure_zone",
-                description:
-                  "关闭指定压力区相连的真实舱门、风管和隔离阀，限制泄漏传播。该命令不会修复破口，且错误隔离会切断通行与通风。",
-                inputSchema: {
-                  type: "object",
-                  additionalProperties: false,
-                  required: ["zoneId"],
-                  properties: {
-                    zoneId: {
-                      type: "string",
-                      pattern: "^[AB]-(0[1-9]|1[0-9]|2[0-4])$",
-                    },
-                  },
-                },
-              },
-              {
-                name: "set_air_handler_control",
-                description:
-                  "设置A或B空气处理机的循环风量指令并投入或旁路CO₂吸附器。真实风量由本机状态和对应生命保障馈线供电决定；吸附器只会从所属环路的实体舱室气体中移除高于控制设定点的CO₂。",
-                inputSchema: {
-                  type: "object",
-                  additionalProperties: false,
-                  required: [
-                    "airHandlerId",
-                    "commandedFlowFraction",
-                    "scrubberEnabled",
-                  ],
-                  properties: {
-                    airHandlerId: {
-                      type: "string",
-                      enum: AIR_HANDLER_IDS,
-                    },
-                    commandedFlowFraction: {
-                      type: "number",
-                      minimum: 0,
-                      maximum: 1,
-                    },
-                    scrubberEnabled: { type: "boolean" },
-                  },
-                },
-              },
-              {
-                name: "set_water_processor_control",
-                description:
-                  "设置A或B水回收机的处理量指令。废水先经过主处理，再经过浓盐水二级回收；真实处理量受本机状态、对应生命保障馈线、废水库存和净水罐余量约束，不能直接生成净水。",
-                inputSchema: {
-                  type: "object",
-                  additionalProperties: false,
-                  required: [
-                    "processorId",
-                    "commandedThroughputFraction",
-                  ],
-                  properties: {
-                    processorId: {
-                      type: "string",
-                      enum: WATER_PROCESSOR_IDS,
-                    },
-                    commandedThroughputFraction: {
-                      type: "number",
-                      minimum: 0,
-                      maximum: 1,
-                    },
-                  },
-                },
-              },
-              {
-                name: "schedule_maintenance",
-                description:
-                  "为诊断为非 nominal 的固定设备创建真实维修任务。系统会锁定并消耗对应备件，分配同环维修机器人和一名清醒合格乘员；只有工业馈线有服务且乘员保持清醒时才累计工时，完成后物理设备才会被检修，不能直接改写设备状态。",
-                inputSchema: {
-                  type: "object",
-                  additionalProperties: false,
-                  required: ["assetId"],
-                  properties: {
-                    assetId: {
-                      type: "string",
-                      enum: MAINTENANCE_ASSET_IDS,
-                    },
-                  },
-                },
-              },
-              {
-                name: "schedule_thruster_pulse",
-                description:
-                  "向固定安装的真实推进器排程一次脉冲。系统会依据推力方向、安装力臂、比冲、推进剂余量和故障状态积分六自由度运动；不可直接指定速度、位置或姿态。",
-                inputSchema: {
-                  type: "object",
-                  additionalProperties: false,
-                  required: [
-                    "thrusterId",
-                    "throttleFraction",
-                    "durationSeconds",
-                    "startDelaySeconds",
-                  ],
-                  properties: {
-                    thrusterId: {
-                      type: "string",
-                      enum: THRUSTER_IDS,
-                    },
-                    throttleFraction: {
-                      type: "number",
-                      minimum: 0,
-                      maximum: 1,
-                    },
-                    durationSeconds: {
-                      type: "number",
-                      exclusiveMinimum: 0,
-                      maximum: 600,
-                    },
-                    startDelaySeconds: {
-                      type: "number",
-                      minimum: 0,
-                      maximum: 3_600,
-                    },
-                  },
-                },
-              },
-              {
-                name: "schedule_thruster_maneuver",
-                description:
-                  "以单一原子事务排程1至18个推进器脉冲，适合用成对或成组推进器实现近似纯平移、俯仰、偏航或滚转。所有脉冲仍由固定安装位置、方向、推力、比冲和推进剂积分；任一项无效则整组拒绝。",
-                inputSchema: {
-                  type: "object",
-                  additionalProperties: false,
-                  required: ["pulses"],
-                  properties: {
-                    pulses: {
-                      type: "array",
-                      minItems: 1,
-                      maxItems: 18,
-                      items: {
-                        type: "object",
-                        additionalProperties: false,
-                        required: [
-                          "thrusterId",
-                          "throttleFraction",
-                          "durationSeconds",
-                          "startDelaySeconds",
-                        ],
-                        properties: {
-                          thrusterId: {
-                            type: "string",
-                            enum: THRUSTER_IDS,
-                          },
-                          throttleFraction: {
-                            type: "number",
-                            minimum: 0,
-                            maximum: 1,
-                          },
-                          durationSeconds: {
-                            type: "number",
-                            exclusiveMinimum: 0,
-                            maximum: 600,
-                          },
-                          startDelaySeconds: {
-                            type: "number",
-                            minimum: 0,
-                            maximum: 3_600,
-                          },
-                        },
-                      },
-                    },
-                  },
-                },
-              },
-              {
-                name: "set_reactor_target",
-                description:
-                  "设置一个聚变发电模块的目标电功率（每台额定225000 kW）。在线模块将按爬坡率接近目标；保护跳闸或未在线的模块不会凭空输出。",
-                inputSchema: {
-                  type: "object",
-                  additionalProperties: false,
-                  required: ["reactorId", "targetOutputKw"],
-                  properties: {
-                    reactorId: {
-                      type: "string",
-                      enum: FUSION_REACTOR_IDS,
-                    },
-                    targetOutputKw: {
-                      type: "number",
-                      minimum: 0,
-                      maximum: 225_000,
-                    },
-                  },
-                },
-              },
-              {
-                name: "set_reactor_mode",
-                description:
-                  "把一个未跳闸的聚变模块切换为在线、热备或离线。切为在线不会瞬间产生额定功率，输出仍按目标值和爬坡率变化；跳闸模块不能用此命令复位。",
-                inputSchema: {
-                  type: "object",
-                  additionalProperties: false,
-                  required: ["reactorId", "mode"],
-                  properties: {
-                    reactorId: {
-                      type: "string",
-                      enum: FUSION_REACTOR_IDS,
-                    },
-                    mode: {
-                      type: "string",
-                      enum: REACTOR_MODES,
-                    },
-                  },
-                },
-              },
-              {
-                name: "set_cooling_pump_speed",
-                description:
-                  "设置A或B冷却回路泵的转速指令。真实流量和耗电仍受泵体状况与回路物理约束；停泵会因热量持续积累而产生后果。",
-                inputSchema: {
-                  type: "object",
-                  additionalProperties: false,
-                  required: [
-                    "pumpId",
-                    "commandedSpeedFraction",
-                  ],
-                  properties: {
-                    pumpId: {
-                      type: "string",
-                      enum: COOLANT_PUMP_IDS,
-                    },
-                    commandedSpeedFraction: {
-                      type: "number",
-                      minimum: 0,
-                      maximum: 1,
-                    },
-                  },
-                },
-              },
-              {
-                name: "set_electrical_load_enabled",
-                description:
-                  "投入或退出一个真实配电负载。退出生命保障、休眠、冷却或居住负载会产生物理后果；投入也不保证母线有足够功率。",
-                inputSchema: {
-                  type: "object",
-                  additionalProperties: false,
-                  required: ["loadId", "enabled"],
-                  properties: {
-                    loadId: {
-                      type: "string",
-                      enum: ELECTRICAL_LOAD_IDS,
-                    },
-                    enabled: { type: "boolean" },
-                  },
-                },
-              },
-              {
-                name: "set_electrical_breaker",
-                description:
-                  "向实体断路器发出合闸或分闸指令，以改变双母线、发电、储能和负载拓扑。保护跳闸锁存不会被普通合闸指令绕过。",
-                inputSchema: {
-                  type: "object",
-                  additionalProperties: false,
-                  required: ["breakerId", "commandedClosed"],
-                  properties: {
-                    breakerId: {
-                      type: "string",
-                      enum: ELECTRICAL_BREAKER_IDS,
-                    },
-                    commandedClosed: { type: "boolean" },
-                  },
-                },
-              },
-              {
-                name: "set_battery_mode",
-                description:
-                  "设置A或B储能组为自动、仅充电、仅放电或待机。实际功率受荷电量、额定功率、故障与母线平衡限制。",
-                inputSchema: {
-                  type: "object",
-                  additionalProperties: false,
-                  required: ["batteryId", "mode"],
-                  properties: {
-                    batteryId: {
-                      type: "string",
-                      enum: ELECTRICAL_BATTERY_IDS,
-                    },
-                    mode: {
-                      type: "string",
-                      enum: BATTERY_CONTROL_MODES,
-                    },
-                  },
-                },
-              },
-              {
-                name: "set_habitat_ring_control",
-                description:
-                  "操作A或B反向旋转居住环的真实驱动器。可设闭环转速保持、自由滑行或机械制动；实际转速、人工重力、舰体反作用、耗电和废热均由电机、轴承与角动量守恒计算，不可直接指定重力。",
-                inputSchema: {
-                  type: "object",
-                  additionalProperties: false,
-                  required: [
-                    "ringId",
-                    "controlMode",
-                    "targetRelativeRpm",
-                  ],
-                  properties: {
-                    ringId: {
-                      type: "string",
-                      enum: ROTATION_RING_IDS,
-                    },
-                    controlMode: {
-                      type: "string",
-                      enum: RING_CONTROL_MODES,
-                    },
-                    targetRelativeRpm: {
-                      type: "number",
-                      minimum: -12,
-                      maximum: 12,
-                    },
-                  },
-                },
-              },
-              ],
+              tools: (captainDecisionTools = [
+                ...CAPTAIN_WORLD_TOOLS,
+                CAPTAIN_CONSULTATION_TOOL,
+                RECORD_CAPTAIN_LOG_TOOL,
+                SET_WATCH_CONDITION_TOOL,
+              ]),
               metadata: {
                 triggerKey,
               },
@@ -2748,7 +2911,7 @@ export function MissionControl() {
           }),
         });
         assertCurrentCaptainDecision();
-        const payload =
+        let payload =
           (await response.json()) as LlmInvokeRoutePayload;
         assertCurrentCaptainDecision();
         if (!response.ok || !payload.result) {
@@ -2756,6 +2919,302 @@ export function MissionControl() {
             payload.error?.message ??
               `舰长端点返回 HTTP ${response.status}`,
           );
+        }
+        const consultationCalls = payload.result.toolCalls.filter(
+          (toolCall) => toolCall.name === "consult_departments",
+        );
+        if (consultationCalls.length > 0) {
+          const preliminaryCaptainText = payload.result.text;
+          const consultationCall = consultationCalls[0];
+          const { departmentIds, question, rounds } =
+            parseCaptainConsultationRequest(consultationCall.arguments);
+          emitDecisionTheater({
+            type: "consultation_planned",
+            cycleToken: captainDecisionToken,
+            departmentIds,
+            question,
+            rounds,
+          });
+          let meetingTranscript = departmentResults.map((result) => ({
+            round: 0,
+            agentId: result.agentId,
+            text: result.text,
+          }));
+          let previousRoundPeerPositions: Array<{
+            departmentId: string;
+            text: string;
+          }> = [];
+          for (let round = 1; round <= rounds; round += 1) {
+            const roundAttempts = await Promise.all(
+              departmentIds.map(
+                async (
+                  agentId,
+                ): Promise<
+                  CaptainConsultationAttempt<
+                    NonNullable<LlmInvokeRoutePayload["result"]>
+                  >
+                > => {
+                  try {
+                    assertCurrentCaptainDecision();
+                    const departmentStandingPrompt =
+                      renderDepartmentStandingPromptBlock(
+                        departmentStandingSnapshotRef.current,
+                        agentId,
+                        { nowSimulationSeconds: simulationSeconds },
+                      );
+                    const peerPositionsPrompt =
+                      round >= 2
+                        ? renderPeerPositionsPromptBlock(
+                            previousRoundPeerPositions,
+                            { excludeDepartmentId: agentId },
+                          )
+                        : null;
+                    const meetingResponse = await fetch("/api/llm/invoke", {
+                      method: "POST",
+                      headers: { "content-type": "application/json" },
+                      signal: decisionController.signal,
+                      body: JSON.stringify({
+                        intent: "captain-consultation",
+                        consultantId: agentId,
+                        invocation: {
+                          messages: [
+                            {
+                              role: "user",
+                              content: {
+                                request: `${DEPARTMENT_CONSULTATION_REQUEST} 舰长主动召集部门会议（第${round}轮）。请回答问题，并针对既有发言指出同意、分歧、风险与可执行建议。`,
+                                question,
+                                round,
+                                highestDirective: directive,
+                                authorizedObservation:
+                                  authorizedObservationForAgent(agentId),
+                                priorMeetingTranscript: meetingTranscript,
+                                ...(departmentStandingPrompt
+                                  ? { standing: departmentStandingPrompt }
+                                  : {}),
+                                ...(peerPositionsPrompt
+                                  ? { peerPositions: peerPositionsPrompt }
+                                  : {}),
+                              },
+                            },
+                          ],
+                          tools: [FILE_DISSENT_TOOL],
+                          metadata: {
+                            triggerKey,
+                            consultationFor: "captain",
+                            meetingRound: round,
+                          },
+                          discussion: { depth: 2, round },
+                        },
+                      }),
+                    });
+                    assertCurrentCaptainDecision();
+                    const meetingPayload =
+                      (await meetingResponse.json()) as LlmInvokeRoutePayload;
+                    if (!meetingResponse.ok || !meetingPayload.result) {
+                      throw new Error(
+                        meetingPayload.error?.message ??
+                          `${agentId} 部门会议返回 HTTP ${meetingResponse.status}`,
+                      );
+                    }
+                    const agentRole =
+                      llmStatus.agents.find(
+                        (candidate) => candidate.id === agentId,
+                      )?.role ?? agentId;
+                    emitDecisionTheater({
+                      type: "department_spoke",
+                      cycleToken: captainDecisionToken,
+                      round,
+                      departmentId: agentId,
+                      role: agentRole,
+                      text: compactLlmTimelineText(
+                        meetingPayload.result.text,
+                        320,
+                        "部门返回了空白建议。",
+                      ),
+                      wallClockAtMs: Date.now(),
+                    });
+                    return { ok: true, value: meetingPayload.result };
+                  } catch (error) {
+                    if (
+                      !isCurrentCaptainDecision() ||
+                      isCaptainConsultationHardFailure(error, [
+                        supersededDecisionError,
+                        staleObservationError,
+                      ])
+                    ) {
+                      throw error;
+                    }
+                    return { ok: false, departmentId: agentId, error };
+                  }
+                },
+              ),
+            );
+            const roundPartition =
+              partitionCaptainConsultationAttempts(roundAttempts);
+            announceConsultationDegradation(
+              roundPartition.failures,
+              `部门会议 R${round}`,
+            );
+            const roundResults = roundPartition.results;
+            departmentResults = [...departmentResults, ...roundResults];
+            for (const result of roundResults) {
+              applyDepartmentStandingFromResult(
+                result,
+                `部门会议 R${round}`,
+              );
+              const agent = llmStatus.agents.find(
+                (candidate) => candidate.id === result.agentId,
+              );
+              const timelineEventId = ++eventId.current;
+              setEvents((current) =>
+                prependTimelineEvent(current, {
+                  id: timelineEventId,
+                  at: formatDuration(simulationSeconds),
+                  source: `部门会议 R${round} / ${agent?.role ?? result.agentId ?? "未知岗位"}`,
+                  text: compactLlmTimelineText(
+                    result.text,
+                    260,
+                    "部门在本轮会议中未返回有效发言。",
+                  ),
+                  tone: "nominal",
+                }),
+              );
+            }
+            previousRoundPeerPositions = roundResults.map((result) => ({
+              departmentId: result.agentId,
+              text: result.text,
+            }));
+            meetingTranscript = [
+              ...meetingTranscript,
+              ...roundResults.map((result) => ({
+                round,
+                agentId: result.agentId,
+                text: result.text,
+              })),
+            ];
+          }
+          setCaptainDecisionLog((previous) =>
+            previous.map((entry) =>
+              entry.id === decisionLogId
+                ? {
+                    ...entry,
+                    consultations: departmentResults.map((result) => ({
+                      agentId: result.agentId,
+                      role:
+                        llmStatus.agents.find(
+                          (agent) => agent.id === result.agentId,
+                        )?.role ?? result.agentId,
+                      text: compactLlmTimelineText(
+                        result.text,
+                        320,
+                        "部门在会议中未返回有效发言。",
+                      ),
+                    })),
+                  }
+                : entry,
+            ),
+          );
+          assertCurrentCaptainDecision();
+          const finalCaptainJournalPrompt =
+            renderCaptainJournalPromptBlock(
+              captainJournalSnapshotRef.current,
+              { nowSimulationSeconds: simulationSeconds },
+            );
+          const finalCaptainWatchPrompt = renderCaptainWatchPromptBlock(
+            captainWatchSnapshotRef.current,
+            { nowSimulationSeconds: simulationSeconds },
+          );
+          const finalCaptainDissentLedgerPrompt =
+            renderCaptainDissentLedgerPromptBlock(
+              departmentStandingSnapshotRef.current,
+              { nowSimulationSeconds: simulationSeconds },
+            );
+          emitDecisionTheater({
+            type: "captain_deliberating",
+            cycleToken: captainDecisionToken,
+            pass: "final",
+          });
+          const finalResponse = await fetch("/api/llm/invoke", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            signal: decisionController.signal,
+            body: JSON.stringify({
+              intent: "captain-decision",
+              invocation: {
+                messages: [
+                  {
+                    role: "user",
+                    content: {
+                      event: triggerReason,
+                      highestDirective: directive,
+                      mission: missionProvenance,
+                      authorizedObservation,
+                      preliminaryCaptainResponse: preliminaryCaptainText,
+                      departmentMeetingReports: departmentResults.map(
+                        (result) => ({
+                          agentId: result.agentId,
+                          text: result.text,
+                        }),
+                      ),
+                      ...(finalCaptainJournalPrompt
+                        ? { memory: finalCaptainJournalPrompt }
+                        : {}),
+                      ...(finalCaptainWatchPrompt
+                        ? { watch: finalCaptainWatchPrompt }
+                        : {}),
+                      ...(finalCaptainDissentLedgerPrompt
+                        ? {
+                            dissentLedger:
+                              finalCaptainDissentLedgerPrompt,
+                          }
+                        : {}),
+                      instruction:
+                        `${CAPTAIN_DECISION_INSTRUCTION}\n部门会议已经完成。现在必须作最终决策；不要再次调用 consult_departments。`,
+                    },
+                  },
+                ],
+                tools: captainDecisionTools.filter(
+                  (tool) => tool.name !== "consult_departments",
+                ),
+                metadata: { triggerKey, afterDepartmentMeeting: true },
+                discussion: { depth: 2, round: 1 },
+              },
+            }),
+          });
+          assertCurrentCaptainDecision();
+          const finalPayload =
+            (await finalResponse.json()) as LlmInvokeRoutePayload;
+          if (!finalResponse.ok || !finalPayload.result) {
+            throw new Error(
+              finalPayload.error?.message ??
+                `舰长会议后决策返回 HTTP ${finalResponse.status}`,
+            );
+          }
+          payload = finalPayload;
+          setCaptainDecisionLog((previous) =>
+            previous.map((entry) =>
+              entry.id === decisionLogId
+                ? {
+                    ...entry,
+                    consultations: departmentResults.map((result) => ({
+                      agentId: result.agentId,
+                      role:
+                        llmStatus.agents.find(
+                          (agent) => agent.id === result.agentId,
+                        )?.role ?? result.agentId,
+                      text: compactLlmTimelineText(
+                        result.text,
+                        320,
+                        "部门返回了空白建议。",
+                      ),
+                    })),
+                  }
+                : entry,
+            ),
+          );
+        }
+        if (!payload.result) {
+          throw new Error("舰长会议后没有可执行决策");
         }
         assertCurrentCaptainDecision();
         const timelineEventId = ++eventId.current;
@@ -2799,23 +3258,89 @@ export function MissionControl() {
           ),
         );
 
+        const preliminaryReceipts: CaptainDeviceReceiptSummary[] = [];
+        const captainLogCall = payload.result.toolCalls.find(
+          (toolCall) => toolCall.name === RECORD_CAPTAIN_LOG_TOOL_NAME,
+        );
+        if (!captainLogCall) {
+          appendCaptainCommandEvent(
+            simulationSeconds,
+            "舰长本轮未调用 record_captain_log，航行志未更新。",
+            "watch",
+          );
+        } else {
+          const parsedLog = parseCaptainLogToolCall(
+            captainLogCall.arguments,
+          );
+          if (!parsedLog.ok) {
+            appendCaptainCommandEvent(
+              simulationSeconds,
+              `record_captain_log 未写入：${parsedLog.reason}`,
+              "watch",
+            );
+          } else {
+            const appended = appendCaptainJournalEntry(
+              captainJournalSnapshotRef.current,
+              parsedLog.draft,
+              { simulationSeconds, triggerKey },
+            );
+            updateCaptainJournalSnapshot(appended.snapshot);
+          }
+        }
+        for (const watchCall of payload.result.toolCalls.filter(
+          (toolCall) => toolCall.name === SET_WATCH_CONDITION_TOOL_NAME,
+        )) {
+          const parsedWatch = parseSetWatchConditionToolCall(
+            watchCall.arguments,
+          );
+          if (!parsedWatch.ok) {
+            appendCaptainCommandEvent(
+              simulationSeconds,
+              `set_watch_condition 未生效：${parsedWatch.reason}`,
+              "watch",
+            );
+            continue;
+          }
+          const applied = applyCaptainWatchCondition(
+            captainWatchSnapshotRef.current,
+            parsedWatch.draft,
+            { simulationSeconds },
+          );
+          updateCaptainWatchSnapshot(applied.snapshot);
+        }
         const worldToolCalls = payload.result.toolCalls.filter(
           (toolCall) =>
-            toolCall.name !== "configure_self_routine",
+            toolCall.name !== "configure_self_routine" &&
+            toolCall.name !== "consult_departments" &&
+            toolCall.name !== RECORD_CAPTAIN_LOG_TOOL_NAME &&
+            toolCall.name !== SET_WATCH_CONDITION_TOOL_NAME,
         );
         const boundedWorldToolCalls = worldToolCalls.slice(
           0,
           MAX_CAPTAIN_WORLD_COMMANDS_PER_CYCLE,
         );
-        const preliminaryReceipts: CaptainDeviceReceiptSummary[] = [];
         const queuedWorldCommands: QueuedCaptainWorldCommand[] = [];
-        boundedWorldToolCalls.forEach((toolCall, index) => {
+        boundedWorldToolCalls.forEach((toolCall) => {
           assertCurrentCaptainDecision();
-          const ordinal = index + 1;
+          const ordinal =
+            payload.result!.toolCalls.findIndex(
+              (candidate) => candidate.id === toolCall.id,
+            ) + 1;
           const parsed = parseCaptainWorldToolCall(
             toolCall,
             engineState.journey.status,
             trueRemainingDistance,
+            {
+              jumpBlocked:
+                hullThreatObservation.jumpBlocked ||
+                hullThreatObservation.activeBreachCount > 0,
+              jumpBlockReason:
+                hullThreatObservation.jumpBlockReason,
+              jumpThermalClears:
+                jumpThermalProjection?.clearsInterlock ?? null,
+              jumpThermalBlockReason:
+                jumpThermalProjection?.blockReason ?? null,
+            },
           );
           if (!parsed.ok) {
             const receipt: CaptainDeviceReceiptSummary = {
@@ -2909,6 +3434,12 @@ export function MissionControl() {
             const routineAgent = llmStatus.agents.find(
               (agent) => agent.id === routineAgentId,
             );
+            if (routineAgentId === "captain") {
+              captainRoutineSeconds.current = Math.max(
+                30,
+                routine.systemInfoIntervalSimSeconds,
+              );
+            }
             assertCurrentCaptainDecision();
             const timelineEventId = ++eventId.current;
             setEvents((current) =>
@@ -2916,7 +3447,10 @@ export function MissionControl() {
                 id: timelineEventId,
                 at: formatDuration(simulationSeconds),
                 source: `${routineAgent?.role ?? routineAgentId} / 自主管理`,
-                text: `系统信息周期调整为 ${formatCadence(routine.systemInfoIntervalSimSeconds)}，固定讨论上限为深度 ${routine.discussionDepth}、${routine.discussionRounds} 轮。`,
+                text:
+                  routineAgentId === "captain"
+                    ? `舰长决策周期调整为 ${formatCadence(routine.systemInfoIntervalSimSeconds)}；下一个截止点将从本轮完成时重新计算。固定讨论上限为深度 ${routine.discussionDepth}、${routine.discussionRounds} 轮。`
+                    : `按需咨询参数已更新；该部门不会独立冻结或推进世界。咨询间隔偏好为 ${formatCadence(routine.systemInfoIntervalSimSeconds)}，讨论上限为深度 ${routine.discussionDepth}、${routine.discussionRounds} 轮。`,
                 tone: "nominal",
               }),
             );
@@ -2943,6 +3477,16 @@ export function MissionControl() {
         }
 
         assertCurrentCaptainDecision();
+        emitDecisionTheater({
+          type: "captain_decided",
+          cycleToken: captainDecisionToken,
+          text: compactLlmTimelineText(
+            payload.result.text ?? "",
+            512,
+            "舰长返回了设备命令。",
+          ),
+          worldCommandTotal: queuedWorldCommands.length,
+        });
         if (queuedWorldCommands.length > 0) {
           const queue: CaptainWorldCommandQueue = {
             cycleToken: captainDecisionToken,
@@ -2953,7 +3497,8 @@ export function MissionControl() {
             nextIndex: 0,
             activeRequestId: null,
             receipts: preliminaryReceipts,
-            resumeAfterCompletion: resumeAfterCall,
+            advancesRoutineSchedule,
+            resumeAfterCompletion: false,
           };
           activeCaptainWorldCommandQueue.current = queue;
           dispatchNextCaptainWorldCommand();
@@ -2961,24 +3506,34 @@ export function MissionControl() {
           latestCaptainDeviceReceipts.current = [
             ...preliminaryReceipts,
           ].sort((left, right) => left.ordinal - right.ordinal);
+          setCaptainDecisionLog((prev) =>
+            prev.map((entry) =>
+              entry.id === decisionLogId
+                ? {
+                    ...entry,
+                    status: "done" as const,
+                    receipts: [
+                      ...preliminaryReceipts,
+                    ].sort((left, right) => left.ordinal - right.ordinal),
+                  }
+                : entry,
+            ),
+          );
+          if (advancesRoutineSchedule) {
+            updateNextCaptainRoutineDeadline(
+              computeNextCaptainRoutineDeadline(
+                latestSimulationSeconds.current,
+                captainRoutineSeconds.current,
+              ),
+            );
+          }
+          emitDecisionTheater({
+            type: "world_resumed",
+            cycleToken: captainDecisionToken,
+          });
+          releaseCaptainDecisionPause();
         }
         assertCurrentCaptainDecision();
-        setLlmCallPhase("idle");
-        const queueStillActive =
-          activeCaptainWorldCommandQueue.current?.cycleToken ===
-          captainDecisionToken;
-        const queueRejected =
-          latestCaptainDeviceReceipts.current.some(
-            (receipt) => receipt.status === "rejected",
-          );
-        if (
-          resumeAfterCall &&
-          !queueStillActive &&
-          !queueRejected &&
-          !latestMissionEnded.current
-        ) {
-          setPaused(false);
-        }
       } catch (error) {
         if (!isCurrentCaptainDecision()) {
           return;
@@ -2986,19 +3541,51 @@ export function MissionControl() {
         captainInvocationKeys.current.delete(triggerKey);
         const message =
           error instanceof Error ? error.message : String(error);
+        const scheduleNote = advancesRoutineSchedule
+          ? "本轮决策作废，日程未推进，解冻后将重试。"
+          : null;
         const timelineEventId = ++eventId.current;
         setEvents((current) =>
           prependTimelineEvent(current, {
             id: timelineEventId,
             at: formatDuration(simulationSeconds),
             source: "LLM 网关",
-            text: `舰长关键决策未完成：${message}`,
+            text: scheduleNote
+              ? `舰长关键决策未完成：${message}。${scheduleNote}`
+              : `舰长关键决策未完成：${message}`,
             tone: "critical",
           }),
         );
-        showToast(`舰长调用暂停：${message}`);
-        setLlmCallPhase("error");
-        setPaused(true);
+        setCaptainDecisionLog((prev) =>
+          prev.map((entry) =>
+            entry.id === decisionLogId
+              ? {
+                  ...entry,
+                  status: "error" as const,
+                  errorMessage: message,
+                }
+              : entry,
+          ),
+        );
+        emitDecisionTheater({
+          type: "fail",
+          cycleToken: captainDecisionToken,
+          message,
+        });
+        showToast(
+          scheduleNote
+            ? `舰长调用失败：${message}。${scheduleNote}`
+            : `舰长调用失败：${message}`,
+        );
+        if (advancesRoutineSchedule) {
+          // Do not advance past the failed cycle — restore the due deadline
+          // (or current sim time) so the routine retries after unpause.
+          updateNextCaptainRoutineDeadline(
+            routineDeadlineBeforeClear ??
+              latestSimulationSeconds.current,
+          );
+        }
+        releaseCaptainDecisionPause("error");
       } finally {
         if (
           activeCaptainDecision.current?.token ===
@@ -3015,23 +3602,34 @@ export function MissionControl() {
     destinationSystem.name,
     directive,
     dispatchNextCaptainWorldCommand,
+    emitDecisionTheater,
     engineState,
     estimatedRouteLegs,
     compartmentState,
+    hullConsequenceState,
     coolingState,
     electricalState,
     navigationState,
+    operationsState,
+    survival,
+    zoneMood,
     rotationState,
     waterRecoveryState,
     maintenanceState,
     llmStatus,
     missionEnded,
     missionDistanceLightYears,
+    releaseCaptainDecisionPause,
     missionStarted,
     originSystem.name,
     paused,
+    sendTimeControl,
     showToast,
     simulationSeconds,
+    updateCaptainJournalSnapshot,
+    updateCaptainWatchSnapshot,
+    updateDepartmentStandingSnapshot,
+    updateNextCaptainRoutineDeadline,
   ]);
 
   useEffect(() => {
@@ -3088,9 +3686,6 @@ export function MissionControl() {
       simulationSeconds,
       wallEpochMs,
     );
-    const resumeAfterCall = !paused;
-    setPaused(true);
-    setLlmCallPhase("waiting");
 
     const isSamePassengerCycle = () => {
       const active = activeKeyPassengerCall.current;
@@ -3112,6 +3707,83 @@ export function MissionControl() {
 
     void (async () => {
       try {
+        updatePassengerSocietySnapshot(
+          pruneStaleRumors(passengerSocietySnapshotRef.current, {
+            simulationSeconds,
+          }),
+        );
+        const passengerZoneId = candidate.observation.assignedZoneId;
+        const circleTelemetry = passengerCircles.find(
+          (circle) => circle.passengerId === candidate.passengerId,
+        );
+        const circle = (circleTelemetry?.members ?? [])
+          .slice(0, PASSENGER_CIRCLE_LIMIT)
+          .map((member) => ({
+            passengerId: member.passengerId,
+            displayName: member.displayName,
+            relation: member.relation,
+            lifeState: member.lifeState,
+            conditionBand: passengerConditionBand(member.physicalHealth),
+            sameZone: member.zoneId === passengerZoneId,
+          }));
+        const zoneMoodTelemetry = zoneMood.find(
+          (zone) => zone.zoneId === passengerZoneId,
+        );
+        const zoneLabel =
+          compartmentState?.zones.find(
+            (zone) => zone.zoneId === passengerZoneId,
+          )?.labelZh ?? passengerZoneId;
+        const zoneMoodObservation = zoneMoodTelemetry
+          ? {
+              zoneId: zoneMoodTelemetry.zoneId,
+              zoneLabel,
+              awakeCount: zoneMoodTelemetry.awakeCount,
+              stressBand: passengerStressBand(zoneMoodTelemetry.meanStress),
+              trustBand: passengerTrustBand(zoneMoodTelemetry.meanTrust),
+            }
+          : null;
+        const overheardRumors = selectOverheardRumors(
+          passengerSocietySnapshotRef.current,
+          {
+            listenerPassengerId: candidate.passengerId,
+            zoneId: passengerZoneId,
+            simulationSeconds,
+          },
+        );
+        if (overheardRumors.length > 0) {
+          updatePassengerSocietySnapshot(
+            markRumorsHeard(
+              passengerSocietySnapshotRef.current,
+              overheardRumors.map((rumor) => rumor.rumorId),
+            ),
+          );
+        }
+        const recentPublicCommunications = (
+          operationsState?.communications ?? []
+        )
+          .filter(
+            (entry) =>
+              entry.deliveredAtMicroseconds !== null &&
+              (entry.kind === "announcement" ||
+                entry.kind === "policy-explanation" ||
+                entry.kind === "grievance-response"),
+          )
+          .slice(-3)
+          .map((entry) => ({
+            simulationSeconds:
+              (entry.deliveredAtMicroseconds ??
+                entry.createdAtMicroseconds) / 1_000_000,
+            text: `${entry.subject}：${entry.message}`,
+          }));
+        const societyPrompt = renderPassengerSocietyPromptBlock(
+          {
+            circle,
+            zoneMood: zoneMoodObservation,
+            overheardRumors,
+            recentPublicCommunications,
+          },
+          { nowSimulationSeconds: simulationSeconds },
+        );
         const response = await fetch("/api/llm/invoke", {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -3130,6 +3802,11 @@ export function MissionControl() {
               elapsedSimulationSeconds: simulationSeconds,
             },
             previousOwnNote: candidate.previousOwnNote,
+            ...(societyPrompt ? { society: societyPrompt } : {}),
+            tools: [
+              FILE_PASSENGER_GRIEVANCE_TOOL,
+              SHARE_PASSENGER_RUMOR_TOOL,
+            ],
           }),
         });
         if (!isSamePassengerCycle() || controller.signal.aborted) {
@@ -3157,12 +3834,115 @@ export function MissionControl() {
         );
         keyPassengerScheduler.current.markSucceeded(
           candidate.passengerId,
-          simulationSeconds,
+          latestSimulationSeconds.current,
           privateText,
         );
         setKeyPassengerPrivateNotes(
           keyPassengerScheduler.current.listPrivateNotes(),
         );
+
+        for (const toolCall of payload.result.toolCalls) {
+          if (!isSamePassengerCycle() || controller.signal.aborted) {
+            return;
+          }
+          if (toolCall.name === SHARE_RUMOR_TOOL_NAME) {
+            const parsed = parseShareRumorToolCall(toolCall.arguments);
+            if (!parsed.ok) {
+              const rumorEventId = ++eventId.current;
+              setEvents((current) =>
+                prependTimelineEvent(current, {
+                  id: rumorEventId,
+                  at: formatDuration(latestSimulationSeconds.current),
+                  source: `关键乘客 / ${candidate.observation.displayName}`,
+                  text: `share_passenger_rumor 未写入：${parsed.reason}`,
+                  tone: "watch",
+                }),
+              );
+              continue;
+            }
+            try {
+              const recorded = recordPassengerRumor(
+                passengerSocietySnapshotRef.current,
+                {
+                  originPassengerId: candidate.passengerId,
+                  originDisplayName: candidate.observation.displayName,
+                  zoneId: passengerZoneId,
+                  text: parsed.draft.text,
+                  simulationSeconds: latestSimulationSeconds.current,
+                },
+              );
+              updatePassengerSocietySnapshot(recorded.snapshot);
+            } catch (error) {
+              const rumorEventId = ++eventId.current;
+              setEvents((current) =>
+                prependTimelineEvent(current, {
+                  id: rumorEventId,
+                  at: formatDuration(latestSimulationSeconds.current),
+                  source: `关键乘客 / ${candidate.observation.displayName}`,
+                  text: `share_passenger_rumor 未写入：${
+                    error instanceof Error ? error.message : String(error)
+                  }`,
+                  tone: "watch",
+                }),
+              );
+            }
+            continue;
+          }
+          if (toolCall.name === FILE_GRIEVANCE_TOOL_NAME) {
+            const parsed = parseFileGrievanceToolCall(toolCall.arguments);
+            if (!parsed.ok) {
+              const grievanceEventId = ++eventId.current;
+              setEvents((current) =>
+                prependTimelineEvent(current, {
+                  id: grievanceEventId,
+                  at: formatDuration(latestSimulationSeconds.current),
+                  source: `关键乘客 / ${candidate.observation.displayName}`,
+                  text: `file_passenger_grievance 未提交：${parsed.reason}`,
+                  tone: "watch",
+                }),
+              );
+              continue;
+            }
+            const worker = workerRef.current;
+            const expectedStateRevision = latestStateRevision.current;
+            if (!worker || expectedStateRevision === null) {
+              const grievanceEventId = ++eventId.current;
+              setEvents((current) =>
+                prependTimelineEvent(current, {
+                  id: grievanceEventId,
+                  at: formatDuration(latestSimulationSeconds.current),
+                  source: `关键乘客 / ${candidate.observation.displayName}`,
+                  text: "file_passenger_grievance 未提交：世界状态尚不可用。",
+                  tone: "watch",
+                }),
+              );
+              continue;
+            }
+            // 关键乘客申诉不申请暂停令牌、不阻塞轮询；世界继续推进。
+            requestSequence.current += 1;
+            const grievanceRequestId = `passenger-grievance-${requestSequence.current}`;
+            const commandId = grievanceRequestId;
+            const command: SimulationWorkerCommand = {
+              type: "ship-command",
+              requestId: grievanceRequestId,
+              commandId,
+              idempotencyKey: commandId,
+              issuedAtMicroseconds: Math.round(
+                latestSimulationSeconds.current * 1_000_000,
+              ),
+              expectedRevision: commandRevision.current,
+              expectedStateRevision,
+              command: {
+                kind: "file-passenger-grievance",
+                actorAgentId: candidate.passengerId,
+                passengerId: candidate.passengerId,
+                category: parsed.draft.category,
+                summary: parsed.draft.summary,
+              },
+            };
+            worker.postMessage(command);
+          }
+        }
 
         for (const ticket of payload.result.routineTickets ?? []) {
           if (!isSamePassengerCycle() || controller.signal.aborted) {
@@ -3209,7 +3989,7 @@ export function MissionControl() {
         }
         keyPassengerScheduler.current.markFailed(
           candidate.passengerId,
-          simulationSeconds,
+          latestSimulationSeconds.current,
         );
         const message =
           error instanceof Error ? error.message : String(error);
@@ -3225,28 +4005,24 @@ export function MissionControl() {
         ) {
           activeKeyPassengerCall.current = null;
           keyPassengerCallInFlight.current = false;
-          setLlmCallPhase("idle");
-          if (
-            resumeAfterCall &&
-            !latestMissionEnded.current &&
-            !captainCallInFlight.current &&
-            activeCaptainWorldCommandQueue.current === null
-          ) {
-            setPaused(false);
-          }
         }
       }
     })();
   }, [
+    compartmentState,
     destinationSystem.name,
     engineState,
     llmStatus,
     missionEnded,
     missionStarted,
+    operationsState,
     originSystem.name,
+    passengerCircles,
     paused,
     showToast,
     simulationSeconds,
+    updatePassengerSocietySnapshot,
+    zoneMood,
   ]);
 
   const addEvent = (text: string, tone: SystemTone, source = "外部干预") => {
@@ -3305,11 +4081,19 @@ export function MissionControl() {
     setKeyPassengerPrivateNotes([]);
     latestCaptainDeviceReceipts.current = [];
     latestMissionEnded.current = false;
+    updateNextCaptainRoutineDeadline(null);
+    updateCaptainJournalSnapshot(createCaptainJournalSnapshot());
+    updateCaptainWatchSnapshot(createCaptainWatchSnapshot());
+    updateDepartmentStandingSnapshot(createDepartmentStandingSnapshot());
+    updatePassengerSocietySnapshot(createPassengerSocietySnapshot());
     worldEpoch.current += 1;
     latestStateRevision.current = null;
     commandRevision.current = 0;
     knownMaintenanceCompletionIds.current.clear();
     knownProceduralEventIds.current.clear();
+    knownAlertIds.current.clear();
+    setActiveAlerts([]);
+    setCaptainDecisionLog([]);
     workerRef.current.postMessage(command);
     captainInvocationKeys.current.clear();
     finalReportRequested.current = false;
@@ -3339,31 +4123,33 @@ export function MissionControl() {
     cancelKeyPassengerCall();
     setLlmCallPhase(llmStatus?.ready ? "idle" : "error");
     const saveMetadata: Omit<LocalSave, "runtimeSnapshot"> = {
-      version: 19,
+      version: 22,
       activeView,
       missionStarted,
       paused,
       timeScale,
       simulationSeconds,
+      nextCaptainRoutineAtSimulationSeconds:
+        nextCaptainRoutineAtSimulationSeconds.current,
       origin,
       destination,
       directive,
       events,
       keyPassengerLlm:
         keyPassengerScheduler.current.snapshot(),
+      captainJournal: captainJournalSnapshot,
+      captainWatch: captainWatchSnapshot,
+      departmentStanding: departmentStandingSnapshot,
+      passengerSociety: passengerSocietySnapshot,
     };
     if (!missionStarted) {
       const save: LocalSave = {
         ...saveMetadata,
         runtimeSnapshot: null,
       };
-      window.localStorage.setItem(
-        "farhorizon-save",
-        JSON.stringify(save),
-      );
-      setLastSaveTime(new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }));
-      setHasLocalSave(true);
-      showToast("任务配置已保存到本机。");
+      void persistManualSave(save, {
+        successToast: "任务配置已保存到本机。",
+      });
       return;
     }
     if (!engineState || !workerRef.current) {
@@ -3385,7 +4171,7 @@ export function MissionControl() {
     sendTimeControl({ acquirePauseTokens: ["save-barrier"] });
     requestSaveSnapshotWhenQuiescent();
     showToast(
-      stepInFlight.current ||
+      activePhysicsRequestId.current !== null ||
         activeCaptainWorldCommandQueue.current !== null
         ? "正在等待在途物理事务完成后建立存档屏障……"
         : "正在封装物理、乘员、随机数与事件队列……",
@@ -3400,12 +4186,14 @@ export function MissionControl() {
       showToast("请等待当前一致性存档完成后再加载。", { persistent: true });
       return;
     }
-    const raw = window.localStorage.getItem("farhorizon-save");
-    if (!raw) {
-      showToast("尚未找到本地存档。", { persistent: true });
-      return;
-    }
-    setLoadConfirmOpen(true);
+    void (async () => {
+      const save = await getManualSave();
+      if (!save) {
+        showToast("尚未找到本地存档。", { persistent: true });
+        return;
+      }
+      setLoadConfirmOpen(true);
+    })();
   };
 
   const confirmLoadGame = () => {
@@ -3417,154 +4205,231 @@ export function MissionControl() {
       showToast("请等待当前一致性存档完成后再加载。", { persistent: true });
       return;
     }
-    const raw = window.localStorage.getItem("farhorizon-save");
-    if (!raw) {
-      showToast("尚未找到本地存档。", { persistent: true });
-      return;
-    }
-    try {
-      const save = JSON.parse(raw) as Omit<LocalSave, "version"> & {
-        version: number;
-      };
-      const knownViews = new Set<ViewId>(
-        NAV_ITEMS.map((item) => item.id),
-      );
-      const knownSystems = new Set<string>(
-        STAR_SYSTEMS.map((system) => system.id),
-      );
-      if (save.version === 18) {
-        showToast(
-          "此存档为 v18，当前物理 runtime 已升级至 snapshot v16，请重新签发任务后再存档。",
-          { persistent: true },
-        );
+    void (async () => {
+      const loaded = await getManualSave();
+      if (!loaded) {
+        showToast("尚未找到本地存档。", { persistent: true });
         return;
       }
-      if (
-        save.version !== 19 ||
-        !knownViews.has(save.activeView) ||
-        !knownSystems.has(save.origin) ||
-        !knownSystems.has(save.destination) ||
-        typeof save.directive !== "string" ||
-        !Array.isArray(save.events) ||
-        !Number.isFinite(save.simulationSeconds) ||
-        !Number.isFinite(save.timeScale) ||
-        (save.missionStarted && !save.runtimeSnapshot)
-      ) {
-        throw new Error("unsupported save schema");
-      }
-      const compatibleSave: LocalSave = { ...save, version: 19 };
-      const restoredKeyPassengerScheduler =
-        KeyPassengerPollScheduler.restore(compatibleSave.keyPassengerLlm);
-      cancelCaptainDecision();
-      cancelKeyPassengerCall();
-      latestCaptainDeviceReceipts.current = [];
-      latestMissionEnded.current = false;
-      setLlmCallPhase(llmStatus?.ready ? "idle" : "error");
-      worldEpoch.current += 1;
-      latestStateRevision.current = null;
-      if (compatibleSave.runtimeSnapshot) {
-        if (!workerRef.current) {
-          throw new Error("simulation worker is unavailable");
+      try {
+        const save = loaded as Omit<
+          LocalSave,
+          | "version"
+          | "nextCaptainRoutineAtSimulationSeconds"
+          | "captainJournal"
+          | "captainWatch"
+          | "departmentStanding"
+          | "passengerSociety"
+        > & {
+          version: number;
+          nextCaptainRoutineAtSimulationSeconds?: number | null;
+          captainJournal?: unknown;
+          captainWatch?: unknown;
+          departmentStanding?: unknown;
+          passengerSociety?: unknown;
+          agentObservation?: unknown;
+        };
+        const knownViews = new Set<ViewId>(
+          NAV_ITEMS.map((item) => item.id),
+        );
+        const knownSystems = new Set<string>(
+          STAR_SYSTEMS.map((system) => system.id),
+        );
+        if (save.version === 18) {
+          showToast(
+            "此外层存档格式为 LocalSave v18，已不再支持；请重新签发任务后再存档。",
+            { persistent: true },
+          );
+          return;
         }
-        const requestId = nextRequestId("restore");
-        pendingLoad.current = {
-          requestId,
-          save: compatibleSave,
-          keyPassengerScheduler:
-            restoredKeyPassengerScheduler,
+        if (
+          ![19, 20, 21, 22].includes(save.version) ||
+          !knownViews.has(save.activeView) ||
+          !knownSystems.has(save.origin) ||
+          !knownSystems.has(save.destination) ||
+          typeof save.directive !== "string" ||
+          !Array.isArray(save.events) ||
+          !Number.isFinite(save.simulationSeconds) ||
+          !Number.isFinite(save.timeScale) ||
+          ("nextCaptainRoutineAtSimulationSeconds" in save &&
+            save.nextCaptainRoutineAtSimulationSeconds !== null &&
+            !Number.isFinite(
+              save.nextCaptainRoutineAtSimulationSeconds,
+            )) ||
+          (save.missionStarted && !save.runtimeSnapshot)
+        ) {
+          throw new Error("unsupported save schema");
+        }
+        const compatibleSave: LocalSave = {
+          ...save,
+          version: 22,
+          nextCaptainRoutineAtSimulationSeconds:
+            "nextCaptainRoutineAtSimulationSeconds" in save &&
+            typeof save.nextCaptainRoutineAtSimulationSeconds === "number"
+              ? Math.max(
+                  save.simulationSeconds,
+                  save.nextCaptainRoutineAtSimulationSeconds,
+                )
+              : save.missionStarted
+                ? save.simulationSeconds + captainRoutineSeconds.current
+                : null,
+          captainJournal:
+            validateCaptainJournalSnapshot(save.captainJournal) ??
+            createCaptainJournalSnapshot(),
+          captainWatch:
+            validateCaptainWatchSnapshot(save.captainWatch) ??
+            createCaptainWatchSnapshot(),
+          departmentStanding:
+            validateDepartmentStandingSnapshot(save.departmentStanding) ??
+            createDepartmentStandingSnapshot(),
+          passengerSociety:
+            validatePassengerSocietySnapshot(save.passengerSociety) ??
+            createPassengerSocietySnapshot(),
         };
-        setPaused(true);
-        sendTimeControl({ acquirePauseTokens: ["save-barrier"] });
-        const command: SimulationWorkerCommand = {
-          type: "restore",
-          requestId,
-          snapshot: compatibleSave.runtimeSnapshot,
-        };
-        workerRef.current.postMessage(command);
-        showToast("正在原子校验并恢复完整运行时……");
-        return;
-      } else {
-        knownMaintenanceCompletionIds.current.clear();
-        knownProceduralEventIds.current.clear();
-        keyPassengerScheduler.current =
-          restoredKeyPassengerScheduler;
-        setKeyPassengerPrivateNotes(
-          restoredKeyPassengerScheduler.listPrivateNotes(),
+        const restoredKeyPassengerScheduler =
+          KeyPassengerPollScheduler.restore(compatibleSave.keyPassengerLlm);
+        cancelCaptainDecision();
+        cancelKeyPassengerCall();
+        latestCaptainDeviceReceipts.current = [];
+        latestMissionEnded.current = false;
+        updateNextCaptainRoutineDeadline(
+          compatibleSave.nextCaptainRoutineAtSimulationSeconds,
         );
-        setActiveView(compatibleSave.activeView);
-        setMissionStarted(false);
-        setPaused(true);
-        setTimeScale(compatibleSave.timeScale);
-        setSimulationSeconds(compatibleSave.simulationSeconds);
-        setOrigin(compatibleSave.origin);
-        setDestination(compatibleSave.destination);
-        setDirective(compatibleSave.directive);
-        setEvents(compatibleSave.events);
-        eventId.current = compatibleSave.events.reduce(
-          (maximum, entry) => Math.max(maximum, entry.id),
-          0,
-        );
-        setEngineState(null);
-        setCompartmentState(null);
-        setCoolingState(null);
-        setElectricalState(null);
-        setNavigationState(null);
-        setRotationState(null);
-        setWaterRecoveryState(null);
-        setMaintenanceState(null);
-        setCommandBusState(null);
-        setTimeControl(null);
-        setSurvival(null);
-        setPassengerHighlights([]);
-        commandRevision.current = 0;
-        setMissionEnded(false);
-        setFinalReport(null);
-        setEndReportDismissed(false);
-        finalReportRequested.current = false;
+        updateCaptainJournalSnapshot(compatibleSave.captainJournal);
+        updateCaptainWatchSnapshot(compatibleSave.captainWatch);
+        updateDepartmentStandingSnapshot(compatibleSave.departmentStanding);
+        updatePassengerSocietySnapshot(compatibleSave.passengerSociety);
+        setLlmCallPhase(llmStatus?.ready ? "idle" : "error");
+        worldEpoch.current += 1;
+        latestStateRevision.current = null;
+        if (compatibleSave.runtimeSnapshot) {
+          if (!workerRef.current) {
+            throw new Error("simulation worker is unavailable");
+          }
+          const requestId = nextRequestId("restore");
+          pendingLoad.current = {
+            requestId,
+            save: compatibleSave,
+            keyPassengerScheduler:
+              restoredKeyPassengerScheduler,
+          };
+          setPaused(true);
+          sendTimeControl({ acquirePauseTokens: ["save-barrier"] });
+          const command: SimulationWorkerCommand = {
+            type: "restore",
+            requestId,
+            snapshot: compatibleSave.runtimeSnapshot,
+          };
+          workerRef.current.postMessage(command);
+          showToast("正在原子校验并恢复完整运行时……");
+          return;
+        } else {
+          knownMaintenanceCompletionIds.current.clear();
+          knownProceduralEventIds.current.clear();
+          knownAlertIds.current.clear();
+          setActiveAlerts([]);
+          setCaptainDecisionLog([]);
+          keyPassengerScheduler.current =
+            restoredKeyPassengerScheduler;
+          setKeyPassengerPrivateNotes(
+            restoredKeyPassengerScheduler.listPrivateNotes(),
+          );
+          setActiveView(compatibleSave.activeView);
+          setMissionStarted(false);
+          setPaused(true);
+          setTimeScale(compatibleSave.timeScale);
+          setSimulationSeconds(compatibleSave.simulationSeconds);
+          setOrigin(compatibleSave.origin);
+          setDestination(compatibleSave.destination);
+          setDirective(compatibleSave.directive);
+          setEvents(compatibleSave.events);
+          eventId.current = compatibleSave.events.reduce(
+            (maximum, entry) => Math.max(maximum, entry.id),
+            0,
+          );
+          setEngineState(null);
+          setCompartmentState(null);
+          setCoolingState(null);
+          setElectricalState(null);
+          setNavigationState(null);
+          setRotationState(null);
+          setWaterRecoveryState(null);
+          setMaintenanceState(null);
+          setHullConsequenceState(null);
+          setCommandBusState(null);
+          setTimeControl(null);
+          setSurvival(null);
+          setZoneMood([]);
+          setPassengerCircles([]);
+          setPassengerHighlights([]);
+          commandRevision.current = 0;
+          setMissionEnded(false);
+          setFinalReport(null);
+          setEndReportDismissed(false);
+          finalReportRequested.current = false;
+        }
+        showToast("任务配置已恢复。");
+      } catch {
+        showToast("存档格式损坏或版本过旧，未执行加载。", { persistent: true });
       }
-      showToast("任务配置已恢复。");
-    } catch {
-      showToast("存档格式损坏或版本过旧，未执行加载。", { persistent: true });
-    }
+    })();
   };
 
   const submitIntervention = (
     request: ExternalInterventionRequest,
     eventText: string,
-  ) => {
+  ): Promise<void> => {
     if (
       pendingSaveBarrier.current !== null ||
       pendingSaves.current.size > 0
     ) {
-      showToast("一致性存档期间暂不接受新的外部干预。", {
+      const message = "一致性存档期间暂不接受新的外部干预。";
+      showToast(message, {
         persistent: true,
       });
-      return;
+      return Promise.reject(new Error(message));
     }
     if (!missionStarted || !workerRef.current) {
-      showToast("必须先签发最高指令，才能干预正在运行的世界。");
-      return;
+      const message = "必须先签发最高指令，才能干预正在运行的世界。";
+      showToast(message);
+      return Promise.reject(new Error(message));
     }
+    const requestId = nextRequestId("god");
     const command: SimulationWorkerCommand = {
       type: "intervene",
-      requestId: nextRequestId("god"),
+      requestId,
       request,
     };
     cancelCaptainDecision();
     cancelKeyPassengerCall();
     keyPassengerScheduler.current.resetObservations();
     latestCaptainDeviceReceipts.current = [];
+    updateCaptainJournalSnapshot(createCaptainJournalSnapshot());
+    updateCaptainWatchSnapshot(createCaptainWatchSnapshot());
+    updateDepartmentStandingSnapshot(createDepartmentStandingSnapshot());
+    updatePassengerSocietySnapshot(createPassengerSocietySnapshot());
     setLlmCallPhase("idle");
     worldEpoch.current += 1;
+    const settled = new Promise<void>((resolve, reject) => {
+      pendingInterventions.current.set(requestId, { resolve, reject });
+    });
+    const godAssistSession = godAssistSessionRef.current;
+    if (godAssistSession?.active) {
+      godAssistSessionRef.current = {
+        ...godAssistSession,
+        pendingRequestId: requestId,
+      };
+    }
     workerRef.current.postMessage(command);
     showToast(`正在执行并校验：${eventText}`);
+    return settled;
   };
 
   const injectCausalEvent = (
     eventType: string,
     label: string,
     options?: { actor?: string },
-  ) => {
+  ): Promise<void> => {
     const common = {
       actor: options?.actor ?? "player:god-mode",
       metadata: {
@@ -3693,6 +4558,88 @@ export function MissionControl() {
           },
         };
         break;
+      case "water-spur-fault":
+      case "water-spur-fault-a-closed":
+        request = {
+          ...common,
+          reason: "A环配水支路卡死关闭，净水无法送达用户",
+          metadata: {
+            ...common.metadata,
+            eventType: "water-spur-fault",
+            targetSpurId: "water-spur-a",
+            spurCondition: "stuck-closed",
+          },
+          operations: [],
+          declaredBalance: {
+            massKg: 0,
+            energyJ: 0,
+            linearMomentumKgMPerSecond: [0, 0, 0],
+            angularMomentumKgM2PerSecond: [0, 0, 0],
+            note: "Distribution-spur condition fault; undelivered demand is ledgered without inventing phantom mass",
+          },
+        };
+        break;
+      case "water-spur-fault-b-degraded":
+        request = {
+          ...common,
+          reason: "B环配水支路进入半开降级工况",
+          metadata: {
+            ...common.metadata,
+            eventType: "water-spur-fault",
+            targetSpurId: "water-spur-b",
+            spurCondition: "degraded",
+          },
+          operations: [],
+          declaredBalance: {
+            massKg: 0,
+            energyJ: 0,
+            linearMomentumKgMPerSecond: [0, 0, 0],
+            angularMomentumKgM2PerSecond: [0, 0, 0],
+            note: "Distribution-spur condition fault; undelivered demand is ledgered without inventing phantom mass",
+          },
+        };
+        break;
+      case "cooling-spur-fault":
+      case "cooling-spur-fault-a-closed":
+        request = {
+          ...common,
+          reason: "A环居住热送达支路卡死关闭，舱热泵冷却无法送达该环区带",
+          metadata: {
+            ...common.metadata,
+            eventType: "cooling-spur-fault",
+            targetSpurId: "cooling-spur-a",
+            spurCondition: "stuck-closed",
+          },
+          operations: [],
+          declaredBalance: {
+            massKg: 0,
+            energyJ: 0,
+            linearMomentumKgMPerSecond: [0, 0, 0],
+            angularMomentumKgM2PerSecond: [0, 0, 0],
+            note: "Habitat-thermal-delivery spur condition fault; undelivered cooling demand is ledgered without inventing phantom heat",
+          },
+        };
+        break;
+      case "cooling-spur-fault-b-degraded":
+        request = {
+          ...common,
+          reason: "B环居住热送达支路进入半开降级工况",
+          metadata: {
+            ...common.metadata,
+            eventType: "cooling-spur-fault",
+            targetSpurId: "cooling-spur-b",
+            spurCondition: "degraded",
+          },
+          operations: [],
+          declaredBalance: {
+            massKg: 0,
+            energyJ: 0,
+            linearMomentumKgMPerSecond: [0, 0, 0],
+            angularMomentumKgM2PerSecond: [0, 0, 0],
+            note: "Habitat-thermal-delivery spur condition fault; undelivered cooling demand is ledgered without inventing phantom heat",
+          },
+        };
+        break;
       case "stellar-flare":
         request = {
           ...common,
@@ -3711,7 +4658,7 @@ export function MissionControl() {
             {
               operation: "add",
               path: "environment.stellarIrradianceWattsPerSquareMeter",
-              value: 8_500_000,
+              value: 160,
             },
           ],
           declaredBalance: {
@@ -3723,7 +4670,7 @@ export function MissionControl() {
           },
         };
         break;
-      default:
+      case "passenger-emergency":
         request = {
           ...common,
           reason: "生成突发医疗负荷与一名急症乘客",
@@ -3736,8 +4683,16 @@ export function MissionControl() {
             note: "Biological incident initialized without bulk ship mass exchange",
           },
         };
+        break;
+      default:
+        showToast(`不支持的因果事件类型：${eventType}`, {
+          persistent: true,
+        });
+        return Promise.reject(
+          new Error(`unsupported causal event type: ${eventType}`),
+        );
     }
-    submitIntervention(request, `已触发因果事件：${label}`);
+    return submitIntervention(request, `已触发因果事件：${label}`);
   };
 
   useEffect(() => {
@@ -3747,10 +4702,11 @@ export function MissionControl() {
   const forceOverride = (
     field: (typeof FORCE_FIELDS)[number],
     value: number,
-  ) => {
+  ): Promise<void> => {
     if (!engineState) {
-      showToast("尚无可覆写的物理快照。");
-      return;
+      const message = "尚无可覆写的物理快照。";
+      showToast(message);
+      return Promise.reject(new Error(message));
     }
 
     let massKg = 0;
@@ -3774,7 +4730,7 @@ export function MissionControl() {
         break;
     }
 
-    submitIntervention(
+    return submitIntervention(
       {
         actor: "player:god-mode",
         reason: `直接覆写 ${field.label}`,
@@ -3809,7 +4765,11 @@ export function MissionControl() {
   const simStatus = missionEnded
     ? { tone: "paused" as const, text: "航程已结束 · 控制台只读", detail: "等待人类接管" }
     : llmCallPhase === "waiting"
-      ? { tone: "waiting" as const, text: "时间已冻结 · 等待舰长关键决策", detail: "LLM 决策中" }
+      ? {
+          tone: "waiting" as const,
+          text: "模拟暂停 · AI 正在研判",
+          detail: decisionTheaterHeadline(decisionTheater),
+        }
       : missionStarted && !llmStatus?.ready
         ? {
             tone: "blocked" as const,
@@ -3821,6 +4781,12 @@ export function MissionControl() {
           : missionStarted
             ? { tone: "live" as const, text: "模拟推进中", detail: "舰长拥有全舰指挥权" }
             : { tone: "paused" as const, text: "等待签发最高指令", detail: "执行权限已冻结" };
+
+  // 次级状态条：未启动 / 正常推进 / AI 研判时与顶栏·时间控制重复，仅保留异常提示
+  const showSecondarySimStatus =
+    missionStarted &&
+    simStatus.tone !== "live" &&
+    llmCallPhase !== "waiting";
 
   const journeyProgressLabel =
     missionStarted && engineState
@@ -3839,6 +4805,14 @@ export function MissionControl() {
             prev.map((a) => (a.id === id ? { ...a, acknowledged: true } : a)),
           )
         }
+        onLocate={(alert) => {
+          setActiveView("ship");
+          setShipFocus((prev) => ({
+            zoneId: alert.zoneId ?? null,
+            ringId: alert.ringId ?? null,
+            token: prev.token + 1,
+          }));
+        }}
       />
       <header className="topbar">
         <div className="brand-lockup">
@@ -3856,12 +4830,13 @@ export function MissionControl() {
             timeControl?.effectiveTimeScale ??
             compartmentState?.effectiveTimeScale
           }
-          paused={paused || llmCallPhase === "waiting"}
+          paused={Boolean(timeControl?.paused || paused || missionEnded)}
+          maxLiveSimulationSeconds={nextCaptainRoutineDeadline}
           progressLabel={journeyProgressLabel}
         />
         <TimeControlBar
           timeScale={timeScale}
-          paused={paused || llmCallPhase === "waiting"}
+          paused={paused}
           effectiveTimeScale={
             timeControl?.effectiveTimeScale ??
             compartmentState?.effectiveTimeScale
@@ -3870,14 +4845,9 @@ export function MissionControl() {
             Boolean(timeControl?.fidelityLocked) ||
             Boolean(compartmentState?.fidelityLimited)
           }
-          owedSimSeconds={timeControl?.owedSimSeconds}
           pauseTokens={
             timeControl?.pauseTokens ??
-            (llmCallPhase === "waiting"
-              ? ["llm-waiting"]
-              : missionEnded
-                ? ["mission-ended"]
-                : undefined)
+            (missionEnded ? ["mission-ended"] : undefined)
           }
           onSetTimeScale={(scale) => {
             setTimeScale(scale);
@@ -3888,9 +4858,7 @@ export function MissionControl() {
             audio.playClick();
           }}
           disabled={timeControlsDisabled}
-          pauseDisabled={
-            !missionStarted || missionEnded || llmCallPhase === "waiting"
-          }
+          pauseDisabled={!missionStarted || missionEnded}
         />
         <ConsoleStatusStrip
           tone={simStatus.tone}
@@ -3898,7 +4866,7 @@ export function MissionControl() {
             missionEnded
               ? "目标安全区已确认"
               : llmCallPhase === "waiting"
-                ? "等待舰长关键决策"
+                ? "AI 研判中 · 仿真已暂停"
                 : missionStarted && !llmStatus?.ready
                   ? "缺少 LLM 密钥"
                   : missionStarted
@@ -3907,7 +4875,7 @@ export function MissionControl() {
                       : "最高指令生效"
                     : "任务尚未签发"
           }
-          detail={simStatus.detail}
+          detail={!missionStarted ? undefined : simStatus.detail}
         />
         <div className="save-actions">
           <button type="button" onClick={saveGame}>
@@ -3939,6 +4907,14 @@ export function MissionControl() {
           )}
         </div>
       </header>
+
+      {decisionTheater.active ? (
+        <DecisionTheater
+          key={decisionTheater.cycleToken ?? "active"}
+          state={decisionTheater}
+          compact
+        />
+      ) : null}
 
       <aside className="sidebar" aria-label="主导航">
         <div className="sidebar-index">Y-01</div>
@@ -3981,19 +4957,25 @@ export function MissionControl() {
           </div>
           <div className="workspace-tools">
             <span className="hotkey-hint">1–7 倍率 · Space 暂停</span>
-            <span className={`console-inline-status tone-${simStatus.tone}`}>
-              {simStatus.text}
-            </span>
+            {showSecondarySimStatus ? (
+              <span
+                className={`console-inline-status tone-${simStatus.tone} is-compact`}
+              >
+                {simStatus.text}
+              </span>
+            ) : null}
           </div>
         </div>
 
-        <div
-          className="sim-status-strip"
-          data-tone={simStatus.tone}
-          role="status"
-        >
-          {simStatus.text}
-        </div>
+        {showSecondarySimStatus ? (
+          <div
+            className="sim-status-strip is-compact"
+            data-tone={simStatus.tone}
+            role="status"
+          >
+            {simStatus.text}
+          </div>
+        ) : null}
 
         <div className="view-stage">
           {activeView === "voyage" && (
@@ -4020,6 +5002,10 @@ export function MissionControl() {
               rotation={rotationState?.observed ?? null}
               waterRecovery={waterRecoveryState}
               maintenance={maintenanceState}
+              hullConsequence={hullConsequenceState}
+              focusZoneId={shipFocus.zoneId}
+              focusRingId={shipFocus.ringId}
+              focusToken={shipFocus.token}
             />
           )}
           {activeView === "people" && (
@@ -4027,6 +5013,9 @@ export function MissionControl() {
               state={engineState}
               highlights={passengerHighlights}
               privateNotes={keyPassengerPrivateNotes}
+              compartments={compartmentState}
+              passengerSociety={passengerSocietySnapshot}
+              simulationSeconds={simulationSeconds}
             />
           )}
           {activeView === "ai" && (
@@ -4035,6 +5024,10 @@ export function MissionControl() {
               callPhase={llmCallPhase}
               commandBus={commandBusState}
               decisionLog={captainDecisionLog}
+              decisionTheater={decisionTheater}
+              captainJournal={captainJournalSnapshot}
+              departmentStanding={departmentStandingSnapshot}
+              captainWatch={captainWatchSnapshot}
             />
           )}
           {activeView === "god" && (
@@ -4173,6 +5166,10 @@ export function MissionControl() {
                   </select>
                 </label>
               </div>
+              <p className="launch-route-meta">
+                航路 {missionDistanceLightYears.toFixed(2)} ly · 单段跃迁上限{" "}
+                {MAX_JUMP_LEG_LY} ly · 至少 {estimatedRouteLegs} 段
+              </p>
               <label className="directive-field">
                 最高指令
                 <textarea
@@ -4193,8 +5190,8 @@ export function MissionControl() {
                   </strong>
                 </div>
                 <div>
-                  <span>应急自持</span>
-                  <strong>5 年</strong>
+                  <span>压力分区</span>
+                  <strong>48</strong>
                 </div>
                 <div>
                   <span>舰长权限</span>

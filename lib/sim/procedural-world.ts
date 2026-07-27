@@ -61,10 +61,11 @@ const EVENT_SCHEDULE: EventScheduleEntry[] = [
     severity: "info",
     source: "数字孪生估算器",
     messages: [
-      "一组温度传感器出现零点漂移，数字孪生已标记为降级读数。",
-      "压力传感器校准偏差超出容许范围，维护窗口已排入建议队列。",
-      "姿态参考陀螺仪检测到微小偏差，导航滤波器已自动补偿。",
+      "一组舱区温度传感器出现零点漂移，数字孪生已将其标记为降级读数。",
+      "舱区压力传感器校准偏差超出容许范围，受影响探头已降级。",
+      "舱区氧分压传感器检测到微小偏差，维护窗口已排入建议队列。",
     ],
+    interventionEventType: "sensor-drift",
     earliestSeconds: 7_200,
   },
   {
@@ -74,12 +75,12 @@ const EVENT_SCHEDULE: EventScheduleEntry[] = [
     severity: "info",
     source: "乘客事务部",
     messages: [
-      "B 环公共区发生乘客纠纷，安保机器人已到场调解。",
-      "一批清醒乘客联名请求增加娱乐区供电配额。",
-      "农业环志愿者报告作物观察记录异常，请求农艺复核（观察项，非产量模型）。",
-      "乘客自发组织了一场关于航程意义的公开讨论。",
-      "休眠舱家属探视请求排队已超过 48 小时。",
-      "独立记者再次申请访问舰内事故记录，乘客事务部已转交舰长。",
+      "【叙事记录·无即时物理注入】B 环公共区发生乘客纠纷，安保机器人已到场调解。",
+      "【叙事记录·无即时物理注入】一批清醒乘客联名请求增加娱乐区供电配额。",
+      "【叙事记录·无即时物理注入】农业环志愿者报告作物观察异常，请求农艺复核（产量模型仍按舰长运营账本结算）。",
+      "【叙事记录·无即时物理注入】乘客自发组织了一场关于航程意义的公开讨论。",
+      "【叙事记录·无即时物理注入】休眠舱家属探视请求排队已超过 48 小时。",
+      "【叙事记录·无即时物理注入】独立记者再次申请访问舰内事故记录，乘客事务部已转交舰长。",
     ],
     earliestSeconds: 3_600,
   },
@@ -90,10 +91,11 @@ const EVENT_SCHEDULE: EventScheduleEntry[] = [
     severity: "watch",
     source: "医疗与休眠部",
     messages: [
-      "一名休眠乘客出现体温调节异常，医疗机器人已调整舱温参数。",
-      "休眠舱 A-12 区检测到微量冷凝水积聚，循环系统已自动除湿。",
-      "一名长期休眠者的肌肉萎缩指标接近干预阈值，已排入唤醒评估。",
+      "休眠馈线 A（hibernation-a）出现间歇性欠压，保护已跳开断路器；本地储备开始放电。",
+      "休眠舱 A-12 区冷凝异常伴随 hibernation-a 馈线跳闸，本地骑越储备已接入。",
+      "休眠馈线 B（hibernation-b）检测到维持功率跌落，断路器已保护跳开。",
     ],
+    interventionEventType: "hibernation-complication",
     earliestSeconds: 43_200,
   },
   {
@@ -103,10 +105,10 @@ const EVENT_SCHEDULE: EventScheduleEntry[] = [
     severity: "watch",
     source: "工程与能源部",
     messages: [
-      "冷却回路 B 泵轴承振动频谱出现早期磨损特征，建议排入维护窗口。",
-      "空气处理机 A 吸附剂饱和度接近 80%，更换窗口建议在 72 小时内。",
-      "水回收机 B 膜组件通量下降 3%，化学清洗已排入预防性维护计划。",
-      "聚变模块 3 号磁约束线圈温度略高于基线，热管理已增加局部冷却。",
+      "冷却回路 A 泵轴承振动频谱出现早期磨损特征，建议排入维护窗口。",
+      "冷却回路 B 泵密封面磨损加重，实际流量已开始间歇性跌落。",
+      "主冷却泵润滑油光谱检出金属磨粒上升，泵组健康度已降级。",
+      // AHU / water processor / fusion coil wear remain narrative-only future work.
     ],
     // Honest binding: only the coolant-pump path is physically modeled today.
     interventionEventType: "coolant-pump-seizure",
@@ -133,10 +135,11 @@ const EVENT_SCHEDULE: EventScheduleEntry[] = [
     severity: "watch",
     source: "配电系统",
     messages: [
-      "B 母线出现短暂电压波动，保护系统已监测但未触发切除。",
-      "电池组 A 荷电状态因负载瞬变出现 2% 偏差，已自动修正。",
-      "一台聚变模块爬坡响应略慢于指令，工程部门已标记观察。",
+      "B 母线出现电压扰动，bus-b 电压传感器已降级，聚变模块 3 目标出力已临时降额。",
+      "电池组 A 因负载瞬变进入降级工况，对应荷电状态传感器读数已标记不可靠。",
+      "聚变模块 2 爬坡响应异常，保护已切除该堆，待工程复位断路器后可恢复。",
     ],
+    interventionEventType: "power-fluctuation",
     earliestSeconds: 43_200,
   },
 ];
@@ -179,11 +182,24 @@ export class ProceduralWorldScheduler {
     }
   }
 
+  nextEventSimulationSeconds(): number | null {
+    let earliest = Number.POSITIVE_INFINITY;
+    for (const value of this.nextTriggerAt.values()) {
+      if (Number.isFinite(value)) earliest = Math.min(earliest, value);
+    }
+    return Number.isFinite(earliest) ? earliest : null;
+  }
+
   check(simulationSeconds: number): ProceduralWorldEvent[] {
     const triggered: ProceduralWorldEvent[] = [];
     for (const entry of EVENT_SCHEDULE) {
       const nextAt = this.nextTriggerAt.get(entry.type);
-      if (nextAt === undefined || simulationSeconds < nextAt) continue;
+      if (
+        nextAt === undefined ||
+        simulationSeconds + 1e-6 < nextAt
+      ) {
+        continue;
+      }
 
       this.eventCounter += 1;
       const messageIndex = Math.floor(
@@ -195,7 +211,7 @@ export class ProceduralWorldScheduler {
         severity: entry.severity,
         source: entry.source,
         message: entry.messages[messageIndex] ?? entry.messages[0]!,
-        simulationSeconds,
+        simulationSeconds: nextAt,
         interventionEventType: entry.interventionEventType,
         narrativeOnly: entry.interventionEventType === undefined,
       });
@@ -204,7 +220,7 @@ export class ProceduralWorldScheduler {
         entry.minIntervalSeconds +
         this.nextRandom() *
           (entry.maxIntervalSeconds - entry.minIntervalSeconds);
-      this.nextTriggerAt.set(entry.type, simulationSeconds + interval);
+      this.nextTriggerAt.set(entry.type, nextAt + interval);
     }
     return triggered;
   }

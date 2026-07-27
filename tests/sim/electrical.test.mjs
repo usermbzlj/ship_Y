@@ -586,9 +586,89 @@ test("strict restore rejects topology, unknown fields, power and energy corrupti
   const fabricatedLoadPower = structuredClone(baseline);
   fabricatedLoadPower.loads[0].servedPowerKw -= 1;
   fabricatedLoadPower.loads[0].unservedPowerKw += 1;
+  // Derived instantaneous fields are recomputed on restore; setpoint/ledger
+  // corruption still rejects, but stale served/unserved splits heal.
+  const healed = ShipElectricalNetwork.restore(fabricatedLoadPower);
+  assert.equal(healed.getSummary().powerBalanceErrorKw, 0);
+});
+
+test("restore heals charge+curtail double-count that matches the jump-charge surplus toast", () => {
+  const JUMP_FRAC = 0.6280641597494411;
+  const network = new ShipElectricalNetwork({
+    seed: "charge-curtail-double-count",
+  });
+  for (const load of network.listLoads()) {
+    let fraction = 1;
+    if (load.id.startsWith("propulsion")) fraction = 0;
+    if (load.id.startsWith("jump-drive")) fraction = JUMP_FRAC;
+    network.synchronizeLoadControllerDemandFraction(load.id, fraction);
+  }
+  network.step(1);
+  const live = network.snapshot();
+  const batteryChargeKw = live.batteries.reduce(
+    (total, battery) => total + battery.lastPowerKw,
+    0,
+  );
+  assert.ok(
+    Math.abs(batteryChargeKw + 96_264.6016601342) < 1e-6,
+    `expected ~96.265 MW charge uptake, got ${batteryChargeKw}`,
+  );
+  assert.equal(
+    live.buses.reduce((total, bus) => total + bus.curtailedPowerKw, 0),
+    0,
+  );
+
+  const forged = structuredClone(live);
+  const surplusKw = -batteryChargeKw;
+  const generationPowerKw = forged.buses.reduce(
+    (total, bus) => total + bus.generationPowerKw,
+    0,
+  );
+  for (const bus of forged.buses) {
+    bus.curtailedPowerKw =
+      surplusKw * (bus.generationPowerKw / generationPowerKw);
+    bus.netTransferPowerKw =
+      bus.servedPowerKw +
+      bus.curtailedPowerKw -
+      bus.generationPowerKw -
+      bus.batteryPowerKw;
+  }
+  const tie = forged.breakers.find(
+    (breaker) => breaker.id === "breaker:bus-tie",
+  );
+  assert.ok(tie);
+  tie.currentPowerKw = Math.abs(
+    forged.buses.find((bus) => bus.id === "bus-a").netTransferPowerKw,
+  );
+
   assert.throws(
-    () => ShipElectricalNetwork.restore(fabricatedLoadPower),
-    /projection does not match|instantaneous power does not reconcile/,
+    () => validateElectricalSnapshot(forged),
+    /instantaneous power does not reconcile: -96264/,
+  );
+
+  const restored = ShipElectricalNetwork.restore(forged);
+  const summary = restored.getSummary();
+  assertClose(summary.powerBalanceErrorKw, 0, 1e-6, "healed power balance");
+  assertClose(summary.batteryNetPowerKw, 0, 1e-6, "healed battery net power");
+  assertClose(
+    summary.curtailedGenerationKw,
+    surplusKw,
+    1e-6,
+    "healed curtail absorbs former charge surplus",
+  );
+
+  const preserved = ShipElectricalNetwork.restore(live);
+  assertClose(
+    preserved.getSummary().batteryNetPowerKw,
+    batteryChargeKw,
+    1e-6,
+    "valid charging snapshot must not be rewritten on restore",
+  );
+  assertClose(
+    preserved.getSummary().curtailedGenerationKw,
+    0,
+    1e-6,
+    "valid charging snapshot keeps curt=0",
   );
 });
 

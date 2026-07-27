@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { resolveZoneIdForCabin } from "../../lib/sim/compartments.ts";
+
 const emitted = [];
 globalThis.postMessage = (event) => {
   emitted.push(event);
@@ -40,13 +42,7 @@ function initialize() {
 }
 
 function stableZoneForCabin(cabinId) {
-  let hash = 2_166_136_261;
-  for (let index = 0; index < cabinId.length; index += 1) {
-    hash ^= cabinId.charCodeAt(index);
-    hash = Math.imul(hash, 16_777_619);
-  }
-  const ring = (hash >>> 0) % 48 < 24 ? "A" : "B";
-  return ring;
+  return resolveZoneIdForCabin(cabinId).startsWith("A") ? "A" : "B";
 }
 
 test("god-mode bearing degradation changes a real bearing and normalizes the audit balance", () => {

@@ -3,34 +3,66 @@ import {
   SimulationEngine,
 } from "./index.ts";
 import {
+  estimateMinLegs,
+  findStarCatalogEntry,
+  routeDistanceLy,
+} from "../astro/star-catalog.ts";
+import {
   AIR_HANDLER_IDS,
   BASELINE_ZONE_IDS,
-  COMPARTMENT_COUNT,
   CompartmentAtmosphereNetwork,
+  resolveZoneIdForCabin,
+  zoneCatalogEntry,
+  zoneIdsForRole,
 } from "./compartments.ts";
 import {
   hibernationPowerBankForPodId,
   PassengerSimulation,
+  DEFAULT_KEY_LLM_PASSENGER_IDS,
 } from "./passengers.ts";
 import {
   CoolingThermalNetwork,
+  effectiveHabitatThermalDeliveryFraction,
+  HABITAT_THERMAL_DELIVERY_SPUR_IDS,
+  type HabitatThermalDeliverySpurId,
 } from "./cooling.ts";
 import {
   DeterministicCommandBus,
 } from "./command-bus.ts";
-import { ShipElectricalNetwork } from "./electrical.ts";
+import {
+  ELECTRICAL_LOAD_IDS,
+  ShipElectricalNetwork,
+} from "./electrical.ts";
 import { RigidBodyNavigation } from "./navigation.ts";
 import { CounterRotatingHabitat } from "./rotation.ts";
 import {
   WATER_PROCESSOR_IDS,
   WaterRecoveryNetwork,
+  effectiveDeliveryFraction,
 } from "./water.ts";
 import {
-  MAINTENANCE_ASSET_IDS,
   MAINTENANCE_ASSET_SPECS,
+  MAINTENANCE_ROBOT_IDS,
   MaintenanceNetwork,
 } from "./maintenance.ts";
+import {
+  HullConsequenceNetwork,
+  type HullCascadeAction,
+  type HullRingId,
+} from "./hull-consequence.ts";
+import {
+  JUMP_MAXIMUM_THERMAL_BUS_TEMPERATURE_K,
+  jumpEnergyConsumedKWh,
+  projectJumpThermalBusTemperatureK,
+} from "./jump-interlock.ts";
 import { SimulationTimeDirector } from "./director.ts";
+import {
+  agricultureCo2YieldFactor,
+  CaptainOperations,
+  type CaptainOperationsSnapshot,
+  type OperationsTask,
+  type ShipDepartmentId,
+} from "./captain-operations.ts";
 import type { TimeDirectorSnapshot } from "./director.ts";
 import {
   ProceduralWorldScheduler,
@@ -41,6 +73,8 @@ import {
   applyRationAndStarvation,
   createEmptySurvivalLedger,
   integrateHazardDose,
+  medicalTreatmentEffectMultiplier,
+  MEDICAL_ZONE_SURVIVAL_DOSE_MULTIPLIER,
   restoreSurvival,
   snapshotSurvival,
   type SurvivalHazardFamily,
@@ -51,22 +85,21 @@ import type {
   AirHandlerId,
   CompartmentStepResult,
   GasSpecies,
-  SensorQuality,
   ZoneId,
+  ZoneRole,
   ZoneTruth,
 } from "./compartments";
 import type {
   CoolingNetworkSnapshot,
 } from "./cooling";
 import type {
+  ElectricalBatteryId,
   ElectricalLoadId,
   ElectricalNetworkSnapshot,
-  ElectricalSensorQuantity,
   ElectricalStepResult,
   FusionReactorId,
 } from "./electrical";
 import type {
-  NavigationSensorQuantity,
   NavigationSnapshot,
   PropulsionControlPreview,
   PropulsionControlTrainId,
@@ -79,6 +112,7 @@ import type {
   RingTruthSummary,
 } from "./rotation";
 import type {
+  WaterDistributionSpurId,
   WaterProcessorId,
   WaterRecoverySnapshot,
   WaterRing,
@@ -86,6 +120,7 @@ import type {
 import type {
   MaintenanceAssetId,
   MaintenanceConditionRecord,
+  MaintenanceRobotId,
   MaintenanceSnapshot,
 } from "./maintenance";
 import type {
@@ -104,8 +139,6 @@ import type {
 } from "./index";
 import type {
   CompartmentTelemetry,
-  CompartmentZoneCondition,
-  CompartmentZoneTelemetry,
   CoolingTelemetry,
   ElectricalTelemetry,
   FinalJourneyReport,
@@ -113,7 +146,6 @@ import type {
   PassengerEnvironmentalExposureState,
   PassengerEnvironmentalHazardFamily,
   PassengerEnvironmentalHazardTier,
-  RotationTelemetry,
   RuntimeSimulationSnapshot,
   ShipOperationalCommand,
   ShipOperationalCommandResult,
@@ -121,6 +153,18 @@ import type {
   SimulationWorkerEvent,
   SimulationWorkerState,
 } from "./protocol";
+import {
+  assertProjectionAtMost,
+  assertProjectionClose,
+  compartmentTelemetry as projectCompartmentTelemetry,
+  coolingTelemetry as projectCoolingTelemetry,
+  currentRotationCarrierState as projectRotationCarrierState,
+  electricalTelemetry as projectElectricalTelemetry,
+  navigationTelemetry as projectNavigationTelemetry,
+  projectWorkerState,
+  projectedElectricalPowerState as projectElectricalPowerState,
+  projectedThermalNetworkState as projectThermalNetworkState,
+} from "./projection.ts";
 
 let engine = new SimulationEngine({
   seed: "far-horizon-preview",
@@ -156,6 +200,15 @@ let rotation = new CounterRotatingHabitat({
 });
 let water = new WaterRecoveryNetwork();
 let maintenance = new MaintenanceNetwork();
+let hullConsequence = HullConsequenceNetwork.create();
+let hullDeratedThrusterIds = new Set<string>();
+let captainOperations = new CaptainOperations({
+  origin: engine.getState().journey.origin,
+  destination: engine.getState().journey.destination,
+  objective: "保证乘员存续并安全抵达。",
+  zoneIds: BASELINE_ZONE_IDS,
+  electricalLoadIds: ELECTRICAL_LOAD_IDS,
+});
 
 type ShipCommandActorId =
   | "captain"
@@ -165,7 +218,8 @@ type ShipCommandActorId =
   | "medical"
   | "passenger-affairs"
   | "security"
-  | "passenger-service";
+  | "passenger-service"
+  | (typeof DEFAULT_KEY_LLM_PASSENGER_IDS)[number];
 type ShipCommandRole =
   | "captain"
   | "navigation"
@@ -174,7 +228,8 @@ type ShipCommandRole =
   | "life-support"
   | "passenger-affairs"
   | "security"
-  | "passenger-service";
+  | "passenger-service"
+  | "key-passenger";
 type ShipCommandKind = ShipOperationalCommand["kind"];
 
 const SHIP_COMMAND_ACTORS: ReadonlyArray<{
@@ -195,6 +250,10 @@ const SHIP_COMMAND_ACTORS: ReadonlyArray<{
     id: "passenger-service",
     role: "passenger-service",
   },
+  ...DEFAULT_KEY_LLM_PASSENGER_IDS.map((id) => ({
+    id: id as ShipCommandActorId,
+    role: "key-passenger" as const,
+  })),
 ];
 
 function createCommandBus(): DeterministicCommandBus<
@@ -222,7 +281,27 @@ function createCommandBus(): DeterministicCommandBus<
           "set-habitat-ring-control",
           "set-air-handler-control",
           "set-water-processor-control",
+          "configure-water-distribution-spur",
+          "configure-habitat-thermal-delivery-spur",
           "schedule-maintenance",
+          "revise-mission",
+          "manage-department-order",
+          "publish-communication",
+          "manage-crew-assignment",
+          "manage-person",
+          "manage-security",
+          "manage-logistics",
+          "set-compartment-connection",
+          "schedule-hull-repair",
+          "set-thermal-control",
+          "set-atmosphere-supply",
+          "set-oxygen-production",
+          "distribute-water",
+          "reset-protection",
+          "manage-maintenance-task",
+          "manage-sensor-operation",
+          "manage-remote-asset",
+          "set-power-allocation",
         ],
       },
       {
@@ -245,29 +324,57 @@ function createCommandBus(): DeterministicCommandBus<
           "set-habitat-ring-control",
           "set-air-handler-control",
           "set-water-processor-control",
+          "configure-habitat-thermal-delivery-spur",
           "schedule-maintenance",
+          "manage-logistics",
+          "set-compartment-connection",
+          "schedule-hull-repair",
+          "set-thermal-control",
+          "distribute-water",
+          "reset-protection",
+          "manage-maintenance-task",
+          "manage-sensor-operation",
+          "manage-remote-asset",
+          "set-power-allocation",
         ],
       },
-      { role: "medical", kinds: ["set-awake-target"] },
+      { role: "medical", kinds: ["set-awake-target", "manage-person"] },
       {
         role: "life-support",
         kinds: [
           "isolate-pressure-zone",
           "set-air-handler-control",
           "set-water-processor-control",
+          "configure-water-distribution-spur",
+          "manage-logistics",
+          "set-compartment-connection",
+          "set-atmosphere-supply",
+          "set-oxygen-production",
+          "distribute-water",
+          "manage-sensor-operation",
         ],
       },
       {
         role: "passenger-affairs",
-        kinds: [],
+        kinds: ["publish-communication", "manage-logistics"],
       },
       {
         role: "security",
-        kinds: ["isolate-pressure-zone"],
+        kinds: [
+          "isolate-pressure-zone",
+          "manage-person",
+          "manage-security",
+          "set-compartment-connection",
+          "manage-remote-asset",
+        ],
       },
       {
         role: "passenger-service",
-        kinds: [],
+        kinds: ["publish-communication"],
+      },
+      {
+        role: "key-passenger",
+        kinds: ["file-passenger-grievance"],
       },
     ],
     historyCapacity: 512,
@@ -280,6 +387,10 @@ let timeDirector = new SimulationTimeDirector(1_800);
 let proceduralWorld = new ProceduralWorldScheduler("far-horizon-preview");
 let survivalLedger: SurvivalLedger = createEmptySurvivalLedger();
 let survivalZoneDoses: ZoneHazardDose[] = [];
+let lastReachedBlockingBoundary: {
+  id: string;
+  atSimulationSeconds: number;
+} | null = null;
 let lastProceduralEvents: ProceduralWorldEvent[] = [];
 const MEDICAL_BATCH_LIMIT = 24;
 const GAS_SENSIBLE_HEAT_J_PER_KG_K = 1_005;
@@ -289,7 +400,17 @@ const CABIN_HEAT_PUMP_LIFE_SUPPORT_POWER_SHARE = 0.05;
 const CABIN_HEAT_PUMP_CARNOT_EFFICIENCY = 0.45;
 const CABIN_HEAT_PUMP_MINIMUM_COP = 1.1;
 const CABIN_HEAT_PUMP_MAXIMUM_COP = 6;
-const JUMP_MAXIMUM_THERMAL_BUS_TEMPERATURE_K = 375;
+/** Habitat-comfort roles weigh cold-side T; cargo/industrial/access lightly. */
+const CABIN_HEAT_PUMP_COLD_SIDE_ROLE_WEIGHT: Record<ZoneRole, number> = {
+  living: 1,
+  public: 1,
+  medical: 1,
+  galley: 1,
+  agriculture: 0.5,
+  cargo: 0.25,
+  industrial: 0.25,
+  access: 0.25,
+};
 const JUMP_MAXIMUM_ANGULAR_SPEED_RAD_PER_SECOND = 1e-5;
 const ELECTRICAL_LOAD_THERMALIZATION_FRACTION = {
   "life-support-a": 0.08,
@@ -446,539 +567,99 @@ let passengerEnvironmentalExposures =
   createPassengerEnvironmentalExposureStates();
 survivalZoneDoses = createSurvivalZoneDoses();
 
-const SENSOR_QUANTITIES = [
-  "pressurePa",
-  "temperatureK",
-  "oxygenPartialPressurePa",
-  "carbonDioxidePartialPressurePa",
-] as const;
-
-function sensorQualityOrOffline(
-  quality: SensorQuality | undefined,
-): SensorQuality {
-  return quality ?? "offline";
-}
-
-function zoneCondition(
-  observed: CompartmentZoneTelemetry["observed"],
-  qualities: readonly SensorQuality[],
-): CompartmentZoneCondition {
-  const {
-    pressurePa,
-    temperatureK,
-    oxygenPartialPressurePa,
-    carbonDioxidePartialPressurePa,
-  } = observed;
-  if (
-    pressurePa === null ||
-    temperatureK === null ||
-    oxygenPartialPressurePa === null ||
-    carbonDioxidePartialPressurePa === null
-  ) {
-    return "offline";
-  }
-  if (
-    pressurePa < 75_000 ||
-    pressurePa > 120_000 ||
-    temperatureK < 278.15 ||
-    temperatureK > 313.15 ||
-    oxygenPartialPressurePa < 16_000 ||
-    carbonDioxidePartialPressurePa > 1_500
-  ) {
-    return "critical";
-  }
-  if (
-    pressurePa < 90_000 ||
-    pressurePa > 110_000 ||
-    temperatureK < 285.15 ||
-    temperatureK > 303.15 ||
-    oxygenPartialPressurePa < 18_000 ||
-    carbonDioxidePartialPressurePa > 400 ||
-    qualities.some((quality) => quality !== "nominal")
-  ) {
-    return "watch";
-  }
-  return "nominal";
-}
-
 function compartmentTelemetry(): CompartmentTelemetry {
-  const breaches = compartments.listBreaches();
-  const breachedZones = new Set(breaches.map((breach) => breach.zoneId));
-  const sensors = new Map(
-    compartments
-      .listSensors()
-      .map((sensor) => [sensor.id, sensor.latest] as const),
-  );
-  const zones: CompartmentZoneTelemetry[] = compartments
-    .listZones()
-    .map((zone) => {
-      const readings = Object.fromEntries(
-        SENSOR_QUANTITIES.map((quantity) => [
-          quantity,
-          sensors.get(`sensor:${zone.id}:${quantity}`) ?? null,
-        ]),
-      ) as Record<
-        (typeof SENSOR_QUANTITIES)[number],
-        ReturnType<CompartmentAtmosphereNetwork["getSensorReading"]>
-      >;
-      const observed = {
-        pressurePa: readings.pressurePa?.value ?? null,
-        temperatureK: readings.temperatureK?.value ?? null,
-        oxygenPartialPressurePa:
-          readings.oxygenPartialPressurePa?.value ?? null,
-        carbonDioxidePartialPressurePa:
-          readings.carbonDioxidePartialPressurePa?.value ?? null,
-      };
-      const qualities = [
-        sensorQualityOrOffline(readings.pressurePa?.quality),
-        sensorQualityOrOffline(readings.temperatureK?.quality),
-        sensorQualityOrOffline(
-          readings.oxygenPartialPressurePa?.quality,
-        ),
-        sensorQualityOrOffline(
-          readings.carbonDioxidePartialPressurePa?.quality,
-        ),
-      ] as const;
-      const sampledAt = Object.values(readings)
-        .filter((reading) => reading !== null)
-        .map((reading) => reading.sampledAtMicroseconds);
-      const newestSampleAgeSeconds =
-        sampledAt.length === 0
-          ? null
-          : Math.max(
-              0,
-              (compartments.elapsedMicroseconds -
-                Math.max(...sampledAt)) /
-                1_000_000,
-            );
-      const hasBreach = breachedZones.has(zone.id);
-      return {
-        zoneId: zone.id,
-        condition: zoneCondition(observed, qualities),
-        hasBreach,
-        observed,
-        quality: {
-          pressure: qualities[0],
-          temperature: qualities[1],
-          oxygen: qualities[2],
-          carbonDioxide: qualities[3],
-        },
-        newestSampleAgeSeconds,
-      };
-    });
-  const observedPressures = zones
-    .map((zone) => zone.observed.pressurePa)
-    .filter((pressure): pressure is number => pressure !== null);
-  const airHandlerTruth = compartments.listAirHandlers();
-  return {
-    zoneCount: COMPARTMENT_COUNT,
-    ...lastCompartmentStep,
+  return projectCompartmentTelemetry({
+    compartments,
+    lastCompartmentStep,
     requestedTimeScale,
     effectiveTimeScale,
-    fidelityLimited: effectiveTimeScale < requestedTimeScale,
-    activeBreaches: breaches.length,
-    totalVentedGasKg: compartments.getAggregateState().ventedGasKg,
-    observedPressureMinPa:
-      observedPressures.length === 0
-        ? null
-        : Math.min(...observedPressures),
-    observedPressureAveragePa:
-      observedPressures.length === 0
-        ? null
-        : observedPressures.reduce(
-            (total, pressure) => total + pressure,
-            0,
-          ) / observedPressures.length,
-    observedPressureMaxPa:
-      observedPressures.length === 0
-        ? null
-        : Math.max(...observedPressures),
-    airHandlers: {
-      controllers: airHandlerTruth.map(
-        ({
-          id,
-          ring,
-          commandedFlowFraction,
-          scrubberEnabled,
-          carbonDioxideSetpointPa,
-        }) => ({
-          id,
-          ring,
-          commandedFlowFraction,
-          scrubberEnabled,
-          carbonDioxideSetpointPa,
-        }),
-      ),
-      truth: airHandlerTruth,
-    },
-    zones,
-  };
-}
-
-function averageObserved(values: Array<number | null>): number | null {
-  if (values.some((value) => value === null)) {
-    return null;
-  }
-  const available = values.filter(
-    (value): value is number => value !== null,
-  );
-  return available.length === 0
-    ? null
-    : available.reduce((total, value) => total + value, 0) /
-        available.length;
-}
-
-function sumObserved(values: Array<number | null>): number | null {
-  if (values.some((value) => value === null)) {
-    return null;
-  }
-  const available = values.filter(
-    (value): value is number => value !== null,
-  );
-  return available.length === 0
-    ? null
-    : available.reduce((total, value) => total + value, 0);
+  });
 }
 
 function coolingTelemetry(): CoolingTelemetry {
-  const sensors = cooling.listSensors().map((sensor) => {
-    const reading = sensor.latest;
-    return {
-      sensorId: sensor.id,
-      targetId: sensor.targetId,
-      quantity: sensor.quantity,
-      value: reading?.value ?? null,
-      quality: reading?.quality ?? "offline",
-      sampledAtMicroseconds:
-        reading?.sampledAtMicroseconds ?? null,
-      sampleAgeSeconds:
-        reading == null
-          ? null
-          : Math.max(
-              0,
-              (cooling.elapsedMicroseconds -
-                reading.sampledAtMicroseconds) /
-                1_000_000,
-            ),
-    };
-  });
-  const observedValue = (
-    targetId: string,
-    quantity: CoolingTelemetry["sensors"][number]["quantity"],
-  ): number | null =>
-    sensors.find(
-      (sensor) =>
-        sensor.targetId === targetId &&
-        sensor.quantity === quantity,
-    )?.value ?? null;
-  const summary = cooling.getSummary();
-  return {
-    observed: {
-      thermalBusTemperatureK: observedValue(
-        "thermal-bus",
-        "temperatureK",
-      ),
-      averageCoolantTemperatureK: averageObserved([
-        observedValue("coolant-a", "temperatureK"),
-        observedValue("coolant-b", "temperatureK"),
-      ]),
-      totalMassFlowKgPerSecond: sumObserved([
-        observedValue("pump-a", "massFlowKgPerSecond"),
-        observedValue("pump-b", "massFlowKgPerSecond"),
-      ]),
-      totalRadiatedPowerW: sumObserved([
-        observedValue("radiator-wing-a", "radiatedPowerW"),
-        observedValue("radiator-wing-b", "radiatedPowerW"),
-      ]),
-    },
-    sensors,
-    truth: {
-      ...summary,
-      pumps: cooling.listPumps().map((pump) => ({
-        id: pump.id,
-        condition: pump.condition,
-        commandedSpeedFraction: pump.commandedSpeedFraction,
-        electricalSupplyFraction: pump.electricalSupplyFraction,
-        massFlowKgPerSecond: pump.lastMassFlowKgPerSecond,
-      })),
-    },
-  };
+  return projectCoolingTelemetry(cooling);
 }
 
 function electricalTelemetry(): ElectricalTelemetry {
-  const sensors = electrical.listSensors().map((sensor) => {
-    const reading = sensor.latest;
-    return {
-      sensorId: sensor.id,
-      targetId: sensor.targetId,
-      quantity: sensor.quantity,
-      value: reading?.value ?? null,
-      quality: reading?.quality ?? "offline",
-      sampledAtMicroseconds:
-        reading?.sampledAtMicroseconds ?? null,
-      sampleAgeSeconds:
-        reading == null
-          ? null
-          : Math.max(
-              0,
-              (electrical.elapsedMicroseconds -
-                reading.sampledAtMicroseconds) /
-                1_000_000,
-            ),
-    };
-  });
-  const observedValue = (
-    targetId: string,
-    quantity: ElectricalSensorQuantity,
-  ): number | null =>
-    sensors.find(
-      (sensor) =>
-        sensor.targetId === targetId &&
-        sensor.quantity === quantity,
-    )?.value ?? null;
-  const summary = electrical.getSummary();
-  return {
-    observed: {
-      averageBusVoltageV: averageObserved([
-        observedValue("bus-a", "voltageV"),
-        observedValue("bus-b", "voltageV"),
-      ]),
-      averageBusFrequencyHz: averageObserved([
-        observedValue("bus-a", "frequencyHz"),
-        observedValue("bus-b", "frequencyHz"),
-      ]),
-      totalServedPowerKw: sumObserved([
-        observedValue("bus-a", "servedPowerKw"),
-        observedValue("bus-b", "servedPowerKw"),
-      ]),
-      totalReactorOutputKw: sumObserved(
-        electrical
-          .listReactors()
-          .map((reactor) =>
-            observedValue(reactor.id, "reactorOutputKw"),
-          ),
-      ),
-      averageBatteryStateOfChargeFraction: averageObserved(
-        electrical
-          .listBatteries()
-          .map((battery) =>
-            observedValue(
-              battery.id,
-              "batteryStateOfChargeFraction",
-            ),
-          ),
-      ),
-    },
-    sensors,
-    truth: {
-      ...summary,
-      reactors: electrical.listReactors().map((reactor) => ({
-        id: reactor.id,
-        mode: reactor.mode,
-        condition: reactor.condition,
-        outputKw: reactor.outputKw,
-        targetOutputKw: reactor.targetOutputKw,
-      })),
-      buses: electrical.listBuses().map((bus) => ({
-        id: bus.id,
-        energized: bus.energized,
-        voltageV: bus.voltageV,
-        frequencyHz: bus.frequencyHz,
-        servedPowerKw: bus.servedPowerKw,
-        unservedPowerKw: bus.unservedPowerKw,
-      })),
-      batteries: electrical.listBatteries().map((battery) => ({
-        id: battery.id,
-        condition: battery.condition,
-        storedEnergyKWh: battery.storedEnergyKWh,
-        capacityKWh: battery.capacityKWh,
-        lastPowerKw: battery.lastPowerKw,
-      })),
-    },
-  };
+  return projectElectricalTelemetry(electrical);
 }
 
 function navigationTelemetry(): NavigationTelemetry {
-  const sensors = navigation.listSensors().map((sensor) => {
-    const reading = sensor.latest;
-    return {
-      sensorId: sensor.id,
-      quantity: sensor.quantity,
-      frameEpoch: reading?.frameEpoch ?? null,
-      value: reading?.value ?? null,
-      quality: reading?.quality ?? "offline",
-      sampledAtMicroseconds:
-        reading?.sampledAtMicroseconds ?? null,
-      sampleAgeSeconds:
-        reading == null
-          ? null
-          : Math.max(
-              0,
-              (navigation.elapsedMicroseconds -
-                reading.sampledAtMicroseconds) /
-                1_000_000,
-            ),
-    };
-  });
-  const observedValue = (
-    quantity: NavigationSensorQuantity,
-  ): number | null =>
-    sensors.find((sensor) => sensor.quantity === quantity)
-      ?.value ?? null;
-  const summary = navigation.getSummary();
-  return {
-    observed: {
-      positionM: {
-        x: observedValue("positionX"),
-        y: observedValue("positionY"),
-        z: observedValue("positionZ"),
-      },
-      velocityMPerS: {
-        x: observedValue("velocityX"),
-        y: observedValue("velocityY"),
-        z: observedValue("velocityZ"),
-      },
-      orientationBodyToInertial: {
-        w: observedValue("attitudeW"),
-        x: observedValue("attitudeX"),
-        y: observedValue("attitudeY"),
-        z: observedValue("attitudeZ"),
-      },
-      angularVelocityBodyRadPerS: {
-        x: observedValue("angularVelocityX"),
-        y: observedValue("angularVelocityY"),
-        z: observedValue("angularVelocityZ"),
-      },
-      propellantMassKg: observedValue("propellantMass"),
-      fusionFuelMassKg: observedValue("fusionFuelMass"),
-    },
-    sensors,
-    truth: {
-      ...summary,
-      thrusters: navigation.listThrusters().map((thruster) => ({
-        id: thruster.id,
-        condition: thruster.condition,
-        lastActualThrottleFraction:
-          thruster.lastActualThrottleFraction,
-        lastThrustN: thruster.lastThrustN,
-        lastMassFlowKgPerS: thruster.lastMassFlowKgPerS,
-      })),
-    },
-  };
+  return projectNavigationTelemetry(navigation);
 }
 
 function currentRotationCarrierState(): RotationCarrierState {
-  const body = navigation.getBodyState();
-  return {
-    angularVelocityXRadPerS:
-      body.angularVelocityBodyRadPerS.x,
-    inertiaXKgM2:
-      navigation.getCurrentInertiaDiagonal().x,
-    revision: navigation.revision,
-  };
-}
-
-function rotationTelemetry(): RotationTelemetry {
-  const sensors = rotation.listSensors().map((sensor) => {
-    const reading = rotation.getSensorReading(sensor.id);
-    return {
-      sensorId: sensor.id,
-      ringId: sensor.ringId,
-      quantity: sensor.quantity,
-      value: reading?.value ?? null,
-      quality: reading?.quality ?? sensor.condition,
-      sampledAtMicroseconds:
-        reading?.sampledAtMicroseconds ?? null,
-      sampleAgeSeconds:
-        reading === null
-          ? null
-          : Math.max(
-              0,
-              (rotation.elapsedMicroseconds -
-                reading.sampledAtMicroseconds) /
-                1_000_000,
-            ),
-    };
-  });
-  const observedValue = (
-    ringId: RotationRingId,
-    quantity:
-      | "relativeRpm"
-      | "artificialGravityG"
-      | "vibrationMmPerS",
-  ): number | null =>
-    sensors.find(
-      (sensor) =>
-        sensor.ringId === ringId &&
-        sensor.quantity === quantity,
-    )?.value ?? null;
-  return {
-    observed: {
-      rings: (["ring-a", "ring-b"] as const).map(
-        (ringId) => ({
-          id: ringId,
-          relativeRpm: observedValue(
-            ringId,
-            "relativeRpm",
-          ),
-          artificialGravityG: observedValue(
-            ringId,
-            "artificialGravityG",
-          ),
-          vibrationMmPerS: observedValue(
-            ringId,
-            "vibrationMmPerS",
-          ),
-        }),
-      ),
-    },
-    sensors,
-    truth: rotation.getSummary(),
-  };
+  return projectRotationCarrierState(navigation);
 }
 
 function projectedElectricalPowerState(
   network = electrical,
 ) {
-  const summary = network.getSummary();
-  const loads = network.listLoads();
-  const demandedForTiers = (
-    tiers: ReadonlySet<(typeof loads)[number]["tier"]>,
-  ): number =>
-    loads
-      .filter((load) => tiers.has(load.tier))
-      .reduce(
-        (total, load) =>
-          total + load.servedPowerKw + load.unservedPowerKw,
-        0,
-      );
-  return {
-    generationKw: summary.generationPowerKw,
-    essentialDemandKw: demandedForTiers(
-      new Set(["critical", "essential"]),
-    ),
-    discretionaryDemandKw: demandedForTiers(
-      new Set(["discretionary"]),
-    ),
-    jumpDriveDemandKw: demandedForTiers(new Set(["jump"])),
-    servedDemandKw: summary.servedPowerKw,
-    unservedDemandKw: summary.unservedPowerKw,
-    curtailedGenerationKw: summary.curtailedGenerationKw,
-    batteryCapacityKWh: summary.batteryCapacityKWh,
-    batteryChargeKWh: summary.batteryStoredEnergyKWh,
-    batteryThroughputKWh: network
-      .listBatteries()
-      .reduce(
-        (total, battery) => total + battery.throughputKWh,
-        0,
-      ),
-  };
+  return projectElectricalPowerState(network);
+}
+
+function projectedThermalNetworkState(
+  coolingNetwork = cooling,
+  compartmentNetwork = compartments,
+) {
+  return projectThermalNetworkState(
+    coolingNetwork,
+    compartmentNetwork,
+  );
+}
+
+function currentState(): SimulationWorkerState {
+  return projectWorkerState({
+    engine,
+    passengers,
+    compartments,
+    cooling,
+    electrical,
+    navigation,
+    rotation,
+    water,
+    maintenance,
+    hullConsequence,
+    captainOperations,
+    commandBus,
+    timeDirector,
+    lastReachedBlockingBoundary,
+    lastProceduralEvents,
+    survivalLedger,
+    lastCompartmentStep,
+    requestedTimeScale,
+    effectiveTimeScale,
+    currentZoneForPerson,
+    maintenanceConditions: currentMaintenanceConditions(),
+  });
 }
 
 function synchronizeElectricalAggregate(): void {
   engine.synchronizePowerNetwork(
     projectedElectricalPowerState(),
   );
+}
+
+function electricalInstantaneousFingerprint(
+  snapshot: ElectricalNetworkSnapshot,
+): string {
+  return JSON.stringify({
+    buses: snapshot.buses.map((bus) => [
+      bus.generationPowerKw,
+      bus.batteryPowerKw,
+      bus.demandedPowerKw,
+      bus.servedPowerKw,
+      bus.unservedPowerKw,
+      bus.curtailedPowerKw,
+      bus.netTransferPowerKw,
+    ]),
+    loads: snapshot.loads.map((load) => [
+      load.servedPowerKw,
+      load.unservedPowerKw,
+    ]),
+    batteries: snapshot.batteries.map((battery) => battery.lastPowerKw),
+    breakers: snapshot.breakers.map((breaker) => breaker.currentPowerKw),
+  });
 }
 
 interface ElectricalCouplingResult {
@@ -1042,7 +723,7 @@ function synchronizeJumpDriveControllerDemand(
   for (const loadId of JUMP_DRIVE_LOAD_IDS) {
     electrical.synchronizeLoadControllerDemandFraction(
       loadId,
-      demandFraction,
+      Math.min(demandFraction, captainOperations.getPowerAllocationLimit(loadId)),
     );
   }
 }
@@ -1076,7 +757,10 @@ function synchronizePropulsionControlDemand(
     }
     electrical.synchronizeLoadControllerDemandFraction(
       loadId,
-      Math.min(1, Math.max(0, demandFraction)),
+      Math.min(
+        captainOperations.getPowerAllocationLimit(loadId),
+        Math.max(0, demandFraction),
+      ),
     );
   }
 }
@@ -1107,14 +791,12 @@ function synchronizeRotationDriveDemand(
       availableEnergyJ > 0
         ? requestedEnergyJ / availableEnergyJ
         : 0;
-    if (demandFraction > 1 + 1e-12) {
-      throw new Error(
-        `${loadId} rotation drive request exceeds its fixed electrical rating`,
-      );
-    }
     electrical.synchronizeLoadControllerDemandFraction(
       loadId,
-      Math.min(1, Math.max(0, demandFraction)),
+      Math.min(
+        captainOperations.getPowerAllocationLimit(loadId),
+        Math.max(0, demandFraction),
+      ),
     );
   }
 }
@@ -1133,6 +815,10 @@ function advanceElectricalCoupling(
   let remainingMicroseconds = Math.round(
     simulatedSeconds * 1_000_000,
   );
+  // The rotation preview covers the whole outer coupling interval. Apply its
+  // average demand once; treating the full requested energy as a fresh demand
+  // in every internal 60-second electrical slice multiplies it incorrectly.
+  synchronizeRotationDriveDemand(rotationPreview, simulatedSeconds);
   while (remainingMicroseconds > 0) {
     const intervalMicroseconds = Math.min(
       ELECTRICAL_COUPLING_INTERVAL_SECONDS * 1_000_000,
@@ -1142,10 +828,6 @@ function advanceElectricalCoupling(
     synchronizeJumpDriveControllerDemand(intervalSeconds);
     synchronizePropulsionControlDemand(
       propulsionPreview,
-      intervalSeconds,
-    );
-    synchronizeRotationDriveDemand(
-      rotationPreview,
       intervalSeconds,
     );
     const result: ElectricalStepResult =
@@ -1220,6 +902,25 @@ function loadServiceFractionOverInterval(
     1,
     Math.max(0, servedEnergyKWh / nominalDemandEnergyKWh),
   );
+}
+
+/** Volume-weighted ag-zone CO₂ → plant yield factor [0, 1] per habitat ring. */
+function agricultureCo2AvailabilityByRing(): Record<"a" | "b", number> {
+  const forRing = (ring: "A" | "B"): number => {
+    const zoneIds = zoneIdsForRole("agriculture", ring);
+    let pressureVolumeSum = 0;
+    let volumeCubicMeters = 0;
+    for (const zoneId of zoneIds) {
+      const zone = compartments.getZone(zoneId);
+      const truth = compartments.getZoneTruth(zoneId);
+      pressureVolumeSum +=
+        truth.partialPressuresPa.carbonDioxide * zone.volumeCubicMeters;
+      volumeCubicMeters += zone.volumeCubicMeters;
+    }
+    if (volumeCubicMeters <= 0) return 0;
+    return agricultureCo2YieldFactor(pressureVolumeSum / volumeCubicMeters);
+  };
+  return { a: forRing("A"), b: forRing("B") };
 }
 
 function synchronizeCoolingElectricalSupply(
@@ -1547,7 +1248,7 @@ function awakePassengersInRing(ringId: RotationRingId) {
     .filter(
       (person) =>
         person.lifeState === "awake" &&
-        stableZoneForCabin(person.cabinId).startsWith(zonePrefix),
+        currentZoneForPerson(person).startsWith(zonePrefix),
     )
     .sort((left, right) => left.id.localeCompare(right.id));
 }
@@ -1617,8 +1318,35 @@ function applyRotationHabitabilityThresholdCrossings(
 
 interface CabinHeatPumpCoupling {
   metabolicHeatRemovalFraction: number;
+  metabolicHeatRemovalFractionByRing: { A: number; B: number };
+  habitatThermalDeliveryFractionByRing: { A: number; B: number };
+  baseMetabolicHeatRemovalFraction: number;
   coefficientOfPerformance: number | null;
   availableWorkEnergyJ: number;
+}
+
+/**
+ * Reduced-order cabin heat pump: one evaporator vs thermal-bus, not 48 nodes.
+ * Cold-side T is volume×ZoneRole-weighted so living/public/medical/galley
+ * dominate COP; agriculture medium; cargo/industrial/access light.
+ * Pump/COP capacity is ship-wide; per-ring habitat thermal delivery spurs
+ * scale cooling delivered into that ring's zones.
+ */
+function cabinHeatPumpColdSideTemperatureK(): number {
+  let weightedTemperatureSum = 0;
+  let weightSum = 0;
+  for (const zone of compartments.listZones()) {
+    const weight =
+      zone.volumeCubicMeters *
+      CABIN_HEAT_PUMP_COLD_SIDE_ROLE_WEIGHT[
+        zoneCatalogEntry(zone.id).role
+      ];
+    weightedTemperatureSum += zone.temperatureK * weight;
+    weightSum += weight;
+  }
+  return weightSum > 0
+    ? weightedTemperatureSum / weightSum
+    : compartments.getAggregateState().averageTemperatureK;
 }
 
 function cabinHeatPumpCoupling(
@@ -1626,8 +1354,7 @@ function cabinHeatPumpCoupling(
   simulatedSeconds: number,
   lifeSupportServiceRatio: number,
 ): CabinHeatPumpCoupling {
-  const coldTemperatureK =
-    compartments.getAggregateState().averageTemperatureK;
+  const coldTemperatureK = cabinHeatPumpColdSideTemperatureK();
   const hotTemperatureK =
     cooling
       .listNodes()
@@ -1673,12 +1400,35 @@ function cabinHeatPumpCoupling(
             coefficientOfPerformance) /
             fullMetabolicHeatEnergyJ,
         );
+  const baseMetabolicHeatRemovalFraction = Math.min(
+    cabinCoolingFlowFraction(),
+    lifeSupportServiceRatio,
+    energyCapacityFraction,
+  );
+  const habitatThermalDeliveryFractionByRing = { A: 1, B: 1 };
+  for (const loop of cooling.listLoops()) {
+    const ring = loop.id === "loop-a" ? "A" : "B";
+    habitatThermalDeliveryFractionByRing[ring] =
+      effectiveHabitatThermalDeliveryFraction(
+        loop.habitatThermalDeliverySpur,
+      );
+  }
+  const metabolicHeatRemovalFractionByRing = {
+    A:
+      baseMetabolicHeatRemovalFraction *
+      habitatThermalDeliveryFractionByRing.A,
+    B:
+      baseMetabolicHeatRemovalFraction *
+      habitatThermalDeliveryFractionByRing.B,
+  };
   return {
     metabolicHeatRemovalFraction: Math.min(
-      cabinCoolingFlowFraction(),
-      lifeSupportServiceRatio,
-      energyCapacityFraction,
+      metabolicHeatRemovalFractionByRing.A,
+      metabolicHeatRemovalFractionByRing.B,
     ),
+    metabolicHeatRemovalFractionByRing,
+    habitatThermalDeliveryFractionByRing,
+    baseMetabolicHeatRemovalFraction,
     coefficientOfPerformance,
     availableWorkEnergyJ,
   };
@@ -1712,58 +1462,6 @@ function synchronizeAtmosphereAggregate(
     leakAreaSquareMeters: aggregate.leakAreaSquareMeters,
   });
 }
-
-function projectedThermalNetworkState(
-  coolingNetwork = cooling,
-  compartmentNetwork = compartments,
-) {
-  const snapshot = coolingNetwork.snapshot();
-  const aggregate = compartmentNetwork.getAggregateState();
-  const summary = coolingNetwork.getSummary();
-  const radiatorNodes = snapshot.nodes.filter(
-    (node) =>
-      node.id === "radiator-a" || node.id === "radiator-b",
-  );
-  const coolantNodes = snapshot.nodes.filter(
-    (node) =>
-      node.id === "coolant-a" || node.id === "coolant-b",
-  );
-  const averageRadiatorTemperatureK =
-    radiatorNodes.reduce(
-      (total, node) => total + node.temperatureK,
-      0,
-    ) / radiatorNodes.length;
-  const effectiveRadiatorConductanceKwPerK =
-    summary.totalRadiatedPowerW /
-    1_000 /
-    Math.max(
-      1e-9,
-      averageRadiatorTemperatureK -
-        snapshot.externalSpaceTemperatureK,
-    );
-  return {
-    habitatTemperatureK: aggregate.averageTemperatureK,
-    coolantTemperatureK: summary.averageCoolantTemperatureK,
-    radiatorTemperatureK: averageRadiatorTemperatureK,
-    spaceSinkTemperatureK: snapshot.externalSpaceTemperatureK,
-    internalHeatKw:
-      snapshot.heatSources.reduce(
-        (total, source) =>
-          total +
-          (source.enabled ? source.thermalPowerW : 0),
-        0,
-      ) / 1_000,
-    radiatedHeatKw: summary.totalRadiatedPowerW / 1_000,
-    radiatorConductanceKwPerK:
-      effectiveRadiatorConductanceKwPerK,
-    coolantHeatCapacityKJPerK:
-      coolantNodes.reduce(
-        (total, node) => total + node.heatCapacityJPerK,
-        0,
-      ) / 1_000,
-  };
-}
-
 function synchronizeThermalAggregate(): void {
   engine.synchronizeThermalNetwork(
     projectedThermalNetworkState(),
@@ -1771,12 +1469,18 @@ function synchronizeThermalAggregate(): void {
 }
 
 function stableZoneForCabin(cabinId: string): ZoneId {
-  let hash = 2_166_136_261;
-  for (let index = 0; index < cabinId.length; index += 1) {
-    hash ^= cabinId.charCodeAt(index);
-    hash = Math.imul(hash, 16_777_619);
-  }
-  return BASELINE_ZONE_IDS[(hash >>> 0) % BASELINE_ZONE_IDS.length];
+  return resolveZoneIdForCabin(cabinId);
+}
+
+/** Live person location: transfer/evacuate override, else cabin home zone. */
+function currentZoneForPerson(person: {
+  id: string;
+  cabinId: string;
+}): ZoneId {
+  return (
+    captainOperations.locationOverrideFor(person.id) ??
+    stableZoneForCabin(person.cabinId)
+  );
 }
 
 function compartmentOccupantsFor(
@@ -1785,8 +1489,9 @@ function compartmentOccupantsFor(
   const occupants = Object.fromEntries(
     BASELINE_ZONE_IDS.map((zoneId) => [zoneId, 0]),
   ) as Record<ZoneId, number>;
-  for (const cabinId of population.getAwakeCabinIds()) {
-    occupants[stableZoneForCabin(cabinId)] += 1;
+  for (const person of population.getAllPassengers()) {
+    if (person.lifeState !== "awake") continue;
+    occupants[currentZoneForPerson(person)] += 1;
   }
   return occupants;
 }
@@ -1808,46 +1513,76 @@ function awakeOccupantsByWaterRing(): Record<WaterRing, number> {
 }
 
 function synchronizeWaterOccupants(): Record<WaterRing, number> {
+  // Ring demand = person-weighted ZoneRole allocations (reduced-order, not pipes).
+  const occupantsByZone = compartmentOccupantsFor(passengers);
   const occupants = awakeOccupantsByWaterRing();
   water.synchronizeAwakeOccupants(occupants);
+  const weightedAllocation = { a: 0, b: 0 } as Record<WaterRing, number>;
+  for (const zoneId of BASELINE_ZONE_IDS) {
+    const ring = zoneId.startsWith("A-") ? "a" : "b";
+    weightedAllocation[ring] +=
+      occupantsByZone[zoneId] *
+      captainOperations.getWaterAllocationKgPerDay(zoneId);
+  }
+  water.setConsumptionKgPerAwakePersonDayByRing({
+    a: occupants.a === 0 ? 0 : weightedAllocation.a / occupants.a,
+    b: occupants.b === 0 ? 0 : weightedAllocation.b / occupants.b,
+  });
   return occupants;
 }
 
 function synchronizeWaterAggregate(): void {
   const summary = water.getSummary();
+  const loops = water.listLoops();
+  const awakeTotal = loops.reduce((total, loop) => total + loop.awakeOccupants, 0);
+  const weightedConsumption = loops.reduce(
+    (total, loop) =>
+      total + loop.awakeOccupants * loop.consumptionKgPerAwakePersonDay,
+    0,
+  );
   engine.synchronizeWaterNetwork({
     potableKg: summary.potableKg,
     wastewaterKg: summary.wastewaterKg,
     reserveIceKg: summary.reserveIceKg,
     brineWasteKg: summary.brineWasteKg,
-    consumptionKgPerAwakePersonDay: 3,
+    consumptionKgPerAwakePersonDay:
+      awakeTotal === 0 ? 0 : weightedConsumption / awakeTotal,
     recyclerCapacityKgPerDay: summary.recyclerCapacityKgPerDay,
     recyclerEfficiency: summary.recyclerEfficiency,
     recycledKgCumulative: summary.recycledKgCumulative,
   });
 }
 
-function applyCompletedMaintenance(assetId: MaintenanceAssetId): void {
+function applyCompletedMaintenance(
+  task: ReturnType<MaintenanceNetwork["listTasks"]>[number],
+): void {
+  const assetId = task.assetId;
+  const repairedCondition =
+    task.repairDeratingFraction > 0 ? "degraded" : "nominal";
   if (assetId === "pump-a" || assetId === "pump-b") {
-    cooling.configurePump(assetId, { condition: "nominal" });
+    cooling.configurePump(assetId, { condition: repairedCondition });
     synchronizeThermalAggregate();
     return;
   }
   if (assetId === "air-handler-a" || assetId === "air-handler-b") {
-    compartments.configureAirHandler(assetId, { condition: "nominal" });
+    compartments.configureAirHandler(assetId, { condition: repairedCondition });
     return;
   }
   if (
     assetId === "water-processor-a" ||
     assetId === "water-processor-b"
   ) {
-    water.configureProcessor(assetId, { condition: "nominal" });
+    water.configureProcessor(assetId, { condition: repairedCondition });
     synchronizeWaterAggregate();
     return;
   }
-  rotation.completeBearingMaintenance(
-    assetId === "ring-a-bearing" ? "ring-a" : "ring-b",
-  );
+  const ringId = assetId === "ring-a-bearing" ? "ring-a" : "ring-b";
+  rotation.completeBearingMaintenance(ringId);
+  if (task.repairDeratingFraction > 0) {
+    rotation.configureRing(ringId, {
+      bearing: { condition: "degraded" },
+    });
+  }
 }
 
 function advanceMaintenance(
@@ -1876,7 +1611,7 @@ function advanceMaintenance(
     ),
   });
   for (const task of result.completedTasks) {
-    applyCompletedMaintenance(task.assetId);
+    applyCompletedMaintenance(task);
   }
 }
 
@@ -1892,20 +1627,182 @@ function metabolicWaterByRing(
   const a = totalKg * (occupants.a / totalOccupants);
   return { a, b: totalKg - a };
 }
-
-function assertProjectionClose(
-  actual: number,
-  expected: number,
-  label: string,
-): void {
-  const tolerance = Math.max(1e-7, Math.abs(expected) * 1e-10);
-  if (Math.abs(actual - expected) > tolerance) {
-    throw new Error(
-      `${label} does not match the authoritative compartment projection`,
+function operationsDepartmentServiceFractions(
+  simulatedSeconds: number,
+  electricalCoupling: ElectricalCouplingResult,
+  operationsSnapshot: CaptainOperationsSnapshot,
+): Record<ShipDepartmentId, number> {
+  const awakeIds = new Set(
+    passengers
+      .getAllPassengers()
+      .filter((person) => person.lifeState === "awake")
+      .map((person) => person.id),
+  );
+  const staffingFraction = (departmentId: ShipDepartmentId): number => {
+    const assigned = operationsSnapshot.crewAssignments.filter(
+      (assignment) =>
+        assignment.departmentId === departmentId && assignment.shiftId !== "off",
     );
-  }
+    if (assigned.length === 0) return 1;
+    return (
+      assigned.filter((assignment) => awakeIds.has(assignment.personId)).length /
+      assigned.length
+    );
+  };
+  const served = (loadIds: readonly ElectricalLoadId[]): number =>
+    loadServiceFractionOverInterval(
+      electricalCoupling,
+      loadIds,
+      simulatedSeconds,
+    );
+  const electricalByDepartment: Record<ShipDepartmentId, number> = {
+    navigation: served(["habitat-a", "habitat-b"]),
+    engineering: served(["habitat-a", "habitat-b"]),
+    "life-support": served(["life-support-a", "life-support-b"]),
+    medical: served(["life-support-a", "life-support-b"]),
+    "passenger-affairs": served(["habitat-a", "habitat-b"]),
+    security: served(["habitat-a", "habitat-b"]),
+    "passenger-service": served(["habitat-a", "habitat-b"]),
+  };
+  return Object.fromEntries(
+    Object.entries(electricalByDepartment).map(([departmentId, fraction]) => [
+      departmentId,
+      fraction * staffingFraction(departmentId as ShipDepartmentId),
+    ]),
+  ) as Record<ShipDepartmentId, number>;
 }
 
+function connectionAllowsPersonnelPassage(
+  connection: ReturnType<CompartmentAtmosphereNetwork["listConnections"]>[number],
+  operationsSnapshot: CaptainOperationsSnapshot,
+): boolean {
+  const access = operationsSnapshot.accessControls.find(
+    (candidate) => candidate.connectionId === connection.id,
+  );
+  if (access && access.accessMode !== "open") return false;
+  if (connection.condition === "stuck-closed") return false;
+  return (
+    connection.condition === "stuck-open" ||
+    connection.commandedOpenFraction > 0
+  );
+}
+
+function findPersonnelRoute(
+  fromZoneId: ZoneId,
+  toZoneId: ZoneId,
+  operationsSnapshot: CaptainOperationsSnapshot,
+): string[] {
+  if (fromZoneId === toZoneId) return [];
+  const connections = compartments
+    .listConnections()
+    .filter((connection) =>
+      connectionAllowsPersonnelPassage(connection, operationsSnapshot),
+    );
+  const queue: Array<{ zoneId: ZoneId; route: string[] }> = [
+    { zoneId: fromZoneId, route: [] },
+  ];
+  const visited = new Set<ZoneId>([fromZoneId]);
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current) break;
+    for (const connection of connections) {
+      const nextZoneId =
+        connection.zoneAId === current.zoneId
+          ? connection.zoneBId
+          : connection.zoneBId === current.zoneId
+            ? connection.zoneAId
+            : null;
+      if (nextZoneId === null || visited.has(nextZoneId)) continue;
+      const route = [...current.route, connection.id];
+      if (nextZoneId === toZoneId) return route;
+      visited.add(nextZoneId);
+      queue.push({ zoneId: nextZoneId, route });
+    }
+  }
+  throw new Error(
+    `no traversable compartment route from ${fromZoneId} to ${toZoneId}; open or reauthorize the blocking doors first`,
+  );
+}
+
+function operationsTaskServiceFractions(
+  simulatedSeconds: number,
+  electricalCoupling: ElectricalCouplingResult,
+  operationsSnapshot: CaptainOperationsSnapshot,
+  departmentServiceFractionById: Readonly<Record<ShipDepartmentId, number>>,
+): Record<string, number> {
+  const served = (loadIds: readonly ElectricalLoadId[]): number =>
+    loadServiceFractionOverInterval(
+      electricalCoupling,
+      loadIds,
+      simulatedSeconds,
+    );
+  return Object.fromEntries(
+    operationsSnapshot.tasks
+      .filter((task) => task.status === "active")
+      .map((task) => {
+        let equipmentService = 1;
+        if (task.kind === "manufacturing") {
+          equipmentService = served([
+            task.effect.fabricatorId === "fabricator-b"
+              ? "habitat-b"
+              : "habitat-a",
+          ]);
+        } else if (task.kind === "hull-repair") {
+          const breach = compartments
+            .listBreaches()
+            .find((item) => item.id === task.targetId);
+          equipmentService = served([
+            breach?.zoneId.startsWith("B-") ? "habitat-b" : "habitat-a",
+          ]);
+        } else if (task.kind === "medical-treatment") {
+          equipmentService = served(["life-support-a", "life-support-b"]);
+        } else if (task.kind === "relocation") {
+          const routeConnectionIds =
+            typeof task.effect.routeConnectionIds === "string" &&
+            task.effect.routeConnectionIds.length > 0
+              ? task.effect.routeConnectionIds.split(",")
+              : [];
+          const connections = new Map(
+            compartments
+              .listConnections()
+              .map((connection) => [connection.id, connection]),
+          );
+          const routeOpen = routeConnectionIds.every((connectionId) => {
+            const connection = connections.get(connectionId);
+            return (
+              connection !== undefined &&
+              connectionAllowsPersonnelPassage(
+                connection,
+                operationsSnapshot,
+              )
+            );
+          });
+          equipmentService = routeOpen
+            ? served(["habitat-a", "habitat-b"])
+            : 0;
+        } else if (task.kind === "active-scan") {
+          const packageId = task.effect.packageId;
+          equipmentService =
+            packageId === "atmosphere-diagnostic-array"
+              ? served(["life-support-a", "life-support-b"])
+              : packageId === "thermal-diagnostic-array"
+                ? served(["cooling-a", "cooling-b"])
+                : packageId === "hull-inspection-array"
+                  ? served(["habitat-a", "habitat-b"])
+                  : served(["habitat-a", "habitat-b"]);
+        } else if (task.kind === "remote-deployment") {
+          equipmentService = served(["habitat-a", "habitat-b"]);
+        }
+        return [
+          task.id,
+          Math.min(
+            equipmentService,
+            departmentServiceFractionById[task.assignedDepartmentId],
+          ),
+        ];
+      }),
+  );
+}
 function validateRestoredProjection(
   restoredEngine: SimulationEngine,
   restoredPassengers: PassengerSimulation,
@@ -2040,9 +1937,21 @@ function validateRestoredProjection(
       `water.${key}`,
     );
   }
+  const waterLoops = restoredWater.listLoops();
+  const waterAwakeTotal = waterLoops.reduce(
+    (total, loop) => total + loop.awakeOccupants,
+    0,
+  );
+  const waterWeightedConsumption = waterLoops.reduce(
+    (total, loop) =>
+      total + loop.awakeOccupants * loop.consumptionKgPerAwakePersonDay,
+    0,
+  );
   assertProjectionClose(
     state.water.consumptionKgPerAwakePersonDay,
-    3,
+    waterAwakeTotal === 0
+      ? 0
+      : waterWeightedConsumption / waterAwakeTotal,
     "water.consumptionKgPerAwakePersonDay",
   );
 
@@ -2156,11 +2065,14 @@ function validateRestoredProjection(
         3_600_000,
     0,
   );
-  assertProjectionClose(
-    rotationSnapshot.energyLedger
-      .requestedElectricalEnergyJ,
+  // Rotation records the actuator's raw request before the fixed feeder can
+  // cap it. Electrical demanded energy is the portion accepted by that feeder,
+  // so it may be lower but can never be higher. Actual served energy below is
+  // still required to match exactly across both physical domains.
+  assertProjectionAtMost(
     rotationRequestedEnergyJ,
-    "rotation requested electrical energy",
+    rotationSnapshot.energyLedger.requestedElectricalEnergyJ,
+    "electrical rotation-drive demand",
   );
   assertProjectionClose(
     rotationSnapshot.energyLedger.servedElectricalEnergyJ,
@@ -2286,132 +2198,118 @@ function validateMaintenanceProjection(
     }
   }
 }
-
-function maintenanceTelemetry() {
-  const published = maintenance.getPublishedDiagnostic();
-  const tasks = maintenance.listTasks();
-  return {
-    observedAssets: MAINTENANCE_ASSET_IDS.map((assetId) => ({
-      assetId,
-      label: MAINTENANCE_ASSET_SPECS[assetId].label,
-      condition: published?.conditions[assetId] ?? null,
-      sampledAtMicroseconds:
-        published?.sampledAtMicroseconds ?? null,
-      sampleAgeSeconds:
-        published === null
-          ? null
-          : Math.max(
-              0,
-              (maintenance.elapsedMicroseconds -
-                published.sampledAtMicroseconds) /
-                1_000_000,
-            ),
-    })),
-    activeTasks: tasks.filter((task) => task.status === "active"),
-    recentCompletedTasks: tasks
-      .filter((task) => task.status === "completed")
-      .slice(-8),
-    inventory: maintenance.getInventory(),
-    robots: maintenance.listRobots(),
-    diagnosticFrame: published,
-    truth: { conditions: currentMaintenanceConditions() },
-  };
+function registerHullBreachConsequence(input: {
+  breachId: string;
+  zoneId: ZoneId;
+  areaSquareMeters: number;
+}): void {
+  hullConsequence.register({
+    ...input,
+    nowMicroseconds: engine.elapsedMicroseconds,
+  });
 }
 
-function currentState(): SimulationWorkerState {
-  const compartmentState = compartmentTelemetry();
-  const compartmentByZoneId = new Map(
-    compartmentState.zones.map((zone) => [zone.zoneId, zone]),
-  );
-  return {
-    elapsedSeconds: engine.elapsedSeconds,
-    state: engine.getState(),
-    passengers: passengers.getPopulationSummary(),
-    passengerHighlights: passengers
-      .getKeyLlmPassengers()
-      .map((person) => {
-        const zoneId = stableZoneForCabin(person.cabinId);
-        const zone = compartmentByZoneId.get(zoneId);
-        if (!zone) {
-          throw new Error(
-            `passenger telemetry lost observed compartment ${zoneId}`,
-          );
-        }
-        return {
-          passengerId: person.id,
-          name: person.name,
-          occupation: person.occupation,
-          cabinId: person.cabinId,
-          zoneId,
-          zoneCondition: zone.condition,
-          zoneObservedPressurePa: zone.observed.pressurePa,
-          zoneObservationAgeSeconds:
-            zone.newestSampleAgeSeconds,
-          lifeState: person.lifeState,
-          physicalHealth: person.health.physical,
-          medicalStability: person.health.resilience,
-          psychologicalStability:
-            person.psychology.stability,
-          stress: person.psychology.stress,
-          trust: person.experience.trust,
-          isKeyLlm: person.isKeyLlm,
-        };
-      }),
-    compartments: compartmentState,
-    cooling: coolingTelemetry(),
-    electrical: electricalTelemetry(),
-    navigation: navigationTelemetry(),
-    rotation: rotationTelemetry(),
-    waterRecovery: {
-      controllers: water.listProcessors().map((processor) => ({
-        id: processor.id,
-        ring: processor.ring,
-        commandedThroughputFraction:
-          processor.commandedThroughputFraction,
-      })),
-      observed: water.getObservation(),
-      truth: {
-        loops: water.listLoops(),
-        processors: water.listProcessors(),
-        summary: water.getSummary(),
-      },
-    },
-    maintenance: maintenanceTelemetry(),
-    commandBus: {
-      revision: commandBus.revision,
-      recentAudit: commandBus
-        .getAuditHistory()
-        .slice(-8)
-        .map((entry) => ({
-          sequence: entry.sequence,
-          actor: entry.actor,
-          role: entry.role,
-          kind: entry.kind,
-          issuedAt: entry.issuedAt,
-          status: entry.status,
-          revisionBefore: entry.revisionBefore,
-          revisionAfter: entry.revisionAfter,
-        })),
-    },
-    timeControl: {
-      timeScale: timeDirector.timeScale,
-      effectiveTimeScale: timeDirector.isPaused
-        ? 0
-        : timeDirector.lastEffectiveTimeScale,
-      paused: timeDirector.isPaused,
-      pauseTokens: [...timeDirector.pauseTokens],
-      owedSimSeconds: timeDirector.owedSimSeconds,
-      fidelityLocked: timeDirector.fidelityLocked,
-      droppedSimSecondsCumulative: timeDirector.droppedSimSecondsCumulative,
-    },
-    proceduralEvents: lastProceduralEvents.map((event) => ({ ...event })),
-    survival: {
-      rationFoodConsumedKg: survivalLedger.rationFoodConsumedKg,
-      starvationExposurePersonSeconds:
-        survivalLedger.starvationExposurePersonSeconds,
-      foodDryKg: engine.getState().consumables.foodDryKg,
-    },
-  };
+function applyHullCascadeActions(actions: readonly HullCascadeAction[]): void {
+  for (const action of actions) {
+    if (action.type === "grow-breach") {
+      const existing = compartments
+        .listBreaches()
+        .find((breach) => breach.id === action.breachId);
+      if (!existing) continue;
+      compartments.upsertBreach({
+        ...existing,
+        areaSquareMeters: action.areaSquareMeters,
+      });
+      synchronizeAtmosphereAggregate(capturedCarbonDioxideTotal());
+      continue;
+    }
+    if (action.type === "fault-ahu") {
+      const airHandlerId =
+        action.ring === "a" ? "air-handler-a" : "air-handler-b";
+      compartments.configureAirHandler(airHandlerId, {
+        condition: action.condition,
+      });
+      continue;
+    }
+    if (action.type === "fault-pump") {
+      const pumpId = action.ring === "a" ? "pump-a" : "pump-b";
+      cooling.configurePump(pumpId, {
+        condition: action.condition,
+        commandedSpeedFraction: 0,
+      });
+      continue;
+    }
+    if (action.type === "fault-bearing") {
+      const ringId = action.ring === "a" ? "ring-a" : "ring-b";
+      rotation.configureRing(ringId, {
+        bearing: { condition: "degraded" },
+      });
+      continue;
+    }
+    if (action.type === "trip-hibernation") {
+      const loadId =
+        action.ring === "a" ? "hibernation-a" : "hibernation-b";
+      const load = electrical.getLoad(loadId);
+      const breaker = electrical
+        .listBreakers()
+        .find((candidate) => candidate.id === load.breakerId);
+      if (breaker && breaker.condition === "nominal") {
+        electrical.tripBreaker(
+          load.breakerId,
+          `hull cascade: unrepaired breach on ring ${action.ring}`,
+        );
+      }
+    }
+  }
+}
+
+function syncHullThrustDerates(): void {
+  const breaches = compartments.listBreaches();
+  const performanceByRing = {
+    a: hullConsequence.getTelemetry(engine.elapsedMicroseconds, breaches)
+      .thrustPerformanceByRing.a,
+    b: hullConsequence.getTelemetry(engine.elapsedMicroseconds, breaches)
+      .thrustPerformanceByRing.b,
+  } as const;
+  const nextDerated = new Set<string>();
+  for (const thruster of navigation.listThrusters()) {
+    const ring: HullRingId =
+      thruster.controlTrainId === "propulsion-control-a" ? "a" : "b";
+    const fraction = performanceByRing[ring];
+    if (fraction < 1 - 1e-12) {
+      navigation.configureThruster(thruster.id, {
+        condition: "degraded",
+        performanceFraction: fraction,
+      });
+      nextDerated.add(thruster.id);
+    } else if (hullDeratedThrusterIds.has(thruster.id)) {
+      navigation.configureThruster(thruster.id, {
+        condition: "nominal",
+        performanceFraction: 1,
+      });
+    }
+  }
+  hullDeratedThrusterIds = nextDerated;
+}
+
+function applyHullConsequenceCoupling(): void {
+  const breaches = compartments.listBreaches();
+  const activeIds = new Set(breaches.map((breach) => breach.id));
+  hullConsequence.reconcile(activeIds);
+  for (const breach of breaches) {
+    hullConsequence.register({
+      breachId: breach.id,
+      zoneId: breach.zoneId,
+      areaSquareMeters: breach.areaSquareMeters,
+      nowMicroseconds: engine.elapsedMicroseconds,
+    });
+  }
+  const actions = hullConsequence.advance({
+    nowMicroseconds: engine.elapsedMicroseconds,
+    breaches: compartments.listBreaches(),
+  });
+  applyHullCascadeActions(actions);
+  syncHullThrustDerates();
 }
 
 function post(event: SimulationWorkerEvent): void {
@@ -2466,6 +2364,15 @@ function initialize(
   });
   water = new WaterRecoveryNetwork();
   maintenance = new MaintenanceNetwork();
+  hullConsequence = HullConsequenceNetwork.create();
+  hullDeratedThrusterIds = new Set();
+  captainOperations = new CaptainOperations({
+    origin: command.mission.origin,
+    destination: command.mission.destination,
+    objective: command.mission.directive,
+    zoneIds: BASELINE_ZONE_IDS,
+    electricalLoadIds: ELECTRICAL_LOAD_IDS,
+  });
   maintenance.advance(0, {
     currentConditions: currentMaintenanceConditions(),
     workshopServiceFractionByRing: { a: 1, b: 1 },
@@ -2483,6 +2390,7 @@ function initialize(
   survivalLedger = createEmptySurvivalLedger();
   timeDirector = new SimulationTimeDirector(command.mission.timeScale);
   timeDirector.acquirePauseToken("ui");
+  lastReachedBlockingBoundary = null;
   proceduralWorld = new ProceduralWorldScheduler(command.mission.seed);
   lastProceduralEvents = [];
   synchronizeCompartmentOccupants();
@@ -2511,7 +2419,9 @@ function restore(
   command: Extract<SimulationWorkerCommand, { type: "restore" }>,
 ): void {
   if (
-    command.snapshot.snapshotVersion !== 16 ||
+    (command.snapshot.snapshotVersion !== 16 &&
+      command.snapshot.snapshotVersion !== 17 &&
+      command.snapshot.snapshotVersion !== 18) ||
     !command.snapshot.highestDirective.trim() ||
     command.snapshot.engine.powerAuthority !== "external-network" ||
     command.snapshot.engine.atmosphereAuthority !== "external-network" ||
@@ -2550,6 +2460,20 @@ function restore(
   const restoredMaintenance = MaintenanceNetwork.restore(
     command.snapshot.maintenance,
   );
+  const restoredOperations = command.snapshot.operations
+    ? CaptainOperations.restore({
+        snapshot: command.snapshot.operations,
+        zoneIds: BASELINE_ZONE_IDS,
+        electricalLoadIds: ELECTRICAL_LOAD_IDS,
+      })
+    : new CaptainOperations({
+        origin: restoredEngine.getState().journey.origin,
+        destination: restoredEngine.getState().journey.destination,
+        objective: command.snapshot.highestDirective,
+        zoneIds: BASELINE_ZONE_IDS,
+        electricalLoadIds: ELECTRICAL_LOAD_IDS,
+        elapsedMicroseconds: restoredEngine.elapsedMicroseconds,
+      });
   const restoredCommandBus = DeterministicCommandBus.restore<
     ShipCommandActorId,
     ShipCommandRole,
@@ -2582,10 +2506,12 @@ function restore(
     restoredWater.elapsedMicroseconds !==
       restoredEngine.elapsedMicroseconds ||
     restoredMaintenance.elapsedMicroseconds !==
+      restoredEngine.elapsedMicroseconds ||
+    restoredOperations.elapsedMicroseconds !==
       restoredEngine.elapsedMicroseconds
   ) {
     throw new Error(
-      "engine, passenger, compartment, cooling, electrical, navigation, rotation, water, and maintenance clocks do not match",
+      "engine, passenger, compartment, cooling, electrical, navigation, rotation, water, maintenance, and operations clocks do not match",
     );
   }
   if (
@@ -2637,6 +2563,20 @@ function restore(
   const restoredProceduralWorld = ProceduralWorldScheduler.restore(
     command.snapshot.proceduralWorld,
   );
+  const restoredHullConsequence = command.snapshot.hullConsequence
+    ? HullConsequenceNetwork.restore(command.snapshot.hullConsequence)
+    : HullConsequenceNetwork.create();
+  // Only realign the aggregate when electrical restore healed derived
+  // instantaneous fields; never overwrite an intentionally inconsistent
+  // engine.power projection before validation.
+  if (
+    electricalInstantaneousFingerprint(command.snapshot.electrical) !==
+    electricalInstantaneousFingerprint(restoredElectrical.snapshot())
+  ) {
+    restoredEngine.synchronizePowerNetwork(
+      projectedElectricalPowerState(restoredElectrical),
+    );
+  }
   validateRestoredProjection(
     restoredEngine,
     restoredPassengers,
@@ -2664,12 +2604,16 @@ function restore(
   rotation = restoredRotation;
   water = restoredWater;
   maintenance = restoredMaintenance;
+  hullConsequence = restoredHullConsequence;
+  hullDeratedThrusterIds = new Set();
+  captainOperations = restoredOperations;
   passengerEnvironmentalExposures = structuredClone(
     command.snapshot.passengerEnvironmentalExposures,
   );
   survivalLedger = restoredSurvival.ledger;
   survivalZoneDoses = restoredSurvival.zoneDoses;
   timeDirector = restoredTimeDirector;
+  lastReachedBlockingBoundary = null;
   proceduralWorld = restoredProceduralWorld;
   lastProceduralEvents = [];
   commandBus = restoredCommandBus;
@@ -2683,6 +2627,8 @@ function restore(
     equilibriumIntervals: 0,
   };
   highestDirective = command.snapshot.highestDirective;
+  // Reconcile registry with live breaches (v16/v17 saves lack hullConsequence).
+  applyHullConsequenceCoupling();
   post({
     type: "ready",
     requestId: command.requestId,
@@ -2692,7 +2638,7 @@ function restore(
 
 function runtimeSnapshot(): RuntimeSimulationSnapshot {
   return {
-    snapshotVersion: 16,
+    snapshotVersion: 18,
     highestDirective,
     engine: engine.snapshot(),
     passengers: passengers.snapshot(),
@@ -2703,6 +2649,7 @@ function runtimeSnapshot(): RuntimeSimulationSnapshot {
     rotation: rotation.snapshot(),
     water: water.snapshot(),
     maintenance: maintenance.snapshot(),
+    operations: captainOperations.snapshot(),
     commandBus: commandBus.snapshot(),
     passengerEnvironmentalExposures: structuredClone(
       passengerEnvironmentalExposures,
@@ -2710,6 +2657,7 @@ function runtimeSnapshot(): RuntimeSimulationSnapshot {
     timeDirector: timeDirector.snapshot(),
     proceduralWorld: proceduralWorld.snapshot(),
     survival: snapshotSurvival(survivalLedger, survivalZoneDoses),
+    hullConsequence: hullConsequence.snapshot(),
   };
 }
 
@@ -2725,6 +2673,8 @@ interface RuntimeDomainCheckpoint {
   rotation: RotationSnapshot;
   water: WaterRecoverySnapshot;
   maintenance: MaintenanceSnapshot;
+  operations: CaptainOperationsSnapshot;
+  hullConsequence: ReturnType<HullConsequenceNetwork["snapshot"]>;
   passengerEnvironmentalExposures:
     PassengerEnvironmentalExposureState[];
   survivalLedger: SurvivalLedger;
@@ -2734,6 +2684,7 @@ interface RuntimeDomainCheckpoint {
   requestedTimeScale: number;
   effectiveTimeScale: number;
   lastCompartmentStep: typeof lastCompartmentStep;
+  hullDeratedThrusterIds: string[];
 }
 
 function captureDomainCheckpoint(): RuntimeDomainCheckpoint {
@@ -2747,6 +2698,8 @@ function captureDomainCheckpoint(): RuntimeDomainCheckpoint {
     rotation: rotation.snapshot(),
     water: water.snapshot(),
     maintenance: maintenance.snapshot(),
+    operations: captainOperations.snapshot(),
+    hullConsequence: hullConsequence.snapshot(),
     passengerEnvironmentalExposures: structuredClone(
       passengerEnvironmentalExposures,
     ),
@@ -2757,6 +2710,7 @@ function captureDomainCheckpoint(): RuntimeDomainCheckpoint {
     requestedTimeScale,
     effectiveTimeScale,
     lastCompartmentStep: structuredClone(lastCompartmentStep),
+    hullDeratedThrusterIds: [...hullDeratedThrusterIds],
   };
 }
 
@@ -2782,6 +2736,15 @@ function restoreDomainCheckpoint(
   maintenance = MaintenanceNetwork.restore(
     checkpoint.maintenance,
   );
+  hullConsequence = HullConsequenceNetwork.restore(
+    checkpoint.hullConsequence,
+  );
+  hullDeratedThrusterIds = new Set(checkpoint.hullDeratedThrusterIds);
+  captainOperations = CaptainOperations.restore({
+    snapshot: checkpoint.operations,
+    zoneIds: BASELINE_ZONE_IDS,
+    electricalLoadIds: ELECTRICAL_LOAD_IDS,
+  });
   passengerEnvironmentalExposures = structuredClone(
     checkpoint.passengerEnvironmentalExposures,
   );
@@ -2798,6 +2761,25 @@ function restoreDomainCheckpoint(
   lastCompartmentStep = structuredClone(
     checkpoint.lastCompartmentStep,
   );
+  if (
+    electricalInstantaneousFingerprint(checkpoint.electrical) !==
+    electricalInstantaneousFingerprint(electrical.snapshot())
+  ) {
+    synchronizeElectricalAggregate();
+  }
+}
+
+function restoreDomainCheckpointOrThrow(
+  checkpoint: RuntimeDomainCheckpoint,
+  originalError: unknown,
+): void {
+  try {
+    restoreDomainCheckpoint(checkpoint);
+  } catch (restoreError) {
+    throw new Error(
+      `${errorMessage(originalError)}; checkpoint restore also failed: ${errorMessage(restoreError)}`,
+    );
+  }
 }
 
 function synchronizePopulationAggregate(): void {
@@ -2882,6 +2864,11 @@ function runCoupledStepUnchecked(
   const fidelityRequirement =
     compartments.getFidelityRequirement();
   const requestedSimulatedSeconds = realSeconds * timeScale;
+  const couplingIntervalSeconds = fidelityRequirement.reasons.includes(
+    "active-breach",
+  )
+    ? 3_600
+    : ELECTRICAL_COUPLING_INTERVAL_SECONDS;
   const maximumSimulatedSeconds =
     fidelityRequirement.maximumSimulatedSecondsPerStep;
   effectiveTimeScale =
@@ -2896,9 +2883,6 @@ function runCoupledStepUnchecked(
   engine.stepSliced(
     realSeconds,
     ({ fromMicroseconds }) => {
-      if (rotationRequiresFineCoupling()) {
-        return 1;
-      }
       if (
         navigation
           .listThrusters()
@@ -2906,20 +2890,31 @@ function runCoupledStepUnchecked(
       ) {
         return 1;
       }
-      const nextBoundary =
-        navigation.getNextPropulsionBoundaryMicroseconds();
+      if (rotationRequiresFineCoupling()) {
+        // Keep transient rotation tightly coupled without reducing the
+        // player-selected world-time rate. During an active breach the
+        // accelerated atmosphere solve also permits hour-scale coupling;
+        // propulsion remains on the stricter one-second path above.
+        return couplingIntervalSeconds;
+      }
+      const nextBoundary = [
+        navigation.getNextPropulsionBoundaryMicroseconds(),
+        captainOperations.getNextScheduledBoundaryMicroseconds(),
+      ]
+        .filter((value): value is number => value !== undefined)
+        .sort((left, right) => left - right)[0];
       if (nextBoundary !== undefined) {
         const secondsUntilBoundary =
           (nextBoundary - fromMicroseconds) / 1_000_000;
         if (
           secondsUntilBoundary > 0 &&
           secondsUntilBoundary <
-            ELECTRICAL_COUPLING_INTERVAL_SECONDS
+            couplingIntervalSeconds
         ) {
           return secondsUntilBoundary;
         }
       }
-      return ELECTRICAL_COUPLING_INTERVAL_SECONDS;
+      return couplingIntervalSeconds;
     },
     ({ fromMicroseconds, toMicroseconds, simulatedSeconds }) => {
       if (
@@ -2930,7 +2925,8 @@ function runCoupledStepUnchecked(
         navigation.elapsedMicroseconds !== fromMicroseconds ||
         rotation.elapsedMicroseconds !== fromMicroseconds ||
         water.elapsedMicroseconds !== fromMicroseconds ||
-        maintenance.elapsedMicroseconds !== fromMicroseconds
+        maintenance.elapsedMicroseconds !== fromMicroseconds ||
+        captainOperations.elapsedMicroseconds !== fromMicroseconds
       ) {
         throw new Error(
           "coupled physical domains diverged before a common-clock slice",
@@ -2949,7 +2945,8 @@ function runCoupledStepUnchecked(
         navigation.elapsedMicroseconds !== toMicroseconds ||
         rotation.elapsedMicroseconds !== toMicroseconds ||
         water.elapsedMicroseconds !== toMicroseconds ||
-        maintenance.elapsedMicroseconds !== toMicroseconds
+        maintenance.elapsedMicroseconds !== toMicroseconds ||
+        captainOperations.elapsedMicroseconds !== toMicroseconds
       ) {
         throw new Error(
           "coupled physical domains did not reach the common-clock slice boundary",
@@ -2978,10 +2975,11 @@ function runCoupledStepUnchecked(
     navigation.elapsedMicroseconds !== engine.elapsedMicroseconds ||
     rotation.elapsedMicroseconds !== engine.elapsedMicroseconds ||
     water.elapsedMicroseconds !== engine.elapsedMicroseconds ||
-    maintenance.elapsedMicroseconds !== engine.elapsedMicroseconds
+    maintenance.elapsedMicroseconds !== engine.elapsedMicroseconds ||
+    captainOperations.elapsedMicroseconds !== engine.elapsedMicroseconds
   ) {
     throw new Error(
-      "coupled engine, passenger, compartment, cooling, electrical, navigation, rotation, water, and maintenance clocks diverged after the simulation step",
+      "coupled engine, passenger, compartment, cooling, electrical, navigation, rotation, water, maintenance, and captain operations clocks diverged after the simulation step",
     );
   }
   passengers.validateState();
@@ -2993,6 +2991,7 @@ function advanceCoupledPhysicalDomains(
   CompartmentStepResult,
   "fineSubsteps" | "equilibriumIntervals"
 > {
+  applyHullConsequenceCoupling();
   const propulsionPreview =
     navigation.previewPropulsionControlInterval(
       simulatedSeconds,
@@ -3047,13 +3046,19 @@ function advanceCoupledPhysicalDomains(
     rotationCarrier,
     {
       "ring-a":
-        electricalCoupling.servedLoadEnergyKWhById[
-          ROTATION_DRIVE_LOAD_BY_RING["ring-a"]
-        ] * 3_600_000,
+        Math.min(
+          rotationPreview.requestedEnergyJByRing["ring-a"],
+          electricalCoupling.servedLoadEnergyKWhById[
+            ROTATION_DRIVE_LOAD_BY_RING["ring-a"]
+          ] * 3_600_000,
+        ),
       "ring-b":
-        electricalCoupling.servedLoadEnergyKWhById[
-          ROTATION_DRIVE_LOAD_BY_RING["ring-b"]
-        ] * 3_600_000,
+        Math.min(
+          rotationPreview.requestedEnergyJByRing["ring-b"],
+          electricalCoupling.servedLoadEnergyKWhById[
+            ROTATION_DRIVE_LOAD_BY_RING["ring-b"]
+          ] * 3_600_000,
+        ),
     },
   );
   const carrierBeforeExchange =
@@ -3158,8 +3163,8 @@ function advanceCoupledPhysicalDomains(
       const segment = compartments.step(
         (toMicroseconds - fromMicroseconds) / 1_000_000,
         {
-          externalMetabolicHeatRemovalFraction:
-            cabinHeatPump.metabolicHeatRemovalFraction,
+          externalMetabolicHeatRemovalFractionByRing:
+            cabinHeatPump.metabolicHeatRemovalFractionByRing,
         },
       );
       fineSubsteps += segment.fineSubsteps;
@@ -3228,6 +3233,28 @@ function advanceCoupledPhysicalDomains(
       "metabolic",
     );
   }
+  {
+    const awakeByRing = { A: 0, B: 0 };
+    for (const zone of compartments.listZones()) {
+      awakeByRing[zoneCatalogEntry(zone.id).ring] += zone.awakeOccupants;
+    }
+    for (const spurId of HABITAT_THERMAL_DELIVERY_SPUR_IDS) {
+      const ring =
+        spurId === "cooling-spur-a" ? ("A" as const) : ("B" as const);
+      const demandedJ =
+        awakeByRing[ring] *
+        CABIN_SENSIBLE_HEAT_W_PER_AWAKE_PERSON *
+        simulatedSeconds *
+        cabinHeatPump.baseMetabolicHeatRemovalFraction;
+      const deliveredJ =
+        demandedJ *
+        cabinHeatPump.habitatThermalDeliveryFractionByRing[ring];
+      cooling.recordHabitatThermalDeliveryShortfall(
+        spurId,
+        Math.max(0, demandedJ - deliveredJ),
+      );
+    }
+  }
   const navigationResult = navigation.step(
     simulatedSeconds,
     {
@@ -3275,12 +3302,208 @@ function advanceCoupledPhysicalDomains(
   cooling.step(simulatedSeconds);
   synchronizeThermalAggregate();
   advanceMaintenance(simulatedSeconds, electricalCoupling);
+  const operationsSnapshot = captainOperations.snapshot();
+  const departmentServiceFractionById =
+    operationsDepartmentServiceFractions(
+      simulatedSeconds,
+      electricalCoupling,
+      operationsSnapshot,
+    );
+  const waterLoops = water.listLoops();
+  const operationsAdvance = captainOperations.advance(simulatedSeconds, {
+    departmentServiceFractionById,
+    taskServiceFractionById: operationsTaskServiceFractions(
+      simulatedSeconds,
+      electricalCoupling,
+      operationsSnapshot,
+      departmentServiceFractionById,
+    ),
+    agricultureServiceFractionByRing: {
+      a: loadServiceFractionOverInterval(
+        electricalCoupling,
+        ["life-support-a"],
+        simulatedSeconds,
+      ),
+      b: loadServiceFractionOverInterval(
+        electricalCoupling,
+        ["life-support-b"],
+        simulatedSeconds,
+      ),
+    },
+    agricultureCo2AvailabilityByRing: agricultureCo2AvailabilityByRing(),
+    oxygenProductionServiceFractionByRing: {
+      a: loadServiceFractionOverInterval(
+        electricalCoupling,
+        ["life-support-a"],
+        simulatedSeconds,
+      ),
+      b: loadServiceFractionOverInterval(
+        electricalCoupling,
+        ["life-support-b"],
+        simulatedSeconds,
+      ),
+    },
+    remoteAssetServiceFraction: loadServiceFractionOverInterval(
+      electricalCoupling,
+      [
+        "habitat-a",
+        "habitat-b",
+        "propulsion-control-a",
+        "propulsion-control-b",
+      ],
+      simulatedSeconds,
+    ),
+    availablePotableWaterKgByRing: {
+      a:
+        waterLoops.find((loop) => loop.id === "water-loop-a")?.potableKg ??
+        0,
+      b:
+        waterLoops.find((loop) => loop.id === "water-loop-b")?.potableKg ??
+        0,
+    },
+  });
+  for (const effect of operationsAdvance.effects) {
+    if (effect.type === "oxygen-produced") {
+      water.withdrawPotableForOperations(effect.waterConsumedKgByRing);
+      continue;
+    }
+    if (effect.type === "food-produced") {
+      water.withdrawPotableForOperations(effect.waterConsumedKgByRing);
+      engine.addFoodInventoryKg(effect.foodKg);
+      continue;
+    }
+    applyCompletedOperationsTask(effect.task);
+  }
+  synchronizeWaterAggregate();
   return { fineSubsteps, equilibriumIntervals };
+}
+
+const ACTIVE_SCAN_REPORT_PREFIX =
+  "高权限主动扫描摘要（完成时刻采样，含噪声/延迟模型；非上帝覆写通道）";
+
+function formatSensorScalar(
+  value: number | null,
+  digits: number,
+): string {
+  return value == null ? "不可用" : value.toFixed(digits);
+}
+
+function formatPressureKPa(pressurePa: number | null): string {
+  if (pressurePa == null) return "不可用";
+  return `${(Math.round(pressurePa / 100) / 10).toFixed(1)} kPa`;
+}
+
+function activeScanCompletionSummary(task: OperationsTask): string {
+  const packageId = task.effect.packageId;
+  const target = task.effect.target;
+  if (typeof packageId !== "string" || typeof target !== "string") {
+    throw new Error(`${task.id} active scan effect is malformed`);
+  }
+  if (packageId === "hull-inspection-array") {
+    const telemetry = compartmentTelemetry();
+    const abnormal = telemetry.zones.filter(
+      (zone) => zone.condition !== "nominal",
+    );
+    return `${ACTIVE_SCAN_REPORT_PREFIX}：主动船体扫描 ${target} 完成：传感器判读 ${abnormal.length} 个舱区非名义状态，观测最低压力 ${formatPressureKPa(telemetry.observedPressureMinPa)}；未导出破口上帝真值清单。`;
+  }
+  if (packageId === "thermal-diagnostic-array") {
+    const thermal = coolingTelemetry().observed;
+    return `${ACTIVE_SCAN_REPORT_PREFIX}：主动热诊断 ${target} 完成：热总线 ${formatSensorScalar(thermal.thermalBusTemperatureK, 2)} K，散热功率 ${formatSensorScalar(thermal.totalRadiatedPowerW, 0)} W，冷却流量 ${formatSensorScalar(thermal.totalMassFlowKgPerSecond, 3)} kg/s。`;
+  }
+  if (packageId === "atmosphere-diagnostic-array") {
+    const telemetry = compartmentTelemetry();
+    const abnormal = telemetry.zones.filter(
+      (zone) => zone.condition !== "nominal",
+    );
+    return `${ACTIVE_SCAN_REPORT_PREFIX}：主动大气扫描 ${target} 完成：48 个压力区中 ${abnormal.length} 个异常，观测压力 ${formatPressureKPa(telemetry.observedPressureMinPa)}–${formatPressureKPa(telemetry.observedPressureMaxPa)}；${abnormal.slice(0, 6).map((zone) => `${zone.zoneId}:${zone.condition}`).join("，") || "全部区域名义正常"}。`;
+  }
+  if (
+    packageId === "navigation-array" ||
+    packageId === "external-radar"
+  ) {
+    const observed = navigationTelemetry().observed;
+    const velocity = observed.velocityMPerS;
+    const position = observed.positionM;
+    const speed =
+      velocity.x == null || velocity.y == null || velocity.z == null
+        ? null
+        : Math.hypot(velocity.x, velocity.y, velocity.z);
+    const positionText =
+      position.x == null || position.y == null || position.z == null
+        ? "不可用"
+        : `(${position.x.toExponential(3)}, ${position.y.toExponential(3)}, ${position.z.toExponential(3)}) m`;
+    return `${ACTIVE_SCAN_REPORT_PREFIX}：${packageId} 对 ${target} 的主动扫描完成：舰体惯性速度 ${formatSensorScalar(speed, 3)} m/s，位置 ${positionText}。`;
+  }
+  const electricalObserved = electricalTelemetry().observed;
+  return `${ACTIVE_SCAN_REPORT_PREFIX}：通信阵列对 ${target} 的主动探测完成：传感器观测总反应堆输出 ${formatSensorScalar(electricalObserved.totalReactorOutputKw, 0)} kW、负载服务 ${formatSensorScalar(electricalObserved.totalServedPowerKw, 0)} kW。`;
+}
+
+function applyCompletedOperationsTask(task: OperationsTask): void {
+  if (task.kind === "medical-treatment") {
+    const personId = task.effect.personId;
+    if (typeof personId !== "string") {
+      throw new Error(`${task.id} medical effect has no personId`);
+    }
+    const person = passengers.getPassenger(personId);
+    const zoneId = currentZoneForPerson(person);
+    const inMedicalZone = zoneCatalogEntry(zoneId).role === "medical";
+    const effectMul = medicalTreatmentEffectMultiplier(inMedicalZone);
+    passengers.applyPassengerIncident({
+      eventId: `operations:${task.id}`,
+      eventType: "medical-treatment-complete",
+      summary: `${task.description}，治疗后生命体征获得改善${
+        inMedicalZone ? "（医疗区全效）" : "（非医疗区减效）"
+      }。`,
+      targetPassengerIds: [personId],
+      healthImpact: {
+        physical: 0.08 * effectMul,
+        resilience: 0.04 * effectMul,
+      },
+      psychologyImpact: {
+        stability: 0.025 * effectMul,
+        stress: -0.04 * effectMul,
+      },
+      experienceImpact: {
+        safety: 0.03 * effectMul,
+        trust: 0.04 * effectMul,
+      },
+      fatal: false,
+      valence: 0.55,
+      salience: 0.65,
+      confidence: 1,
+    });
+    synchronizePopulationAggregate();
+  } else if (task.kind === "hull-repair") {
+    compartments.removeBreach(task.targetId);
+    hullConsequence.clear(task.targetId);
+    synchronizeAtmosphereAggregate(capturedCarbonDioxideTotal());
+    syncHullThrustDerates();
+  } else if (task.kind === "manufacturing") {
+    const partId = task.effect.partId;
+    const quantity = task.effect.quantity;
+    if (typeof partId !== "string" || typeof quantity !== "number") {
+      throw new Error(`${task.id} manufacturing effect is malformed`);
+    }
+    maintenance.addManufacturedPart(
+      partId as Parameters<MaintenanceNetwork["addManufacturedPart"]>[0],
+      quantity,
+    );
+  }
+  const completionSummary =
+    task.kind === "active-scan"
+      ? activeScanCompletionSummary(task)
+      : task.kind === "remote-deployment"
+        ? `${task.description} 已在 ${(task.completedAtMicroseconds ?? captainOperations.elapsedMicroseconds) / 1_000_000}s 完成；资产状态、任务目标和电池账已同步。`
+        : task.kind === "security-investigation"
+          ? `${task.description} 已完成；现场与人员记录中未发现足以支持指控的实体证据，案件按无罪推定结案。`
+        : task.completionSummary ?? `${task.description} 已完成`;
+  captainOperations.applyCompletedTask(task.id, completionSummary);
 }
 
 function replaceEquivalentBreachArea(areaSquareMeters: number): void {
   for (const breach of compartments.listBreaches()) {
     compartments.removeBreach(breach.id);
+    hullConsequence.clear(breach.id);
   }
   if (areaSquareMeters > 0) {
     compartments.upsertBreach({
@@ -3289,7 +3512,13 @@ function replaceEquivalentBreachArea(areaSquareMeters: number): void {
       areaSquareMeters,
       dischargeCoefficient: 0.72,
     });
+    registerHullBreachConsequence({
+      breachId: "breach:force-equivalent",
+      zoneId: "A-18",
+      areaSquareMeters,
+    });
   }
+  syncHullThrustDerates();
 }
 
 function projectedNumericValue(
@@ -3398,6 +3627,18 @@ function applyWaterInterventionEffects(
   if (trippedProcessorId !== null) {
     water.configureProcessor(trippedProcessorId, {
       condition: "stuck-off",
+    });
+    synchronizeWaterAggregate();
+    return;
+  }
+  const faultedSpurId = waterSpurFaultTarget(request);
+  if (faultedSpurId !== null) {
+    const condition = request.metadata?.spurCondition;
+    water.configureDistributionSpur(faultedSpurId, {
+      condition:
+        condition === "degraded" || condition === "stuck-closed"
+          ? condition
+          : "stuck-closed",
     });
     synchronizeWaterAggregate();
     return;
@@ -3533,6 +3774,51 @@ function waterProcessorTripTarget(
   return targetProcessorId;
 }
 
+function waterSpurFaultTarget(
+  request: ExternalInterventionRequest,
+): WaterDistributionSpurId | null {
+  if (request.metadata?.eventType !== "water-spur-fault") return null;
+  if (request.metadata.mode !== "causal-event") {
+    throw new Error("water-spur-fault must use causal-event mode");
+  }
+  if (request.operations.length !== 0) {
+    throw new Error(
+      "water-spur-fault cannot directly override stored state",
+    );
+  }
+  const targetSpurId = request.metadata.targetSpurId;
+  if (targetSpurId !== "water-spur-a" && targetSpurId !== "water-spur-b") {
+    throw new Error(
+      "water-spur-fault requires targetSpurId water-spur-a or water-spur-b",
+    );
+  }
+  return targetSpurId;
+}
+
+function coolingSpurFaultTarget(
+  request: ExternalInterventionRequest,
+): HabitatThermalDeliverySpurId | null {
+  if (request.metadata?.eventType !== "cooling-spur-fault") return null;
+  if (request.metadata.mode !== "causal-event") {
+    throw new Error("cooling-spur-fault must use causal-event mode");
+  }
+  if (request.operations.length !== 0) {
+    throw new Error(
+      "cooling-spur-fault cannot directly override stored state",
+    );
+  }
+  const targetSpurId = request.metadata.targetSpurId;
+  if (
+    targetSpurId !== "cooling-spur-a" &&
+    targetSpurId !== "cooling-spur-b"
+  ) {
+    throw new Error(
+      "cooling-spur-fault requires targetSpurId cooling-spur-a or cooling-spur-b",
+    );
+  }
+  return targetSpurId;
+}
+
 function normalizeWaterProcessorTrip(
   request: ExternalInterventionRequest,
 ): ExternalInterventionRequest {
@@ -3558,6 +3844,68 @@ function normalizeWaterProcessorTrip(
   };
 }
 
+function normalizeWaterSpurFault(
+  request: ExternalInterventionRequest,
+): ExternalInterventionRequest {
+  const targetSpurId = waterSpurFaultTarget(request);
+  if (targetSpurId === null) return request;
+  const ringLabel = targetSpurId === "water-spur-a" ? "A 环" : "B 环";
+  const condition =
+    request.metadata?.spurCondition === "degraded"
+      ? "degraded"
+      : "stuck-closed";
+  const conditionLabel =
+    condition === "degraded" ? "降级（约半开）" : "卡死关闭";
+  return {
+    ...request,
+    declaredBalance: {
+      massKg: 0,
+      energyJ: 0,
+      linearMomentumKgMPerSecond: [0, 0, 0],
+      angularMomentumKgM2PerSecond: [0, 0, 0],
+      note:
+        "Distribution-spur condition only; undelivered demand is ledgered without inventing phantom mass",
+    },
+    metadata: {
+      ...request.metadata,
+      targetSpurId,
+      spurCondition: condition,
+      effectSummary: `${ringLabel}配水支路已${conditionLabel}；净水罐库存不变，未送达需求记入 undeliveredPotableKg。`,
+    },
+  };
+}
+
+function normalizeCoolingSpurFault(
+  request: ExternalInterventionRequest,
+): ExternalInterventionRequest {
+  const targetSpurId = coolingSpurFaultTarget(request);
+  if (targetSpurId === null) return request;
+  const ringLabel = targetSpurId === "cooling-spur-a" ? "A 环" : "B 环";
+  const condition =
+    request.metadata?.spurCondition === "degraded"
+      ? "degraded"
+      : "stuck-closed";
+  const conditionLabel =
+    condition === "degraded" ? "降级（约半开）" : "卡死关闭";
+  return {
+    ...request,
+    declaredBalance: {
+      massKg: 0,
+      energyJ: 0,
+      linearMomentumKgMPerSecond: [0, 0, 0],
+      angularMomentumKgM2PerSecond: [0, 0, 0],
+      note:
+        "Habitat-thermal-delivery spur condition only; undelivered cooling demand is ledgered without inventing phantom heat",
+    },
+    metadata: {
+      ...request.metadata,
+      targetSpurId,
+      spurCondition: condition,
+      effectSummary: `${ringLabel}热送达支路已${conditionLabel}；舱热泵能力不变，未送达冷却需求记入 undeliveredHabitatCoolingJ。`,
+    },
+  };
+}
+
 function applyIncidentToRoster(
   input: ApplyPassengerIncidentInput,
 ): void {
@@ -3572,7 +3920,7 @@ function awakePassengersInZone(zoneId: ZoneId) {
     .filter(
       (person) =>
         person.lifeState === "awake" &&
-        stableZoneForCabin(person.cabinId) === zoneId,
+        currentZoneForPerson(person) === zoneId,
     )
     .sort((left, right) => left.id.localeCompare(right.id));
 }
@@ -3987,9 +4335,7 @@ function updatePassengerEnvironmentalExposures(
   );
   for (const person of passengers.getAllPassengers()) {
     if (person.lifeState !== "awake") continue;
-    awakePassengersByZone
-      .get(stableZoneForCabin(person.cabinId))!
-      .push(person);
+    awakePassengersByZone.get(currentZoneForPerson(person))!.push(person);
   }
 
   if (activeExposures.length > 0) {
@@ -4035,9 +4381,14 @@ function updatePassengerEnvironmentalExposures(
         .get(hit.zoneId)!
         .map((person) => person.id);
       if (targets.length === 0) continue;
+      // Medical zones: first-aid / monitoring buffer, not healing magic.
+      const doseMultiplier =
+        zoneCatalogEntry(hit.zoneId).role === "medical"
+          ? MEDICAL_ZONE_SURVIVAL_DOSE_MULTIPLIER
+          : 1;
       applyContinuousRosterDeltas(targets, {
-        physical: hit.physicalDelta,
-        stress: hit.stressDelta,
+        physical: hit.physicalDelta * doseMultiplier,
+        stress: hit.stressDelta * doseMultiplier,
       });
     }
   }
@@ -4058,6 +4409,8 @@ function applySurvivalRationAndStarvation(deltaSeconds: number): void {
     foodDryKg: foodBefore,
     awakeCount,
     deltaSeconds,
+    kgPerAwakePersonDay:
+      captainOperations.getRationKgPerAwakePersonDay(),
     ledger: survivalLedger,
   });
   survivalLedger = rationed.ledger;
@@ -4098,11 +4451,12 @@ function buildProceduralInterventionRequest(
   };
   switch (eventType) {
     case "micrometeoroid":
+      // ~φ7.6 mm inner puncture; ~few-mm grain @ ~20 km/s caught mostly by Whipple bumper.
       return {
         ...common,
         metadata: {
           ...common.metadata,
-          targetZoneId: "A-18",
+          targetZoneId: "A-05",
         },
         operations: [
           {
@@ -4112,19 +4466,35 @@ function buildProceduralInterventionRequest(
           },
         ],
         declaredBalance: {
-          massKg: -0.34,
-          energyJ: 280_000_000,
-          linearMomentumKgMPerSecond: [1_180, -240, 90],
-          angularMomentumKgM2PerSecond: [0, 28_000, -74_000],
-          note: "Projectile impact, ablated hull mass and transferred momentum",
+          massKg: -0.025,
+          energyJ: 25_000,
+          linearMomentumKgMPerSecond: [12, -2.4, 0.9],
+          angularMomentumKgM2PerSecond: [0, 280, -740],
+          note: "~φ7.6 mm inner puncture (4.5e-5 m²); ~25 g bumper ejecta + minor pressure-wall punch-out; ~25 kJ few-mm grain @ ~20 km/s mostly caught by Whipple shield",
         },
       };
-    case "coolant-pump-seizure":
+    case "coolant-pump-seizure": {
+      const breachRings = new Set(
+        compartments
+          .listBreaches()
+          .map((breach) =>
+            breach.zoneId.startsWith("B-") ? "b" : "a",
+          ),
+      );
+      const messagePrefersB = /[Bb]\s*泵|回路\s*[Bb]/.test(event.message);
+      const targetPumpId =
+        breachRings.has("b") && !breachRings.has("a")
+          ? "pump-b"
+          : breachRings.has("a") && !breachRings.has("b")
+            ? "pump-a"
+            : messagePrefersB
+              ? "pump-b"
+              : "pump-a";
       return {
         ...common,
         metadata: {
           ...common.metadata,
-          targetPumpId: "pump-a",
+          targetPumpId,
         },
         operations: [],
         declaredBalance: {
@@ -4133,6 +4503,19 @@ function buildProceduralInterventionRequest(
           linearMomentumKgMPerSecond: [0, 0, 0],
           angularMomentumKgM2PerSecond: [0, 0, 0],
           note: "Topology fault; subsequent waste heat remains in the closed ship system",
+        },
+      };
+    }
+    case "sensor-drift":
+      return {
+        ...common,
+        operations: [],
+        declaredBalance: {
+          massKg: 0,
+          energyJ: 0,
+          linearMomentumKgMPerSecond: [0, 0, 0],
+          angularMomentumKgM2PerSecond: [0, 0, 0],
+          note: "Atmosphere sensor condition fault; readings degrade without changing zone truth",
         },
       };
     case "stellar-flare":
@@ -4152,7 +4535,7 @@ function buildProceduralInterventionRequest(
           {
             operation: "add",
             path: "environment.stellarIrradianceWattsPerSquareMeter",
-            value: 8_500_000,
+            value: 160,
           },
         ],
         declaredBalance: {
@@ -4163,9 +4546,77 @@ function buildProceduralInterventionRequest(
           note: "Changes explicit external radiation and particle-flux boundaries; future deposited energy is integrated by downstream solvers",
         },
       };
+    case "power-fluctuation": {
+      const targets = resolvePowerFluctuationTargets(event.message);
+      return {
+        ...common,
+        metadata: {
+          ...common.metadata,
+          ...targets,
+        },
+        operations: [],
+        declaredBalance: {
+          massKg: 0,
+          energyJ: 0,
+          linearMomentumKgMPerSecond: [0, 0, 0],
+          angularMomentumKgM2PerSecond: [0, 0, 0],
+          note: "Electrical topology / sensor fault; lasting derate or trip remains until maintenance reset",
+        },
+      };
+    }
+    case "hibernation-complication": {
+      const targetLoadId = /hibernation-b|[Bb]\s*路休眠|馈线\s*B/.test(
+        event.message,
+      )
+        ? "hibernation-b"
+        : "hibernation-a";
+      return {
+        ...common,
+        metadata: {
+          ...common.metadata,
+          targetLoadId,
+        },
+        operations: [],
+        declaredBalance: {
+          massKg: 0,
+          energyJ: 0,
+          linearMomentumKgMPerSecond: [0, 0, 0],
+          angularMomentumKgM2PerSecond: [0, 0, 0],
+          note: "Hibernation feeder protection trip; local ride-through reserve covers until restored",
+        },
+      };
+    }
     default:
       return null;
   }
+}
+
+function resolvePowerFluctuationTargets(message: string): {
+  targetSensorId?: string;
+  targetBatteryId?: ElectricalBatteryId;
+  targetReactorId?: FusionReactorId;
+  powerAction: "battery-degrade" | "reactor-derate" | "reactor-trip";
+} {
+  if (/电池组\s*A|battery-a|荷电状态/.test(message)) {
+    return {
+      targetSensorId: "sensor:battery-a:batteryStateOfChargeFraction",
+      targetBatteryId: "battery-a",
+      powerAction: "battery-degrade",
+    };
+  }
+  if (/聚变模块\s*2|fusion-2|保护已切除/.test(message)) {
+    return {
+      targetSensorId: "sensor:fusion-2:reactorOutputKw",
+      targetReactorId: "fusion-2",
+      powerAction: "reactor-trip",
+    };
+  }
+  // Default / B-bus voltage disturbance → degrade bus-b voltage sensor + derate fusion-3.
+  return {
+    targetSensorId: "sensor:bus-b:voltageV",
+    targetReactorId: "fusion-3",
+    powerAction: "reactor-derate",
+  };
 }
 
 function applyWorkerIntervention(
@@ -4173,10 +4624,14 @@ function applyWorkerIntervention(
 ): ExternalInterventionRecord {
   const checkpoint = captureDomainCheckpoint();
   try {
-    const normalizedRequest = normalizeWaterProcessorTrip(
-      normalizeAirHandlerTrip(
-        normalizeRingBearingDegradation(
-          normalizeDirectForceBalance(request),
+    const normalizedRequest = normalizeCoolingSpurFault(
+      normalizeWaterSpurFault(
+        normalizeWaterProcessorTrip(
+          normalizeAirHandlerTrip(
+            normalizeRingBearingDegradation(
+              normalizeDirectForceBalance(request),
+            ),
+          ),
         ),
       ),
     );
@@ -4200,7 +4655,7 @@ function applyWorkerIntervention(
     );
     return record;
   } catch (error) {
-    restoreDomainCheckpoint(checkpoint);
+    restoreDomainCheckpointOrThrow(checkpoint, error);
     throw error;
   }
 }
@@ -4223,6 +4678,7 @@ function applyProceduralWorldEvents(
 function applyTimeControl(
   command: Extract<SimulationWorkerCommand, { type: "set-time-control" }>,
 ): void {
+  lastReachedBlockingBoundary = null;
   if (command.timeScale !== undefined) {
     timeDirector.setTimeScale(command.timeScale);
     requestedTimeScale = command.timeScale;
@@ -4244,8 +4700,37 @@ function advanceSimulationStep(
   command: Extract<SimulationWorkerCommand, { type: "step" }>,
 ): void {
   lastProceduralEvents = [];
+  lastReachedBlockingBoundary = null;
   if (Number.isFinite(command.timeScale) && command.timeScale > 0) {
     timeDirector.setTimeScale(command.timeScale);
+  }
+  const boundary = command.blockingBoundary;
+  if (boundary) {
+    if (
+      typeof boundary.id !== "string" ||
+      !boundary.id.trim() ||
+      !Number.isFinite(boundary.atSimulationSeconds) ||
+      boundary.atSimulationSeconds < 0 ||
+      typeof boundary.pauseToken !== "string" ||
+      !boundary.pauseToken.trim()
+    ) {
+      throw new Error("blockingBoundary is malformed");
+    }
+    if (engine.elapsedSeconds + 1e-9 >= boundary.atSimulationSeconds) {
+      timeDirector.acquirePauseToken(boundary.pauseToken);
+      requestedTimeScale = timeDirector.timeScale;
+      effectiveTimeScale = 0;
+      lastReachedBlockingBoundary = {
+        id: boundary.id,
+        atSimulationSeconds: boundary.atSimulationSeconds,
+      };
+      post({
+        type: "stepped",
+        requestId: command.requestId,
+        payload: currentState(),
+      });
+      return;
+    }
   }
   const plan = timeDirector.planHeartbeat(command.realSeconds);
   if (plan.paused || plan.wallSecondsToRun === 0) {
@@ -4266,16 +4751,78 @@ function advanceSimulationStep(
     return;
   }
 
-  runCoupledStep(plan.wallSecondsToRun, plan.requestedTimeScale);
+  const secondsUntilBoundary = boundary
+    ? Math.max(
+        0,
+        boundary.atSimulationSeconds - engine.elapsedSeconds,
+      )
+    : Number.POSITIVE_INFINITY;
+  const boundaryWallSeconds = Number.isFinite(secondsUntilBoundary)
+    ? secondsUntilBoundary / plan.requestedTimeScale
+    : Number.POSITIVE_INFINITY;
+  const wallSecondsToRun = Math.min(
+    plan.wallSecondsToRun,
+    boundaryWallSeconds,
+  );
+  let remainingWallSeconds = wallSecondsToRun;
+  while (remainingWallSeconds > 1e-12) {
+    const nextProceduralEventAt =
+      proceduralWorld.nextEventSimulationSeconds();
+    if (
+      nextProceduralEventAt !== null &&
+      engine.elapsedSeconds + 1e-6 >= nextProceduralEventAt
+    ) {
+      lastProceduralEvents.push(
+        ...applyProceduralWorldEvents(engine.elapsedSeconds),
+      );
+      continue;
+    }
+    const wallSecondsUntilProceduralEvent =
+      nextProceduralEventAt === null
+        ? Number.POSITIVE_INFINITY
+        : Math.max(
+            0,
+            nextProceduralEventAt - engine.elapsedSeconds,
+          ) / plan.requestedTimeScale;
+    const segmentWallSeconds = Math.min(
+      remainingWallSeconds,
+      wallSecondsUntilProceduralEvent,
+    );
+    runCoupledStep(segmentWallSeconds, plan.requestedTimeScale);
+    remainingWallSeconds = Math.max(
+      0,
+      remainingWallSeconds - segmentWallSeconds,
+    );
+    if (
+      nextProceduralEventAt !== null &&
+      engine.elapsedSeconds + 1e-6 >= nextProceduralEventAt
+    ) {
+      lastProceduralEvents.push(
+        ...applyProceduralWorldEvents(engine.elapsedSeconds),
+      );
+    }
+  }
+  const reachedBoundary =
+    boundary !== undefined &&
+    engine.elapsedSeconds + 1e-6 >= boundary.atSimulationSeconds;
   timeDirector.commitHeartbeat({
-    wallSecondsElapsed: command.realSeconds,
-    wallSecondsRequested: plan.wallSecondsToRun,
+    // Once a blocking deadline is reached, the unused part of this wall-clock
+    // heartbeat happened while the world was frozen. It must not become catch-
+    // up debt when the decision completes.
+    wallSecondsElapsed: reachedBoundary
+      ? Math.min(command.realSeconds, wallSecondsToRun)
+      : command.realSeconds,
+    wallSecondsRequested: wallSecondsToRun,
     requestedTimeScale: plan.requestedTimeScale,
     effectiveTimeScale,
   });
-  lastProceduralEvents = applyProceduralWorldEvents(
-    engine.elapsedSeconds,
-  );
+  if (reachedBoundary) {
+    timeDirector.acquirePauseToken(boundary.pauseToken);
+    lastReachedBlockingBoundary = {
+      id: boundary.id,
+      atSimulationSeconds: boundary.atSimulationSeconds,
+    };
+  }
   post({
     type: "stepped",
     requestId: command.requestId,
@@ -4297,7 +4844,36 @@ function applyCompartmentInterventionEffects(
       condition: "stuck-off",
     });
   }
+  if (eventType === "sensor-drift") {
+    const candidates = compartments
+      .listSensors()
+      .filter((sensor) => sensor.condition === "nominal");
+    let digest = 0;
+    for (let index = 0; index < record.id.length; index += 1) {
+      digest = (digest + record.id.charCodeAt(index) * (index + 1)) >>> 0;
+    }
+    const count = Math.min(3, Math.max(1, 1 + (digest % 3)));
+    for (const sensor of candidates.slice(0, count)) {
+      compartments.configureSensor(sensor.id, {
+        condition: "degraded",
+        noiseStandardDeviation: Math.max(
+          sensor.noiseStandardDeviation * 4,
+          0.05,
+        ),
+        driftPerSecond: Math.max(
+          Math.abs(sensor.driftPerSecond) * 8,
+          0.002,
+        ),
+      });
+    }
+  }
   if (eventType === "micrometeoroid") {
+    const metadataTarget = request.metadata?.targetZoneId;
+    const targetZoneId: ZoneId =
+      typeof metadataTarget === "string" &&
+      (BASELINE_ZONE_IDS as readonly string[]).includes(metadataTarget)
+        ? (metadataTarget as ZoneId)
+        : ("A-05" as ZoneId);
     const areaOperation = record.operations.find(
       (operation) =>
         operation.path === "atmosphere.leakAreaSquareMeters",
@@ -4312,22 +4888,29 @@ function applyCompartmentInterventionEffects(
         : previousArea;
     const newBreachArea = Math.max(0, nextArea - previousArea);
     if (newBreachArea > 0) {
+      const breachId = `breach:micrometeoroid:${record.sequence}`;
       compartments.upsertBreach({
-        id: `breach:micrometeoroid:${record.sequence}`,
-        zoneId: "A-18",
+        id: breachId,
+        zoneId: targetZoneId,
         areaSquareMeters: newBreachArea,
         dischargeCoefficient: 0.72,
       });
-      const exposedPassengers = awakePassengersInZone("A-18").slice(
+      registerHullBreachConsequence({
+        breachId,
+        zoneId: targetZoneId,
+        areaSquareMeters: newBreachArea,
+      });
+      syncHullThrustDerates();
+      const exposedPassengers = awakePassengersInZone(targetZoneId).slice(
         0,
         3,
       );
       if (exposedPassengers.length > 0) {
         applyIncidentToRoster({
-          eventId: `${record.id}:A-18-impact`,
+          eventId: `${record.id}:${targetZoneId}-impact`,
           eventType: "micrometeoroid-compartment-impact",
           summary:
-            "A-18 压力区遭受微流星体贯穿冲击、瞬态压降与碎屑暴露。",
+            `${targetZoneId} 压力区遭受微流星体贯穿冲击、瞬态压降与碎屑暴露。`,
           targetPassengerIds: exposedPassengers.map(
             (person) => person.id,
           ),
@@ -4442,6 +5025,17 @@ function applyCoolingInterventionEffects(
     });
   }
 
+  const faultedCoolingSpurId = coolingSpurFaultTarget(request);
+  if (faultedCoolingSpurId !== null) {
+    const condition = request.metadata?.spurCondition;
+    cooling.configureHabitatThermalDeliverySpur(faultedCoolingSpurId, {
+      condition:
+        condition === "degraded" || condition === "stuck-closed"
+          ? condition
+          : "stuck-closed",
+    });
+  }
+
   if (eventType === "stellar-flare") {
     const irradianceOperation = record.operations.find(
       (operation) =>
@@ -4513,6 +5107,91 @@ function applyElectricalInterventionEffects(
     );
   }
 
+  if (eventType === "power-fluctuation") {
+    const targetSensorId =
+      typeof request.metadata?.targetSensorId === "string"
+        ? request.metadata.targetSensorId
+        : null;
+    if (targetSensorId) {
+      const sensor = electrical
+        .listSensors()
+        .find((candidate) => candidate.id === targetSensorId);
+      if (sensor && sensor.condition === "nominal") {
+        electrical.configureSensor(sensor.id, {
+          condition: "degraded",
+          noiseStandardDeviation: Math.max(
+            sensor.noiseStandardDeviation * 4,
+            0.05,
+          ),
+          driftPerSecond: Math.max(
+            Math.abs(sensor.driftPerSecond) * 8,
+            0.002,
+          ),
+        });
+      }
+    }
+
+    const powerAction =
+      typeof request.metadata?.powerAction === "string"
+        ? request.metadata.powerAction
+        : "reactor-derate";
+    if (powerAction === "battery-degrade") {
+      const batteryId =
+        typeof request.metadata?.targetBatteryId === "string"
+          ? (request.metadata.targetBatteryId as ElectricalBatteryId)
+          : "battery-a";
+      electrical.setBatteryFault(batteryId, "degraded", request.reason);
+    } else if (powerAction === "reactor-trip") {
+      const reactorId =
+        typeof request.metadata?.targetReactorId === "string"
+          ? (request.metadata.targetReactorId as FusionReactorId)
+          : "fusion-2";
+      const reactor = electrical
+        .listReactors()
+        .find((candidate) => candidate.id === reactorId);
+      if (reactor && reactor.condition === "nominal") {
+        electrical.tripReactor(reactorId, request.reason);
+      }
+    } else {
+      const reactorId =
+        typeof request.metadata?.targetReactorId === "string"
+          ? (request.metadata.targetReactorId as FusionReactorId)
+          : "fusion-3";
+      const reactor = electrical
+        .listReactors()
+        .find((candidate) => candidate.id === reactorId);
+      if (
+        reactor &&
+        reactor.condition === "nominal" &&
+        reactor.mode === "online"
+      ) {
+        const deratedTargetKw = Math.max(
+          0,
+          Math.min(reactor.ratedOutputKw, reactor.targetOutputKw * 0.85),
+        );
+        electrical.executeControlCommand({
+          type: "set-reactor-target",
+          reactorId,
+          targetOutputKw: deratedTargetKw,
+        });
+      }
+    }
+  }
+
+  if (eventType === "hibernation-complication") {
+    const targetLoadId =
+      request.metadata?.targetLoadId === "hibernation-b"
+        ? "hibernation-b"
+        : "hibernation-a";
+    const load = electrical.getLoad(targetLoadId);
+    const breaker = electrical
+      .listBreakers()
+      .find((candidate) => candidate.id === load.breakerId);
+    if (breaker && breaker.condition === "nominal") {
+      electrical.tripBreaker(load.breakerId, request.reason);
+    }
+  }
+
   if (request.metadata?.mode === "direct-force") {
     const generationOperation = record.operations.find(
       (operation) => operation.path === "power.generationKw",
@@ -4578,10 +5257,10 @@ function jumpInterlockFailures(
     requestedDistanceLightYears,
     remainingDistanceLightYears,
   );
-  const energyConsumedKWh =
-    state.journey.requiredChargePerJumpKWh *
-    (0.35 +
-      0.65 * (actualDistanceLightYears / 5) ** 2);
+  const energyConsumedKWh = jumpEnergyConsumedKWh({
+    requiredChargePerJumpKWh: state.journey.requiredChargePerJumpKWh,
+    distanceLightYears: actualDistanceLightYears,
+  });
   if (state.journey.status !== "ready") {
     failures.push("跃迁场储能状态不是 ready");
   }
@@ -4595,17 +5274,26 @@ function jumpInterlockFailures(
     failures.push("跃迁场储能不足");
   }
 
+  const hullBreaches = compartments.listBreaches();
+  const hullJump = hullConsequence.getTelemetry(
+    engine.elapsedMicroseconds,
+    hullBreaches,
+  );
+  if (hullJump.jumpBlocked && hullJump.jumpBlockReason) {
+    failures.push(hullJump.jumpBlockReason);
+  }
+
   const thermalBus = cooling
     .listNodes()
     .find((node) => node.id === "thermal-bus");
   if (!thermalBus) {
     failures.push("主热汇流排不可用");
   } else {
-    const projectedWasteHeatJ =
-      energyConsumedKWh * 3_600_000 * 0.008;
-    const projectedTemperatureK =
-      thermalBus.temperatureK +
-      projectedWasteHeatJ / thermalBus.heatCapacityJPerK;
+    const projectedTemperatureK = projectJumpThermalBusTemperatureK({
+      thermalBusTemperatureK: thermalBus.temperatureK,
+      energyConsumedKWh,
+      heatCapacityJPerK: thermalBus.heatCapacityJPerK,
+    });
     if (
       projectedTemperatureK >
       JUMP_MAXIMUM_THERMAL_BUS_TEMPERATURE_K
@@ -4714,6 +5402,81 @@ function selectMaintenanceCrew(assetId: MaintenanceAssetId) {
     );
   }
   return selected;
+}
+
+function selectMaintenanceCrewById(
+  assetId: MaintenanceAssetId,
+  passengerId: string,
+) {
+  const spec = MAINTENANCE_ASSET_SPECS[assetId];
+  const person = passengers.getPassenger(passengerId);
+  if (person.lifeState !== "awake") {
+    throw new Error(`${passengerId} is not awake for maintenance duty`);
+  }
+  const skill = person.skills
+    .filter((candidate) => spec.preferredSkillIds.includes(candidate.id))
+    .sort((left, right) => right.proficiency - left.proficiency)[0];
+  if (!skill) {
+    throw new Error(`${passengerId} lacks a qualified skill for ${assetId}`);
+  }
+  return {
+    passengerId,
+    skillId: skill.id,
+    proficiency: skill.proficiency,
+  };
+}
+
+function scheduleIndividualHibernation(
+  personId: string,
+  action: "wake" | "hibernate",
+): void {
+  const person = passengers.getPassenger(personId);
+  const podId =
+    action === "hibernate"
+      ? passengers.getAvailablePodIds(1)[0]
+      : undefined;
+  if (action === "hibernate" && !podId) {
+    throw new Error("no hibernation pod is available");
+  }
+  passengers.scheduleHibernationTransition({
+    passengerId: person.id,
+    action,
+    startAtMicroseconds: passengers.nowMicroseconds,
+    ...(podId ? { podId } : {}),
+  });
+}
+
+function configureSensorPackageFrequency(
+  packageId: Parameters<CaptainOperations["setSensorSampleInterval"]>[0],
+  sampleIntervalSeconds: number,
+): number {
+  const sampleIntervalMicroseconds = Math.round(sampleIntervalSeconds * 1_000_000);
+  if (packageId === "navigation-array" || packageId === "external-radar") {
+    for (const sensor of navigation.listSensors()) {
+      navigation.configureSensor(sensor.id, { sampleIntervalMicroseconds });
+    }
+    if (packageId === "navigation-array") {
+      for (const sensor of rotation.listSensors()) {
+        rotation.configureSensor(sensor.id, { sampleIntervalMicroseconds });
+      }
+    }
+  } else if (packageId === "thermal-diagnostic-array") {
+    for (const sensor of cooling.listSensors()) {
+      cooling.configureSensor(sensor.id, { sampleIntervalMicroseconds });
+    }
+  } else if (
+    packageId === "atmosphere-diagnostic-array" ||
+    packageId === "hull-inspection-array"
+  ) {
+    for (const sensor of compartments.listSensors()) {
+      compartments.configureSensor(sensor.id, { sampleIntervalMicroseconds });
+    }
+  } else {
+    for (const sensor of electrical.listSensors()) {
+      electrical.configureSensor(sensor.id, { sampleIntervalMicroseconds });
+    }
+  }
+  return captainOperations.setSensorSampleInterval(packageId, sampleIntervalSeconds);
 }
 
 function executeShipCommand(
@@ -4899,16 +5662,23 @@ function executeShipCommand(
   }
 
   if (command.kind === "set-cooling-pump-speed") {
+    const serviceLimit = maintenance.getAssetServiceLimitFraction(
+      command.pumpId,
+    );
+    const commandedSpeedFraction = Math.min(
+      command.commandedSpeedFraction,
+      serviceLimit,
+    );
     cooling.configurePump(command.pumpId, {
-      commandedSpeedFraction: command.commandedSpeedFraction,
+      commandedSpeedFraction,
     });
     synchronizeThermalAggregate();
     return {
       kind: command.kind,
       actorAgentId: command.actorAgentId,
-      summary: `冷却泵 ${command.pumpId} 的转速指令已设为 ${(command.commandedSpeedFraction * 100).toFixed(1)}%；实际流量仍受泵体故障与回路状态限制。`,
+      summary: `冷却泵 ${command.pumpId} 的转速指令已设为 ${(commandedSpeedFraction * 100).toFixed(1)}%${commandedSpeedFraction < command.commandedSpeedFraction ? `（替代维修降额上限 ${(serviceLimit * 100).toFixed(1)}%）` : ""}；实际流量仍受泵体故障与回路状态限制。`,
       pumpId: command.pumpId,
-      commandedSpeedFraction: command.commandedSpeedFraction,
+      commandedSpeedFraction,
     };
   }
 
@@ -4994,10 +5764,16 @@ function executeShipCommand(
         "air-handler flow command must be a finite fraction between 0 and 1",
       );
     }
+    const serviceLimit = maintenance.getAssetServiceLimitFraction(
+      command.airHandlerId,
+    );
     const handler = compartments.configureAirHandler(
       command.airHandlerId,
       {
-        commandedFlowFraction: command.commandedFlowFraction,
+        commandedFlowFraction: Math.min(
+          command.commandedFlowFraction,
+          serviceLimit,
+        ),
         scrubberEnabled: command.scrubberEnabled,
       },
     );
@@ -5021,9 +5797,12 @@ function executeShipCommand(
         "water-processor throughput command must be a finite fraction between 0 and 1",
       );
     }
+    const serviceLimit = maintenance.getAssetServiceLimitFraction(
+      command.processorId,
+    );
     water.configureProcessor(command.processorId, {
       commandedThroughputFraction:
-        command.commandedThroughputFraction,
+        Math.min(command.commandedThroughputFraction, serviceLimit),
     });
     synchronizeWaterAggregate();
     const processor = water.getProcessor(command.processorId);
@@ -5037,6 +5816,112 @@ function executeShipCommand(
     };
   }
 
+  if (command.kind === "configure-water-distribution-spur") {
+    const hasOpenFraction = command.commandedOpenFraction !== undefined;
+    const hasCondition = command.condition !== undefined;
+    if (!hasOpenFraction && !hasCondition) {
+      throw new Error(
+        "configure-water-distribution-spur requires commandedOpenFraction and/or condition",
+      );
+    }
+    if (hasOpenFraction) {
+      if (
+        !Number.isFinite(command.commandedOpenFraction) ||
+        command.commandedOpenFraction! < 0 ||
+        command.commandedOpenFraction! > 1
+      ) {
+        throw new RangeError(
+          "water-distribution-spur open fraction must be a finite fraction between 0 and 1",
+        );
+      }
+    }
+    if (hasCondition && command.condition !== "nominal") {
+      throw new Error(
+        "crew may only repair water distribution spur condition to nominal; fault injection requires god intervention",
+      );
+    }
+    water.configureDistributionSpur(command.spurId, {
+      ...(hasOpenFraction
+        ? { commandedOpenFraction: command.commandedOpenFraction }
+        : {}),
+      ...(hasCondition ? { condition: "nominal" } : {}),
+    });
+    synchronizeWaterAggregate();
+    const spur = water.getDistributionSpur(command.spurId);
+    const effective = effectiveDeliveryFraction(spur);
+    const parts: string[] = [];
+    if (hasOpenFraction) {
+      parts.push(
+        `开度指令 ${(spur.commandedOpenFraction * 100).toFixed(1)}%`,
+      );
+    }
+    if (hasCondition) {
+      parts.push(`工况已修复为 nominal`);
+    }
+    return {
+      kind: command.kind,
+      actorAgentId: command.actorAgentId,
+      summary: `配水支路 ${spur.id} 已更新（${parts.join("；")}）；有效送达分数现为 ${(effective * 100).toFixed(1)}%（开度×工况倍率）。`,
+      waterDistributionSpurId: spur.id,
+      waterDistributionSpurCommandedOpenFraction: spur.commandedOpenFraction,
+      waterDistributionSpurCondition: spur.condition,
+      waterDistributionSpurEffectiveDeliveryFraction: effective,
+    };
+  }
+
+  if (command.kind === "configure-habitat-thermal-delivery-spur") {
+    const hasOpenFraction = command.commandedOpenFraction !== undefined;
+    const hasCondition = command.condition !== undefined;
+    if (!hasOpenFraction && !hasCondition) {
+      throw new Error(
+        "configure-habitat-thermal-delivery-spur requires commandedOpenFraction and/or condition",
+      );
+    }
+    if (hasOpenFraction) {
+      if (
+        !Number.isFinite(command.commandedOpenFraction) ||
+        command.commandedOpenFraction! < 0 ||
+        command.commandedOpenFraction! > 1
+      ) {
+        throw new RangeError(
+          "habitat-thermal-delivery-spur open fraction must be a finite fraction between 0 and 1",
+        );
+      }
+    }
+    if (hasCondition && command.condition !== "nominal") {
+      throw new Error(
+        "crew may only repair habitat thermal delivery spur condition to nominal; fault injection requires god intervention",
+      );
+    }
+    cooling.configureHabitatThermalDeliverySpur(command.spurId, {
+      ...(hasOpenFraction
+        ? { commandedOpenFraction: command.commandedOpenFraction }
+        : {}),
+      ...(hasCondition ? { condition: "nominal" } : {}),
+    });
+    const spur = cooling.getHabitatThermalDeliverySpur(command.spurId);
+    const effective = effectiveHabitatThermalDeliveryFraction(spur);
+    const parts: string[] = [];
+    if (hasOpenFraction) {
+      parts.push(
+        `开度指令 ${(spur.commandedOpenFraction * 100).toFixed(1)}%`,
+      );
+    }
+    if (hasCondition) {
+      parts.push(`工况已修复为 nominal`);
+    }
+    return {
+      kind: command.kind,
+      actorAgentId: command.actorAgentId,
+      summary: `热送达支路 ${spur.id} 已更新（${parts.join("；")}）；有效送达分数现为 ${(effective * 100).toFixed(1)}%（开度×工况倍率）。`,
+      habitatThermalDeliverySpurId: spur.id,
+      habitatThermalDeliverySpurCommandedOpenFraction:
+        spur.commandedOpenFraction,
+      habitatThermalDeliverySpurCondition: spur.condition,
+      habitatThermalDeliverySpurEffectiveDeliveryFraction: effective,
+    };
+  }
+
   if (command.kind === "schedule-maintenance") {
     const actualCondition =
       currentMaintenanceConditions()[command.assetId];
@@ -5045,23 +5930,530 @@ function executeShipCommand(
         `${MAINTENANCE_ASSET_SPECS[command.assetId].label} 当前没有可维修故障`,
       );
     }
+    const substitution = captainOperations.getSpareSubstitution(
+      command.assetId,
+    );
     const task = maintenance.scheduleTask({
       assetId: command.assetId,
       detectedCondition: actualCondition,
       crew: selectMaintenanceCrew(command.assetId),
+      ...(substitution
+        ? {
+            requiredPartId: substitution.substitutePartId,
+            repairDeratingFraction: substitution.deratingFraction,
+          }
+        : {}),
     });
     return {
       kind: command.kind,
       actorAgentId: command.actorAgentId,
       summary:
         `维修任务 ${task.id} 已创建：${MAINTENANCE_ASSET_SPECS[task.assetId].label}，` +
-        `备件 ${task.requiredPartId} 已锁定并消耗，${task.assignedRobotId} 与 ${task.assignedCrewId} 开始累计 ` +
+        `备件 ${task.requiredPartId}${task.requiredPartId === task.nominalRequiredPartId ? "" : `（替代件，完工后降额 ${(task.repairDeratingFraction * 100).toFixed(1)}%）`} 已锁定并消耗，${task.assignedRobotId} 与 ${task.assignedCrewId} 开始累计 ` +
         `${task.requiredWorkSeconds.toFixed(0)} 秒额定工时；进度仍受乘员清醒状态和本环工业馈线约束。`,
       maintenanceAssetId: task.assetId,
       maintenanceTaskId: task.id,
       maintenanceCrewId: task.assignedCrewId,
       maintenanceRobotId: task.assignedRobotId,
     };
+  }
+
+  if (command.kind === "revise-mission") {
+    const currentMission = captainOperations.getMission();
+    const destination =
+      command.disposition === "return"
+        ? currentMission.originalOrigin
+        : command.destination;
+    const mission = captainOperations.reviseMission({
+      disposition: command.disposition,
+      destination,
+      objective: command.objective,
+      route: command.route,
+    });
+    // 目的地/起点命中星表时轻触校验：若 LLM 航距像 |dSol| 差，改用欧氏；自由文本仍放行。
+    let totalDistanceLightYears = command.totalDistanceLightYears;
+    let totalLegs = command.totalLegs;
+    if (command.disposition !== "abandon") {
+      const fromLabel =
+        command.disposition === "return"
+          ? currentMission.destination
+          : currentMission.originalOrigin;
+      const fromEntry = findStarCatalogEntry(fromLabel);
+      const toEntry = findStarCatalogEntry(destination);
+      if (fromEntry && toEntry && fromEntry.id !== toEntry.id) {
+        const catalogDistanceLy = routeDistanceLy(fromEntry.id, toEntry.id);
+        const naiveSolDelta = Math.abs(
+          toEntry.distanceFromSolLy - fromEntry.distanceFromSolLy,
+        );
+        if (Math.abs(totalDistanceLightYears - naiveSolDelta) < 0.2) {
+          totalDistanceLightYears = catalogDistanceLy;
+        }
+        totalLegs = Math.max(
+          totalLegs,
+          estimateMinLegs(totalDistanceLightYears),
+        );
+      }
+    }
+    const journey = engine.reviseJourneyPlan({
+      destination,
+      totalDistanceLightYears,
+      totalLegs,
+      abandoned: command.disposition === "abandon",
+    });
+    return {
+      kind: command.kind,
+      actorAgentId: command.actorAgentId,
+      summary: `任务方案已修订为 ${mission.disposition}：目的地 ${journey.destination}，目标“${mission.objective}”，${mission.route.length} 个航路点。`,
+      journeyStatus: journey.status,
+    };
+  }
+
+  if (command.kind === "manage-department-order") {
+    if (command.action === "create") {
+      if (!command.departmentId || !command.title || !command.instruction) {
+        throw new Error("creating a department order requires department, title, and instruction");
+      }
+      const order = captainOperations.createDepartmentOrder({
+        departmentId: command.departmentId,
+        title: command.title,
+        instruction: command.instruction,
+        priority: command.priority ?? "priority",
+        deadlineSeconds: command.deadlineSeconds ?? 3_600,
+        estimatedWorkSeconds: command.estimatedWorkSeconds ?? 1_800,
+        reportingIntervalSeconds: command.reportingIntervalSeconds ?? 600,
+      });
+      return {
+        kind: command.kind,
+        actorAgentId: command.actorAgentId,
+        summary: `部门命令 ${order.id} 已下达给 ${order.departmentId}，期限和定期回报均进入世界时钟。`,
+      };
+    }
+    if (!command.orderId) throw new Error("department order action requires orderId");
+    if (command.action === "change") {
+      const order = captainOperations.changeDepartmentOrder({
+        orderId: command.orderId,
+        instruction: command.instruction,
+        priority: command.priority,
+        deadlineSeconds: command.deadlineSeconds,
+        reportingIntervalSeconds: command.reportingIntervalSeconds,
+      });
+      return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `部门命令 ${order.id} 已变更。` };
+    }
+    if (command.action === "cancel") {
+      const order = captainOperations.cancelDepartmentOrder(
+        command.orderId,
+        command.reason ?? "舰长取消",
+      );
+      return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `部门命令 ${order.id} 已取消：${order.cancelledReason}` };
+    }
+    const report = captainOperations.reportDepartmentOrder(command.orderId);
+    return { kind: command.kind, actorAgentId: command.actorAgentId, summary: report.summary };
+  }
+
+  if (command.kind === "publish-communication") {
+    const record = captainOperations.recordCommunication({
+      kind: command.communicationKind,
+      audienceOrTarget: command.audienceOrTarget,
+      subject: command.subject,
+      message: command.message,
+      deliveryDelaySeconds: command.deliveryDelaySeconds,
+      relatedGrievanceId: command.relatedGrievanceId,
+    });
+    return {
+      kind: command.kind,
+      actorAgentId: command.actorAgentId,
+      summary: `${record.kind} ${record.id} 已${record.deliveredAtMicroseconds === null ? "排程" : "送达"}至 ${record.audienceOrTarget}。`,
+    };
+  }
+
+  if (command.kind === "file-passenger-grievance") {
+    if (command.actorAgentId !== command.passengerId) {
+      throw new Error(
+        `file-passenger-grievance actor ${command.actorAgentId} cannot file for ${command.passengerId}`,
+      );
+    }
+    passengers.getPassenger(command.passengerId);
+    const grievance = captainOperations.fileGrievance({
+      passengerId: command.passengerId,
+      category: command.category,
+      summary: command.summary,
+    });
+    return {
+      kind: command.kind,
+      actorAgentId: command.actorAgentId,
+      summary: `乘客申诉 ${grievance.id} 已登记（${grievance.category}）。`,
+    };
+  }
+
+  if (command.kind === "manage-crew-assignment") {
+    const person = passengers.getPassenger(command.personId);
+    if (person.lifeState === "deceased") throw new Error(`${person.id} is deceased`);
+    const assignment = captainOperations.assignCrew({
+      personId: command.personId,
+      departmentId: command.departmentId,
+      role: command.role,
+      shiftId: command.shiftId,
+      dutyZoneId: command.dutyZoneId,
+      departmentHead: command.departmentHead,
+    });
+    return {
+      kind: command.kind,
+      actorAgentId: command.actorAgentId,
+      summary: `${person.name} 已调任 ${assignment.departmentId}/${assignment.role}，班次 ${assignment.shiftId}${assignment.isDepartmentHead ? "，并接任部门负责人" : ""}。`,
+    };
+  }
+
+  if (command.kind === "manage-person") {
+    const person = passengers.getPassenger(command.personId);
+    if (command.action === "wake" || command.action === "hibernate") {
+      scheduleIndividualHibernation(person.id, command.action);
+      return {
+        kind: command.kind,
+        actorAgentId: command.actorAgentId,
+        summary: `${person.name} 的${command.action === "wake" ? "唤醒" : "休眠"}流程已进入医疗设备时序。`,
+      };
+    }
+    if (command.action === "triage") {
+      if (!command.triageLevel) throw new Error("triage requires triageLevel");
+      captainOperations.setPersonDisposition({
+        personId: person.id,
+        triageLevel: command.triageLevel,
+      });
+      return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `${person.name} 已标记为 ${command.triageLevel} 分诊等级。` };
+    }
+    if (command.action === "treat") {
+      if (!command.treatmentPlan) throw new Error("treatment requires a treatmentPlan");
+      captainOperations.setPersonDisposition({
+        personId: person.id,
+        treatmentPlan: command.treatmentPlan,
+        treatmentStatus: "scheduled",
+      });
+      const task = captainOperations.scheduleTask({
+        kind: "medical-treatment",
+        targetId: person.id,
+        description: `治疗 ${person.name}：${command.treatmentPlan}`,
+        deadlineSeconds: 14_400,
+        requiredWorkSeconds: 1_800,
+        priority: command.priority ?? "priority",
+        assignedDepartmentId: "medical",
+        effect: { personId: person.id },
+      });
+      return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `医疗任务 ${task.id} 已为 ${person.name} 建立，治疗效果将在工时完成后写入个体状态。` };
+    }
+    if (!command.zoneId) throw new Error(`${command.action} requires a destination zone`);
+    const fromZoneId = currentZoneForPerson(person);
+    const routeConnectionIds = findPersonnelRoute(
+      fromZoneId,
+      command.zoneId,
+      captainOperations.snapshot(),
+    );
+    const task = captainOperations.scheduleTask({
+      kind: "relocation",
+      targetId: person.id,
+      description: `${command.action === "evacuate" ? "疏散" : "转移"} ${person.name} 至 ${command.zoneId}`,
+      deadlineSeconds: 3_600,
+      requiredWorkSeconds:
+        (command.action === "evacuate" ? 60 : 120) +
+        routeConnectionIds.length * (command.action === "evacuate" ? 20 : 45),
+      priority: command.priority ?? (command.action === "evacuate" ? "emergency" : "priority"),
+      assignedDepartmentId: command.action === "evacuate" ? "security" : "medical",
+      effect: {
+        personId: person.id,
+        fromZoneId,
+        zoneId: command.zoneId,
+        evacuation: command.action === "evacuate",
+        routeConnectionIds: routeConnectionIds.join(","),
+      },
+    });
+    return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `人员行动 ${task.id} 已开始：${fromZoneId} → ${command.zoneId}，经过 ${routeConnectionIds.length} 个舱门/连接；任一路段关闭、密封、受限或卡死都会暂停进度，抵达后个体位置才会变更。` };
+  }
+
+  if (command.kind === "manage-security") {
+    if (command.action === "set-access") {
+      if (!command.connectionId || !command.accessMode) throw new Error("access control requires connectionId and accessMode");
+      const access = captainOperations.setAccessControl({
+        connectionId: command.connectionId,
+        accessMode: command.accessMode,
+        reason: command.reason,
+      });
+      if (access.accessMode === "open" || access.accessMode === "sealed") {
+        compartments.configureConnection(access.connectionId, {
+          commandedOpenFraction: access.accessMode === "open" ? 1 : 0,
+        });
+      } else {
+        compartments.configureConnection(access.connectionId, {
+          commandedOpenFraction: 0,
+        });
+      }
+      return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `${access.connectionId} 门禁已设为 ${access.accessMode}。` };
+    }
+    if (command.action === "detain" || command.action === "release") {
+      if (!command.personId) throw new Error(`${command.action} requires personId`);
+      const person = passengers.getPassenger(command.personId);
+      captainOperations.setPersonDisposition({
+        personId: person.id,
+        detained: command.action === "detain",
+        detentionReason: command.action === "detain" ? command.reason : null,
+      });
+      return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `${person.name} 已${command.action === "detain" ? "依法拘留" : "解除拘留"}。` };
+    }
+    let caseId = command.caseId;
+    if (command.action === "investigate" && !caseId) {
+      caseId = captainOperations.openSecurityCase({
+        subjectPersonId: command.personId,
+        zoneId: command.zoneId,
+        allegation: command.reason,
+      }).id;
+    }
+    if (!command.teamId) throw new Error(`${command.action} requires teamId`);
+    const team = captainOperations.deploySecurityTeam({
+      teamId: command.teamId,
+      zoneId: command.zoneId ?? null,
+      posture:
+        command.action === "investigate"
+          ? "investigate"
+          : command.action === "protect"
+            ? "protect"
+            : "patrol",
+      caseId,
+    });
+    if (command.action === "investigate") {
+      if (!caseId) throw new Error("investigation requires a security case");
+      captainOperations.markSecurityCaseInvestigating(caseId);
+      const task = captainOperations.scheduleTask({
+        kind: "security-investigation",
+        targetId: caseId,
+        description: `${team.id} 调查 ${caseId}：${command.reason}`,
+        deadlineSeconds: 7_200,
+        requiredWorkSeconds: 1_800,
+        priority: "priority",
+        assignedDepartmentId: "security",
+        effect: { caseId, teamId: team.id, zoneId: command.zoneId ?? null },
+      });
+      return {
+        kind: command.kind,
+        actorAgentId: command.actorAgentId,
+        summary: `${team.id} 已接管 ${caseId}，调查任务 ${task.id} 将按值班与舰内供电累计工时；结案前不会凭空生成结论。`,
+      };
+    }
+    return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `${team.id} 已部署至 ${team.assignedZoneId ?? "机动待命区"}，姿态 ${team.posture}${caseId ? `，案件 ${caseId}` : ""}。` };
+  }
+
+  if (command.kind === "manage-logistics") {
+    if (command.action === "set-ration") {
+      const value = captainOperations.setRation(command.rationKgPerPersonDay ?? NaN);
+      return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `食品配给已设为每名清醒人员每日 ${value.toFixed(3)} kg。` };
+    }
+    if (command.action === "configure-agriculture") {
+      if (!command.agricultureBayId || !command.crop) throw new Error("agriculture configuration is incomplete");
+      const bay = captainOperations.configureAgriculture({
+        bayId: command.agricultureBayId,
+        crop: command.crop,
+        intensityFraction: command.intensityFraction ?? NaN,
+      });
+      return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `${bay.id} 已种植 ${bay.crop}，运行强度 ${(bay.intensityFraction * 100).toFixed(1)}%。` };
+    }
+    if (command.action === "move-cargo") {
+      if (!command.cargoId || !command.destinationZoneId) throw new Error("cargo move is incomplete");
+      captainOperations.moveCargo({ cargoId: command.cargoId, quantity: command.quantity ?? NaN, destinationZoneId: command.destinationZoneId });
+      return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `货物 ${command.cargoId} 的 ${command.quantity} 单位已调往 ${command.destinationZoneId}。` };
+    }
+    if (command.action === "allocate-cabin") {
+      if (!command.personId || !command.cabinId || !command.destinationZoneId) throw new Error("cabin allocation is incomplete");
+      passengers.getPassenger(command.personId);
+      const allocation = captainOperations.allocateCabin({ personId: command.personId, cabinId: command.cabinId, zoneId: command.destinationZoneId, reason: command.reason ?? "舰务调配" });
+      synchronizeCompartmentOccupants();
+      return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `${allocation.personId} 已分配 ${allocation.cabinId}/${allocation.zoneId}。` };
+    }
+    if (command.action === "manufacture-part") {
+      if (!command.fabricatorId || !command.partId) throw new Error("manufacturing request is incomplete");
+      const quantity = command.quantity ?? 1;
+      if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 32) {
+        throw new RangeError("manufacturing quantity must be an integer from 1 to 32");
+      }
+      const feedstockKg = quantity * 8;
+      captainOperations.consumeCargo("cargo:fabricator-feedstock", feedstockKg);
+      const task = captainOperations.scheduleTask({
+        kind: "manufacturing",
+        targetId: command.partId,
+        description: `${command.fabricatorId} 制造 ${command.partId}`,
+        deadlineSeconds: 28_800,
+        requiredWorkSeconds: 7_200 * quantity,
+        priority: "priority",
+        assignedDepartmentId: "engineering",
+        effect: { partId: command.partId, quantity, fabricatorId: command.fabricatorId },
+      });
+      return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `制造任务 ${task.id} 已开始，${feedstockKg} kg 原料已投入；在 ${command.fabricatorId} 获得工业供电并完成 ${task.requiredWorkSeconds.toFixed(0)} 秒工时后，备件库存增加 ${quantity}。` };
+    }
+    if (!command.assetId || !command.partId) throw new Error("spare substitution request is incomplete");
+    if (MAINTENANCE_ASSET_SPECS[command.assetId].requiredPartId === command.partId) {
+      throw new Error("substitution part must differ from the nominal repair part");
+    }
+    const rule = captainOperations.approveSpareSubstitution({ assetId: command.assetId, substitutePartId: command.partId, approved: true, deratingFraction: command.deratingFraction ?? 0.25 });
+    return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `${rule.assetId} 已批准使用 ${rule.substitutePartId}，降额 ${(rule.deratingFraction * 100).toFixed(1)}%。` };
+  }
+
+  if (command.kind === "set-compartment-connection") {
+    const connection = compartments.configureConnection(command.connectionId, { commandedOpenFraction: command.commandedOpenFraction });
+    return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `${connection.id} 开度指令已设为 ${(connection.commandedOpenFraction * 100).toFixed(1)}%；实际开度仍受卡滞状态约束。` };
+  }
+
+  if (command.kind === "schedule-hull-repair") {
+    const breach = compartments.listBreaches().find((item) => item.id === command.breachId);
+    if (!breach) throw new Error(`unknown hull breach ${command.breachId}`);
+    captainOperations.consumeCargo("cargo:hull-sealant", 1);
+    const task = captainOperations.scheduleTask({
+      kind: "hull-repair",
+      targetId: breach.id,
+      description: `封堵 ${breach.id}（${breach.areaSquareMeters.toExponential(2)} m²）`,
+      deadlineSeconds: 21_600,
+      requiredWorkSeconds: Math.max(900, Math.min(14_400, breach.areaSquareMeters * 4_000_000)),
+      priority: command.priority,
+      assignedDepartmentId: "engineering",
+      effect: { breachId: breach.id },
+    });
+    return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `船体修复任务 ${task.id} 已开始，密封材料已消耗；破口将在实际工时完成后移除。` };
+  }
+
+  if (command.kind === "set-thermal-control") {
+    if (command.targetType === "radiator") {
+      if (!command.radiatorId) throw new Error("radiator control requires radiatorId");
+      const radiator = cooling.configureRadiator(command.radiatorId, { deployedFraction: command.controlFraction, coolantConductanceFraction: command.controlFraction });
+      synchronizeThermalAggregate();
+      return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `${radiator.id} 展开与热阀指令设为 ${(command.controlFraction * 100).toFixed(1)}%。` };
+    }
+    if (!command.heatExchangerId) throw new Error("heat-exchanger control requires heatExchangerId");
+    const exchanger = cooling.configureHeatExchanger(command.heatExchangerId, { conductanceFraction: command.controlFraction });
+    synchronizeThermalAggregate();
+    return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `${exchanger.id} 热阀导通率设为 ${(command.controlFraction * 100).toFixed(1)}%。` };
+  }
+
+  if (command.kind === "set-atmosphere-supply") {
+    const requestedDelta = command.operation === "add" ? command.massKg : -command.massKg;
+    if (!Number.isFinite(command.massKg) || command.massKg <= 0) throw new RangeError("atmosphere transfer mass must be positive");
+    captainOperations.transferAtmosphereReserve(
+      command.gas,
+      command.massKg,
+      command.operation === "add" ? "to-compartment" : "from-compartment",
+    );
+    const applied = compartments.adjustZoneGasMass(command.zoneId, command.gas, requestedDelta);
+    if (Math.abs(applied - requestedDelta) > 1e-9) throw new Error(`${command.zoneId} does not contain enough ${command.gas}`);
+    synchronizeAtmosphereAggregate(capturedCarbonDioxideTotal());
+    return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `${command.zoneId} 已${command.operation === "add" ? "补充" : "回收"} ${command.massKg.toFixed(3)} kg ${command.gas}；atmosphereReserveKg 储备与舱区质量账同步更新（制氧产物须经本路径才进入舱区）。` };
+  }
+
+  if (command.kind === "set-oxygen-production") {
+    const generator = captainOperations.configureOxygenGenerator({
+      generatorId: command.generatorId,
+      enabled: command.enabled,
+      targetProductionKgPerHour: command.targetProductionKgPerHour,
+    });
+    return {
+      kind: command.kind,
+      actorAgentId: command.actorAgentId,
+      summary: `${generator.id} 已${generator.enabled ? "投入" : "停机"}，目标产氧 ${generator.targetProductionKgPerHour.toFixed(2)} kg/h；实际产量受本环生命保障馈线和净水库存约束。产出氧气只入 atmosphereReserveKg 舰载储备，不会自动进入舱区；须另发 set-atmosphere-supply 转入指定压力区。`,
+    };
+  }
+
+  if (command.kind === "distribute-water") {
+    if (command.action === "set-zone-allocation") {
+      if (!command.zoneId) throw new Error("zone water allocation requires zoneId");
+      const value = captainOperations.setWaterAllocation(command.zoneId, command.kgPerAwakePersonDay ?? NaN);
+      return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `${command.zoneId} 饮水额度已设为每名清醒人员每日 ${value.toFixed(2)} kg。` };
+    }
+    if (!command.fromRing || !command.toRing || command.massKg === undefined) throw new Error("water transfer requires both rings and massKg");
+    water.transferPotableWater(command.fromRing, command.toRing, command.massKg);
+    synchronizeWaterAggregate();
+    return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `${command.massKg.toFixed(2)} kg 净水已从 ${command.fromRing.toUpperCase()} 环转入 ${command.toRing.toUpperCase()} 环。` };
+  }
+
+  if (command.kind === "reset-protection") {
+    if (command.targetType === "reactor") {
+      if (!command.reactorId) throw new Error("reactor reset requires reactorId");
+      electrical.executeControlCommand({ type: "reset-reactor-trip", reactorId: command.reactorId });
+      synchronizeElectricalAggregate();
+      return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `${command.reactorId} 保护锁存已复位至热备，仍需另行并网和升载。` };
+    }
+    if (!command.breakerId) throw new Error("breaker reset requires breakerId");
+    electrical.executeControlCommand({ type: "reset-breaker-trip", breakerId: command.breakerId });
+    synchronizeElectricalAggregate();
+    return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `${command.breakerId} 跳闸锁存已复位且保持分闸。` };
+  }
+
+  if (command.kind === "manage-maintenance-task") {
+    if (command.action === "cancel") {
+      const task = maintenance.cancelTask(command.taskId, command.reason ?? "舰长取消维修");
+      return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `维修任务 ${task.id} 已取消；已投入备件不自动回库。` };
+    }
+    if (command.action === "set-priority") {
+      if (!command.priority) throw new Error("maintenance priority change requires priority");
+      const task = maintenance.setTaskPriority(command.taskId, command.priority);
+      return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `维修任务 ${task.id} 优先级已设为 ${task.priority}。` };
+    }
+    const current = maintenance.listTasks().find((item) => item.id === command.taskId);
+    if (!current) throw new Error(`unknown maintenance task ${command.taskId}`);
+    const crew = command.crewId
+      ? selectMaintenanceCrewById(current.assetId, command.crewId)
+      : selectMaintenanceCrewById(current.assetId, current.assignedCrewId);
+    let robotId: MaintenanceRobotId | undefined;
+    if (command.robotId !== undefined) {
+      if (!(MAINTENANCE_ROBOT_IDS as readonly string[]).includes(command.robotId)) throw new Error(`unknown maintenance robot ${command.robotId}`);
+      robotId = command.robotId as MaintenanceRobotId;
+    }
+    const task = maintenance.reassignTask({ taskId: command.taskId, crew, robotId });
+    return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `维修任务 ${task.id} 已改派给 ${task.assignedCrewId}/${task.assignedRobotId}。` };
+  }
+
+  if (command.kind === "manage-sensor-operation") {
+    if (command.action === "set-frequency") {
+      const interval = configureSensorPackageFrequency(command.packageId, command.sampleIntervalSeconds ?? NaN);
+      return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `${command.packageId} 采样周期已设为 ${interval.toFixed(1)} 秒，并写入对应实体传感器。` };
+    }
+    if (!command.target) throw new Error("active scan requires target");
+    const task = captainOperations.scheduleTask({
+      kind: "active-scan",
+      targetId: command.packageId,
+      description: `${command.packageId} 主动扫描 ${command.target}`,
+      deadlineSeconds: Math.max(60, (command.durationSeconds ?? 600) * 2),
+      requiredWorkSeconds: command.durationSeconds ?? 600,
+      priority: command.priority ?? "priority",
+      assignedDepartmentId: "navigation",
+      effect: { packageId: command.packageId, target: command.target },
+    });
+    return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `主动扫描 ${task.id} 已开始，报告将在真实扫描工时完成后生成。` };
+  }
+
+  if (command.kind === "manage-remote-asset") {
+    const asset = captainOperations.configureRemoteAsset({ assetId: command.assetId, action: command.action, mission: command.mission, target: command.target });
+    if (command.action === "retask") {
+      return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `${asset.id} 已在部署状态下改派至 ${asset.target}。` };
+    }
+    const task = captainOperations.scheduleTask({
+      kind: "remote-deployment",
+      targetId: asset.id,
+      description: `${command.action === "deploy" ? "部署" : "回收"} ${asset.id}`,
+      deadlineSeconds: 7_200,
+      requiredWorkSeconds: asset.kind === "probe" ? 1_200 : 600,
+      priority: "priority",
+      assignedDepartmentId: "navigation",
+      effect: { action: command.action, assetId: asset.id },
+    });
+    return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `${asset.id} ${command.action} 序列 ${task.id} 已开始，状态将在工时完成后切换。` };
+  }
+
+  if (command.kind === "set-power-allocation") {
+    const limit = captainOperations.setPowerAllocation(command.loadId, command.maximumDemandFraction);
+    const load = electrical.getLoad(command.loadId);
+    electrical.synchronizeLoadControllerDemandFraction(
+      command.loadId,
+      Math.min(load.controllerDemandFraction, limit),
+    );
+    synchronizeElectricalAggregate();
+    return { kind: command.kind, actorAgentId: command.actorAgentId, summary: `${command.loadId} 最大需求份额已设为 ${(limit * 100).toFixed(1)}%；后续控制请求不会越过该上限。`, loadId: command.loadId };
+  }
+
+  if (command.kind !== "set-awake-target") {
+    throw new Error(`unsupported ship command ${(command as ShipOperationalCommand).kind}`);
   }
 
   if (
@@ -5190,14 +6582,19 @@ function dispatchShipCommand(
         );
         return result as unknown as StructuredCommandResult;
       } catch (error) {
-        restoreDomainCheckpoint(checkpoint);
+        restoreDomainCheckpointOrThrow(checkpoint, error);
         throw error;
       }
     },
   );
   if (receipt.status === "rejected") {
     if (receipt.rejection.code === "INVALID_EXECUTOR_RESULT") {
-      restoreDomainCheckpoint(checkpoint);
+      restoreDomainCheckpointOrThrow(
+        checkpoint,
+        new Error(
+          `command ${receipt.rejection.code}: ${receipt.rejection.message}`,
+        ),
+      );
     }
     throw new Error(
       `command ${receipt.rejection.code}: ${receipt.rejection.message}`,

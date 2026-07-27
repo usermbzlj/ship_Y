@@ -213,6 +213,11 @@ export type MetabolicHeatAuthority =
 export interface CompartmentStepOptions {
   fidelity?: "auto" | "fine";
   externalMetabolicHeatRemovalFraction?: number;
+  /** Per-ring habitat thermal delivery; overrides the ship-wide fraction when set. */
+  externalMetabolicHeatRemovalFractionByRing?: {
+    A: number;
+    B: number;
+  };
 }
 
 export interface CompartmentFidelityRequirement {
@@ -311,6 +316,139 @@ export const BASELINE_ZONE_IDS: readonly ZoneId[] = Object.freeze([
   ...Array.from({ length: 24 }, (_, index) => makeZoneId("A", index + 1)),
   ...Array.from({ length: 24 }, (_, index) => makeZoneId("B", index + 1)),
 ]);
+
+export type ZoneRole =
+  | "living"
+  | "public"
+  | "medical"
+  | "galley"
+  | "agriculture"
+  | "cargo"
+  | "industrial"
+  | "access";
+
+export interface ZoneCatalogEntry {
+  id: ZoneId;
+  ring: "A" | "B";
+  index: number;
+  role: ZoneRole;
+  labelZh: string;
+  purposeZh: string;
+}
+
+export const ZONE_ROLE_LABELS_ZH: Record<ZoneRole, string> = {
+  living: "居住舱带",
+  public: "公共区",
+  medical: "医疗舱",
+  galley: "膳食服务",
+  agriculture: "农业舱",
+  cargo: "加压货舱",
+  industrial: "工业设备间",
+  access: "换乘通道",
+};
+
+const ZONE_ROLE_BY_INDEX: readonly ZoneRole[] = Object.freeze([
+  ...Array.from({ length: 10 }, () => "living" as const),
+  ...Array.from({ length: 3 }, () => "public" as const),
+  ...Array.from({ length: 2 }, () => "medical" as const),
+  "galley",
+  ...Array.from({ length: 2 }, () => "agriculture" as const),
+  ...Array.from({ length: 2 }, () => "cargo" as const),
+  ...Array.from({ length: 2 }, () => "industrial" as const),
+  ...Array.from({ length: 2 }, () => "access" as const),
+]);
+
+const ZONE_PURPOSE_ZH: Record<ZoneRole, string> = {
+  living: "乘客长期居住与睡眠舱带。",
+  public: "公共社交、集会与休闲活动区。",
+  medical: "医疗诊疗、监护与急救处置区。",
+  galley: "膳食制备与日常生活服务区。",
+  agriculture: "食品生产与运营农业 bay 舱段。",
+  cargo: "加压货物存储与物资周转舱。",
+  industrial: "环控与水处理设备间，可达 AHU 与水机。",
+  access: "辐条换乘通道，连接工程脊柱但非脊柱本体。",
+};
+
+function makeZoneCatalogEntry(
+  ring: "A" | "B",
+  index: number,
+): ZoneCatalogEntry {
+  const role = ZONE_ROLE_BY_INDEX[index - 1]!;
+  return {
+    id: makeZoneId(ring, index),
+    ring,
+    index,
+    role,
+    labelZh: ZONE_ROLE_LABELS_ZH[role],
+    purposeZh: ZONE_PURPOSE_ZH[role],
+  };
+}
+
+export const ZONE_CATALOG: readonly ZoneCatalogEntry[] = Object.freeze(
+  (["A", "B"] as const).flatMap((ring) =>
+    Array.from({ length: 24 }, (_, index) =>
+      makeZoneCatalogEntry(ring, index + 1),
+    ),
+  ),
+);
+
+const ZONE_CATALOG_BY_ID = new Map(
+  ZONE_CATALOG.map((entry) => [entry.id, entry]),
+);
+
+export function zoneCatalogEntry(zoneId: ZoneId): ZoneCatalogEntry {
+  const entry = ZONE_CATALOG_BY_ID.get(zoneId);
+  if (!entry) {
+    throw new RangeError(`unknown zone id: ${zoneId}`);
+  }
+  return entry;
+}
+
+export function zoneIdsForRole(
+  role: ZoneRole,
+  ring?: "A" | "B",
+): ZoneId[] {
+  return ZONE_CATALOG.filter(
+    (entry) =>
+      entry.role === role && (ring === undefined || entry.ring === ring),
+  ).map((entry) => entry.id);
+}
+
+/** Crew duty zones, ordered by role preference within each ring. */
+const CREW_ZONE_INDICES: readonly number[] = Object.freeze([
+  21,
+  22, // industrial
+  23,
+  24, // access
+  14,
+  15, // medical
+  16, // galley
+]);
+
+/** Passenger zones: living first, then public. */
+const HAB_ZONE_INDICES: readonly number[] = Object.freeze([
+  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, // living
+  11, 12, 13, // public
+]);
+
+const CABIN_ID_PATTERN = /^(CREW|HAB)-(\d{2})-(\d{4})$/;
+
+/**
+ * Map a cabin id to a pressure zone by layout role, not random hash.
+ * Even cabin indices prefer ring A; odd prefer ring B.
+ */
+export function resolveZoneIdForCabin(cabinId: string): ZoneId {
+  const match = CABIN_ID_PATTERN.exec(cabinId);
+  if (!match) {
+    throw new TypeError(`invalid cabin id: ${cabinId}`);
+  }
+  const kind = match[1] as "CREW" | "HAB";
+  const cabinIndex = Number(match[3]);
+  const ring: "A" | "B" = cabinIndex % 2 === 0 ? "A" : "B";
+  const pool = kind === "CREW" ? CREW_ZONE_INDICES : HAB_ZONE_INDICES;
+  const zoneIndex = pool[(cabinIndex - 1) % pool.length]!;
+  return makeZoneId(ring, zoneIndex);
+}
 
 function sensorId(zoneId: ZoneId, quantity: SensorQuantity): string {
   return `sensor:${zoneId}:${quantity}`;
@@ -641,6 +779,7 @@ function applyMetabolism(
   deltaSeconds: number,
   ledger: MetabolicExchangeLedger,
   retainedSensibleHeatFraction: number,
+  externalTransferredJ: { value: number } | null,
 ): number {
   const demandedOxygen =
     zone.awakeOccupants *
@@ -672,6 +811,11 @@ function applyMetabolism(
   ledger.carbonDioxideProducedKg += producedCarbonDioxide;
   ledger.waterVaporProducedKg += producedWaterVapor;
   ledger.sensibleHeatAddedJ += sensibleHeat;
+
+  if (externalTransferredJ) {
+    externalTransferredJ.value +=
+      sensibleHeat * (1 - retainedSensibleHeatFraction);
+  }
 
   // Removed and produced gases cross the passenger/atmosphere boundary at
   // local gas temperature. Explicit metabolic heat is then added.
@@ -1651,25 +1795,18 @@ export class CompartmentAtmosphereNetwork {
     ) {
       reasons.push("connection-fault");
     }
-    if (
-      this.stateValue.sensors.some(
-        (sensor) =>
-          sensor.condition !== "nominal" ||
-          Math.ceil(
-            sensor.delayMicroseconds /
-              sensor.sampleIntervalMicroseconds,
-          ) > 64,
-      )
-    ) {
-      reasons.push("sensor-fault-or-long-delay");
-    }
+    // Sensor faults degrade observations only. They must not force the fine
+    // solver or silently clamp the player-selected time scale (same rationale
+    // as keeping equilibrated breaches off the blanket fast-path blocker).
     if (!this.isNearEquilibrium()) {
       reasons.push("pressure-temperature-or-composition-gradient");
     }
     return {
       requiresFineSolver: reasons.length > 0,
       maximumSimulatedSecondsPerStep:
-        reasons.length > 0 ? 60 : null,
+        reasons.length > 0 && !reasons.includes("active-breach")
+          ? 60
+          : null,
       reasons,
     };
   }
@@ -1817,6 +1954,28 @@ export class CompartmentAtmosphereNetwork {
     return targetMassKg - currentMassKg;
   }
 
+  adjustZoneGasMass(
+    zoneId: ZoneId,
+    gas: GasSpecies,
+    deltaMassKg: number,
+  ): number {
+    if (!GAS_SPECIES.includes(gas)) {
+      throw new TypeError(`unknown gas species: ${gas}`);
+    }
+    if (!Number.isFinite(deltaMassKg)) {
+      throw new TypeError("deltaMassKg must be finite");
+    }
+    if (deltaMassKg === 0) return 0;
+    const next = this.snapshot();
+    const zone = findById(next.zones, zoneId, "pressure zone");
+    const applied = Math.max(-zone.gasesKg[gas], deltaMassKg);
+    zone.gasesKg[gas] += applied;
+    next.revision += 1;
+    validateCompartmentSnapshot(next);
+    this.stateValue = next;
+    return applied;
+  }
+
   removeGasProportionally(
     gas: GasSpecies,
     maximumMassKg: number,
@@ -1949,6 +2108,18 @@ export class CompartmentAtmosphereNetwork {
     );
   }
 
+  setSensorCondition(
+    sensorId: string,
+    condition: SensorCondition,
+    options?: { stuckValue?: number | null },
+  ): void {
+    const patch: SensorPatch = { condition };
+    if (options && "stuckValue" in options) {
+      patch.stuckValue = options.stuckValue ?? null;
+    }
+    this.configureSensor(sensorId, patch);
+  }
+
   private captureCarbonDioxide(
     deltaSeconds: number,
   ): ReadonlyMap<ZoneId, number> {
@@ -2024,24 +2195,52 @@ export class CompartmentAtmosphereNetwork {
     ) {
       throw new TypeError("step fidelity must be auto or fine");
     }
+    const externalHeatRemovalByRing =
+      options.externalMetabolicHeatRemovalFractionByRing;
+    if (externalHeatRemovalByRing !== undefined) {
+      assertFraction(
+        externalHeatRemovalByRing.A,
+        "externalMetabolicHeatRemovalFractionByRing.A",
+      );
+      assertFraction(
+        externalHeatRemovalByRing.B,
+        "externalMetabolicHeatRemovalFractionByRing.B",
+      );
+    }
     const externalHeatRemovalFraction =
       options.externalMetabolicHeatRemovalFraction ?? 1;
-    assertFraction(
-      externalHeatRemovalFraction,
-      "externalMetabolicHeatRemovalFraction",
-    );
+    if (externalHeatRemovalByRing === undefined) {
+      assertFraction(
+        externalHeatRemovalFraction,
+        "externalMetabolicHeatRemovalFraction",
+      );
+    }
     if (
       this.stateValue.metabolicHeatAuthority === "zone-gas" &&
-      options.externalMetabolicHeatRemovalFraction !== undefined
+      (options.externalMetabolicHeatRemovalFraction !== undefined ||
+        externalHeatRemovalByRing !== undefined)
     ) {
       throw new Error(
         "external metabolic heat removal requires external-network authority",
       );
     }
-    const retainedSensibleHeatFraction =
+    const heatRemovalForZone = (zone: PressureZone): number => {
+      if (this.stateValue.metabolicHeatAuthority === "zone-gas") {
+        return 0;
+      }
+      if (externalHeatRemovalByRing !== undefined) {
+        return externalHeatRemovalByRing[zoneCatalogEntry(zone.id).ring];
+      }
+      return externalHeatRemovalFraction;
+    };
+    const retainedSensibleHeatForZone = (zone: PressureZone): number =>
       this.stateValue.metabolicHeatAuthority === "zone-gas"
         ? 1
-        : 1 - externalHeatRemovalFraction;
+        : 1 - heatRemovalForZone(zone);
+    const externalTransferredJ =
+      this.stateValue.metabolicHeatAuthority === "external-network"
+        ? { value: 0 }
+        : null;
     const durationMicroseconds = Math.round(
       simulatedSeconds * MICROSECONDS_PER_SECOND,
     );
@@ -2080,7 +2279,8 @@ export class CompartmentAtmosphereNetwork {
           this.advanceEquilibriumFast(
             targetMicroseconds,
             internalTransferredGasesKg,
-            retainedSensibleHeatFraction,
+            retainedSensibleHeatForZone,
+            externalTransferredJ,
           );
           equilibriumIntervals += 1;
           continue;
@@ -2112,7 +2312,8 @@ export class CompartmentAtmosphereNetwork {
       this.advancePhysics(
         (boundary - now) / MICROSECONDS_PER_SECOND,
         internalTransferredGasesKg,
-        retainedSensibleHeatFraction,
+        retainedSensibleHeatForZone,
+        externalTransferredJ,
       );
       this.stateValue.elapsedMicroseconds = boundary;
       fineSubsteps += 1;
@@ -2154,30 +2355,20 @@ export class CompartmentAtmosphereNetwork {
       ),
       metabolicExchange,
       capturedCarbonDioxideKg,
-      metabolicHeatTransferredToExternalJ:
-        this.stateValue.metabolicHeatAuthority === "external-network"
-          ? metabolicExchange.sensibleHeatAddedJ *
-            externalHeatRemovalFraction
-          : 0,
+      metabolicHeatTransferredToExternalJ: externalTransferredJ?.value ?? 0,
       revision: this.stateValue.revision,
     };
   }
 
   private hasFastPathBlocker(): boolean {
-    if (this.stateValue.breaches.length > 0) return true;
-    if (
-      this.stateValue.connections.some(
-        (connection) => connection.condition !== "nominal",
-      )
-    ) {
-      return true;
-    }
-    return this.stateValue.sensors.some(
-      (sensor) =>
-        sensor.condition !== "nominal" ||
-        Math.ceil(
-          sensor.delayMicroseconds / sensor.sampleIntervalMicroseconds,
-        ) > 64,
+    // A breach in an otherwise equilibrated pressure component has an exact
+    // exponential mass-decay approximation in the fast path below. Keeping a
+    // breach as a blanket blocker made the game silently reduce the player's
+    // selected time scale even when the accelerated solve remained stable.
+    // Sensor degradation is observation-only and likewise must not block the
+    // fast path or throttle world time after procedural sensor-drift events.
+    return this.stateValue.connections.some(
+      (connection) => connection.condition !== "nominal",
     );
   }
 
@@ -2299,7 +2490,8 @@ export class CompartmentAtmosphereNetwork {
   private advanceEquilibriumFast(
     targetMicroseconds: number,
     internalTransferredGasesKg: GasMassesKg,
-    retainedSensibleHeatFraction: number,
+    retainedSensibleHeatForZone: (zone: PressureZone) => number,
+    externalTransferredJ: { value: number } | null,
   ): void {
     const startMicroseconds = this.stateValue.elapsedMicroseconds;
     const deltaSeconds =
@@ -2320,7 +2512,8 @@ export class CompartmentAtmosphereNetwork {
         zone,
         deltaSeconds,
         this.stateValue.metabolism,
-        retainedSensibleHeatFraction,
+        retainedSensibleHeatForZone(zone),
+        externalTransferredJ,
       ),
     );
     const capturedByZone = this.captureCarbonDioxide(deltaSeconds);
@@ -2362,8 +2555,62 @@ export class CompartmentAtmosphereNetwork {
                 this.stateValue.zones[index].temperatureK *
                   (this.stateValue.zones[index].volumeCubicMeters /
                     totalVolumeCubicMeters),
-              0,
+                0,
             );
+
+      const componentZoneIds = new Set(
+        component.map((index) => this.stateValue.zones[index].id),
+      );
+      const totalBreachCoefficient = this.stateValue.breaches.reduce(
+        (total, breach) =>
+          componentZoneIds.has(breach.zoneId)
+            ? total +
+              breach.dischargeCoefficient * breach.areaSquareMeters
+            : total,
+        0,
+      );
+      if (
+        totalBreachCoefficient > 0 &&
+        componentMassKg > MIN_GAS_MASS_KG &&
+        totalVolumeCubicMeters > 0
+      ) {
+        const densityKgPerCubicMeter =
+          componentMassKg / totalVolumeCubicMeters;
+        const pressurePa = GAS_SPECIES.reduce(
+          (total, gas) =>
+            total +
+            (componentGases[gas] *
+              GAS_CONSTANT_J_PER_KG_K[gas] *
+              commonTemperatureK) /
+              totalVolumeCubicMeters,
+          0,
+        );
+        const initialMassFlowKgPerSecond =
+          totalBreachCoefficient *
+          Math.sqrt(
+            2 * densityKgPerCubicMeter * Math.max(0, pressurePa),
+          );
+        const exponentialDecayPerSecond =
+          initialMassFlowKgPerSecond / componentMassKg;
+        const ventedFraction = Math.min(
+          1,
+          Math.max(
+            0,
+            -Math.expm1(-exponentialDecayPerSecond * deltaSeconds),
+          ),
+        );
+        const ventedGases = scaleGases(
+          componentGases,
+          ventedFraction,
+        );
+        const ventedMassKg = totalGasMass(ventedGases);
+        subtractGases(componentGases, ventedGases);
+        addGases(this.stateValue.sink.ventedGasesKg, ventedGases);
+        this.stateValue.sink.ventedThermalEnergyJ +=
+          ventedMassKg *
+          GAS_SPECIFIC_HEAT_J_PER_KG_K *
+          commonTemperatureK;
+      }
       const assignedGases = zeroGases();
 
       component.forEach((index, componentIndex) => {
@@ -2508,7 +2755,8 @@ export class CompartmentAtmosphereNetwork {
   private advancePhysics(
     deltaSeconds: number,
     internalTransferredGasesKg: GasMassesKg,
-    retainedSensibleHeatFraction: number,
+    retainedSensibleHeatForZone: (zone: PressureZone) => number,
+    externalTransferredJ: { value: number } | null,
   ): void {
     const zones = this.stateValue.zones;
     const gasesBefore = gasesInZonesAndSinks(
@@ -2532,7 +2780,8 @@ export class CompartmentAtmosphereNetwork {
         zones[index],
         deltaSeconds,
         this.stateValue.metabolism,
-        retainedSensibleHeatFraction,
+        retainedSensibleHeatForZone(zones[index]),
+        externalTransferredJ,
       );
     }
     const capturedByZone = this.captureCarbonDioxide(deltaSeconds);

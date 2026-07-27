@@ -30,8 +30,30 @@ export const FOOD_KG_PER_AWAKE_PER_DAY = 0.62;
 /** Psychological stress rise per second of active hazard (any family). */
 export const HAZARD_STRESS_RATE_PER_SECOND = 0.00004;
 
+/**
+ * Medical-zone first-aid / monitoring capacity blunts applied dose+stress;
+ * not full healing magic.
+ */
+export const MEDICAL_ZONE_SURVIVAL_DOSE_MULTIPLIER = 0.6;
+
+/**
+ * Operations `medical-treatment` completion benefit by patient ZoneRole.
+ * Full effect only in medical zones; field care elsewhere is reduced — not beds.
+ */
+export const MEDICAL_ZONE_TREATMENT_EFFECT_MULTIPLIER = 1;
+export const NON_MEDICAL_ZONE_TREATMENT_EFFECT_MULTIPLIER = 0.4;
+
+/** Scale treat/stabilize deltas: 1.0 in medical ZoneRole, 0.4 elsewhere. */
+export function medicalTreatmentEffectMultiplier(
+  patientZoneIsMedical: boolean,
+): number {
+  return patientZoneIsMedical
+    ? MEDICAL_ZONE_TREATMENT_EFFECT_MULTIPLIER
+    : NON_MEDICAL_ZONE_TREATMENT_EFFECT_MULTIPLIER;
+}
+
 /** When food stores hit zero, physical drain per awake-person-second. */
-export const STARVATION_DRAIN_PER_SECOND = 0.00005;
+export const STARVATION_DRAIN_PER_SECOND = 0.0005;
 
 export interface ZoneHazardDose {
   zoneId: string;
@@ -111,22 +133,31 @@ export function integrateHazardDose(input: {
 export function rationFoodDemandKg(
   awakeCount: number,
   deltaSeconds: number,
+  kgPerAwakePersonDay = FOOD_KG_PER_AWAKE_PER_DAY,
 ): number {
   if (awakeCount <= 0 || deltaSeconds <= 0) return 0;
-  return (awakeCount * FOOD_KG_PER_AWAKE_PER_DAY * deltaSeconds) / 86_400;
+  if (!Number.isFinite(kgPerAwakePersonDay) || kgPerAwakePersonDay < 0) {
+    throw new RangeError("ration kg per awake person day must be non-negative");
+  }
+  return (awakeCount * kgPerAwakePersonDay * deltaSeconds) / 86_400;
 }
 
 export function applyRationAndStarvation(input: {
   foodDryKg: number;
   awakeCount: number;
   deltaSeconds: number;
+  kgPerAwakePersonDay?: number;
   ledger: SurvivalLedger;
 }): {
   foodDryKg: number;
   ledger: SurvivalLedger;
   starvationPhysicalDelta: number;
 } {
-  const demand = rationFoodDemandKg(input.awakeCount, input.deltaSeconds);
+  const demand = rationFoodDemandKg(
+    input.awakeCount,
+    input.deltaSeconds,
+    input.kgPerAwakePersonDay,
+  );
   const available = Math.max(0, input.foodDryKg);
   const consumed = Math.min(available, demand);
   const shortfall = demand - consumed;

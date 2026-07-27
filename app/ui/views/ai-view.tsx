@@ -8,12 +8,104 @@ import type {
   CaptainDecisionEntry,
   LlmObservationCall,
   SystemTone,
+  CaptainJournalSnapshot,
+  CaptainWatchSnapshot,
+  DepartmentStandingSnapshot,
 } from "../types";
+import type {
+  CaptainJournalEntry,
+} from "@/lib/llm/captain-journal";
+import type {
+  DepartmentDissentRecord,
+  DepartmentStanding,
+  DissentResolution,
+  DissentSeverity,
+} from "@/lib/llm/department-standing";
+import type { CaptainWatchCondition } from "@/lib/llm/captain-watch";
+import type { DecisionTheaterState } from "@/lib/llm/decision-theater";
+import { WATCH_METRICS } from "@/lib/llm/captain-watch";
 import { AI_ROSTER } from "../constants";
 import { formatCadence, formatDuration } from "../utils";
 import { StatusPill } from "../components/status-pill";
 import { TopologyGraph } from "../components/topology-graph";
 import { ApiStatusPanel } from "../components/api-status-panel";
+import { DecisionTheater } from "../components/decision-theater";
+
+const JOURNAL_DISPLAY_LIMIT = 12;
+
+function departmentRoleLabel(departmentId: string): string {
+  return AI_ROSTER.find((agent) => agent.id === departmentId)?.role ?? departmentId;
+}
+
+function formatJournalTriggerKey(triggerKey: string): string {
+  if (triggerKey === "mission-start" || triggerKey.startsWith("mission-start")) {
+    return "任务启动";
+  }
+  if (triggerKey.startsWith("routine:")) {
+    return "例行";
+  }
+  if (triggerKey.startsWith("hull-threat")) {
+    return "壳体威胁";
+  }
+  if (triggerKey.startsWith("jump-")) {
+    return "跃迁";
+  }
+  if (triggerKey.startsWith("power-deficit")) {
+    return "电网";
+  }
+  if (triggerKey.startsWith("maintenance")) {
+    return "维修";
+  }
+  if (triggerKey.startsWith("pressure-low")) {
+    return "低压";
+  }
+  if (triggerKey.startsWith("thermal-high")) {
+    return "过热";
+  }
+  if (triggerKey.startsWith("watch:")) {
+    return "观察哨";
+  }
+  return triggerKey;
+}
+
+function dissentSeverityLabel(severity: DissentSeverity): string {
+  if (severity === "grave") {
+    return "严重";
+  }
+  if (severity === "formal") {
+    return "正式";
+  }
+  return "备注";
+}
+
+function dissentResolutionLabel(resolution: DissentResolution): string {
+  if (resolution === "vindicated") {
+    return "已证明正确";
+  }
+  if (resolution === "overridden") {
+    return "已驳回";
+  }
+  if (resolution === "moot") {
+    return "已失效";
+  }
+  return "未决";
+}
+
+function watchMetricMeta(metricId: string): { label: string; unit: string } {
+  const found = WATCH_METRICS.find((metric) => metric.id === metricId);
+  return found
+    ? { label: found.label, unit: found.unit }
+    : { label: metricId, unit: "" };
+}
+
+function standingHasActivity(standing: DepartmentStanding): boolean {
+  return (
+    standing.consultationCount > 0 ||
+    standing.dissentCount > 0 ||
+    standing.overriddenCount > 0 ||
+    standing.vindicatedCount > 0
+  );
+}
 
 function DecisionStatusBadge({
   status,
@@ -100,6 +192,11 @@ function DecisionTimeline({ entry }: { entry: CaptainDecisionEntry }) {
   const rejected = entry.receipts.filter(
     (r) => r.status === "rejected" || r.status === "invalid",
   ).length;
+  const hardStopped = entry.receipts.some(
+    (r) =>
+      r.status === "skipped" &&
+      /前序命令(?:硬失败|失败|未能派发)|仿真线程异常/.test(r.summary),
+  );
   const steps = [
     {
       key: "think",
@@ -137,7 +234,13 @@ function DecisionTimeline({ entry }: { entry: CaptainDecisionEntry }) {
       active: entry.receipts.length > 0 || entry.status === "done",
       detail:
         entry.receipts.length > 0
-          ? `✓${accepted}${rejected > 0 ? ` / ✗${rejected}` : ""}`
+          ? `✓${accepted}${
+              rejected > 0
+                ? hardStopped
+                  ? ` / ✗${rejected}`
+                  : ` · 拒${rejected}`
+                : ""
+            }`
           : entry.status === "done"
             ? "无命令"
             : "—",
@@ -164,6 +267,11 @@ function DecisionMetrics({ entry }: { entry: CaptainDecisionEntry }) {
   const failed = entry.receipts.filter(
     (r) => r.status === "rejected" || r.status === "invalid",
   ).length;
+  const hardStopped = entry.receipts.some(
+    (r) =>
+      r.status === "skipped" &&
+      /前序命令(?:硬失败|失败|未能派发)|仿真线程异常/.test(r.summary),
+  );
   return (
     <div className="decision-metrics">
       <div>
@@ -179,8 +287,16 @@ function DecisionMetrics({ entry }: { entry: CaptainDecisionEntry }) {
         <strong className="metric-ok">{accepted}</strong>
       </div>
       <div>
-        <span>拒绝</span>
-        <strong className={failed > 0 ? "metric-bad" : undefined}>
+        <span>{hardStopped ? "拒绝" : failed > 0 ? "未采纳" : "拒绝"}</span>
+        <strong
+          className={
+            failed > 0
+              ? hardStopped
+                ? "metric-bad"
+                : "metric-watch"
+              : undefined
+          }
+        >
           {failed}
         </strong>
       </div>
@@ -191,6 +307,11 @@ function DecisionMetrics({ entry }: { entry: CaptainDecisionEntry }) {
 function DecisionCard({ entry }: { entry: CaptainDecisionEntry }) {
   const [showConsultations, setShowConsultations] = useState(false);
   const detailsId = useId();
+  const hardStopped = entry.receipts.some(
+    (r) =>
+      r.status === "skipped" &&
+      /前序命令(?:硬失败|失败|未能派发)|仿真线程异常/.test(r.summary),
+  );
 
   return (
     <article className={`decision-card status-${entry.status}`}>
@@ -206,6 +327,12 @@ function DecisionCard({ entry }: { entry: CaptainDecisionEntry }) {
 
       <DecisionTimeline entry={entry} />
       <DecisionMetrics entry={entry} />
+
+      {entry.consultationNote && (
+        <div className="decision-consultation-note">
+          <span>⚠ {entry.consultationNote}</span>
+        </div>
+      )}
 
       {entry.consultations.length > 0 && (
         <div className="decision-consultations">
@@ -265,15 +392,23 @@ function DecisionCard({ entry }: { entry: CaptainDecisionEntry }) {
               const receipt = entry.receipts.find(
                 (r) => r.toolCallId === toolCall.toolCallId,
               );
+              const softRejected =
+                receipt?.status === "rejected" && !hardStopped;
               return (
                 <div className="tool-call-item" key={toolCall.toolCallId}>
                   <code>{toolCall.toolName}</code>
                   {receipt && (
-                    <span className={`tool-receipt receipt-${receipt.status}`}>
+                    <span
+                      className={`tool-receipt receipt-${receipt.status}${
+                        softRejected ? " receipt-soft-rejected" : ""
+                      }`}
+                    >
                       {receipt.status === "accepted"
                         ? "接受"
                         : receipt.status === "rejected"
-                          ? "拒绝"
+                          ? softRejected
+                            ? "未采纳"
+                            : "拒绝"
                           : receipt.status === "invalid"
                             ? "无效"
                             : receipt.status === "skipped"
@@ -353,16 +488,138 @@ function CallObservationRow({ call }: { call: LlmObservationCall }) {
   );
 }
 
+function JournalEntryCard({ entry }: { entry: CaptainJournalEntry }) {
+  return (
+    <article className="journal-entry">
+      <header className="journal-entry-head">
+        <strong>#{entry.ordinal}</strong>
+        <span className="journal-entry-time">
+          {formatDuration(entry.simulationSeconds)}
+        </span>
+        <span className="journal-entry-trigger">
+          {formatJournalTriggerKey(entry.triggerKey)}
+        </span>
+      </header>
+      <blockquote className="journal-voice">{entry.voice}</blockquote>
+      {entry.judgment ? (
+        <div className="journal-field">
+          <span>判断</span>
+          <p>{entry.judgment}</p>
+        </div>
+      ) : null}
+      {entry.watching ? (
+        <div className="journal-field">
+          <span>在等</span>
+          <p>{entry.watching}</p>
+        </div>
+      ) : null}
+      {entry.concern ? (
+        <div className="journal-field">
+          <span>担忧</span>
+          <p>{entry.concern}</p>
+        </div>
+      ) : null}
+      {entry.unresolved.length > 0 ? (
+        <div className="journal-unresolved">
+          <span className="decision-section-label">悬而未决</span>
+          <ul>
+            {entry.unresolved.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+function DissentRecordCard({ record }: { record: DepartmentDissentRecord }) {
+  return (
+    <article
+      className={`dissent-record severity-${record.severity} resolution-${record.resolution}`}
+    >
+      <div className="dissent-record-head">
+        <strong>{departmentRoleLabel(record.departmentId)}</strong>
+        <span className={`dissent-severity severity-${record.severity}`}>
+          {dissentSeverityLabel(record.severity)}
+        </span>
+        <span className={`dissent-resolution resolution-${record.resolution}`}>
+          {dissentResolutionLabel(record.resolution)}
+        </span>
+        <span className="dissent-time">
+          {formatDuration(record.simulationSeconds)}
+        </span>
+      </div>
+      <p className="dissent-summary">{record.summary}</p>
+    </article>
+  );
+}
+
+function StandingStatRow({ standing }: { standing: DepartmentStanding }) {
+  return (
+    <div className="standing-stat-row">
+      <strong>{departmentRoleLabel(standing.departmentId)}</strong>
+      <span>被咨询 {standing.consultationCount} 次</span>
+      <span>异议 {standing.dissentCount} 次</span>
+      <span>被驳回 {standing.overriddenCount} 次</span>
+      <span>被证明正确 {standing.vindicatedCount} 次</span>
+    </div>
+  );
+}
+
+function WatchConditionCard({
+  condition,
+}: {
+  condition: CaptainWatchCondition;
+}) {
+  const meta = watchMetricMeta(condition.metric);
+  const comparatorLabel =
+    condition.comparator === "above" ? "高于" : "低于";
+  return (
+    <article
+      className={`watch-condition${condition.armed ? " is-armed" : " is-triggered"}`}
+    >
+      <div className="watch-condition-head">
+        <strong>
+          {meta.label} {comparatorLabel} {condition.threshold}
+          {meta.unit ? ` ${meta.unit}` : ""}
+        </strong>
+        <span>{condition.armed ? "生效中" : "已触发"}</span>
+      </div>
+      {condition.note ? (
+        <p className="watch-condition-note">{condition.note}</p>
+      ) : null}
+      {condition.triggeredAtSimulationSeconds !== null ? (
+        <span className="watch-condition-meta">
+          触发于 {formatDuration(condition.triggeredAtSimulationSeconds)}
+        </span>
+      ) : condition.expiresAtSimulationSeconds !== null ? (
+        <span className="watch-condition-meta">
+          失效于 {formatDuration(condition.expiresAtSimulationSeconds)}
+        </span>
+      ) : null}
+    </article>
+  );
+}
+
 export function AiView({
   status,
   callPhase,
   commandBus,
   decisionLog,
+  decisionTheater,
+  captainJournal,
+  departmentStanding,
+  captainWatch,
 }: {
   status: LlmRuntimeStatus | null;
   callPhase: LlmCallPhase;
   commandBus: CommandBusTelemetry | null;
   decisionLog: CaptainDecisionEntry[];
+  decisionTheater: DecisionTheaterState;
+  captainJournal: CaptainJournalSnapshot;
+  departmentStanding: DepartmentStandingSnapshot;
+  captainWatch: CaptainWatchSnapshot;
 }) {
   const [logTab, setLogTab] = useState<"decisions" | "calls">("decisions");
   const recentCalls = status?.recentCalls ?? [];
@@ -380,12 +637,26 @@ export function AiView({
     status?.agents.filter((agent) => agent.state === "missing-secret")
       .length ?? 0;
 
+  const journalEntries = captainJournal.entries
+    .slice(-JOURNAL_DISPLAY_LIMIT)
+    .reverse();
+  const dissentRecords = departmentStanding.dissents.slice().reverse();
+  const activeStandings = departmentStanding.standings.filter(
+    standingHasActivity,
+  );
+  const armedWatches = captainWatch.conditions.filter(
+    (condition) => condition.armed,
+  );
+  const triggeredWatches = captainWatch.conditions.filter(
+    (condition) => !condition.armed,
+  );
+
   return (
     <section className="view-grid ai-view" aria-label="固定多模型观察">
       <div className="panel ai-roster-panel">
         <div className="panel-heading">
           <div>
-            <span className="eyebrow">FIXED INTELLIGENCE / 固定拓扑</span>
+            <span className="eyebrow">FIXED INTELLIGENCE</span>
             <h2>舰载智能组织</h2>
           </div>
           <StatusPill tone={status?.ready ? "nominal" : "watch"}>
@@ -462,12 +733,16 @@ export function AiView({
                   </StatusPill>
                   <span>{agent.model}</span>
                   <small>
-                    周期{" "}
-                    {runtime
-                      ? formatCadence(
-                          runtime.routine.systemInfoIntervalSimSeconds,
-                        )
-                      : agent.cadence}
+                    {index === 0
+                      ? `决策周期 ${
+                          runtime
+                            ? formatCadence(
+                                runtime.routine
+                                  .systemInfoIntervalSimSeconds,
+                              )
+                            : agent.cadence
+                        }`
+                      : "舰长决策内按需咨询"}
                   </small>
                 </div>
               </article>
@@ -479,7 +754,7 @@ export function AiView({
       <div className="panel topology-panel-ai">
         <div className="panel-heading compact">
           <div>
-            <span className="eyebrow">TOPOLOGY / 固定组织拓扑</span>
+            <span className="eyebrow">TOPOLOGY</span>
             <h2>通信网络</h2>
           </div>
         </div>
@@ -489,7 +764,7 @@ export function AiView({
       <div className="panel decision-panel">
         <div className="panel-heading">
           <div>
-            <span className="eyebrow">OBSERVABILITY / 可观察日志</span>
+            <span className="eyebrow">OBSERVABILITY</span>
             <h2>决策与 API 观察</h2>
           </div>
           <span className="live-mark">
@@ -502,6 +777,13 @@ export function AiView({
                   : "LOCAL"}
           </span>
         </div>
+
+        {decisionTheater.stage !== "idle" ? (
+          <DecisionTheater
+            key={decisionTheater.cycleToken ?? "idle"}
+            state={decisionTheater}
+          />
+        ) : null}
 
         <div className="ai-log-tabs" role="tablist" aria-label="观察日志切换">
           <button
@@ -609,6 +891,105 @@ export function AiView({
             ))}
           {(commandBus?.recentAudit.length ?? 0) === 0 && (
             <p>尚无世界内设备命令。</p>
+          )}
+        </div>
+      </div>
+
+      <div className="panel captain-journal-panel">
+        <div className="panel-heading">
+          <div>
+            <span className="eyebrow">CAPTAIN JOURNAL</span>
+            <h2>舰长航行志</h2>
+          </div>
+          <span className="live-mark">{journalEntries.length} 条</span>
+        </div>
+        <div className="journal-stream">
+          {journalEntries.length === 0 ? (
+            <div className="decision-empty">
+              <p>舰长尚未写下第一条记录。</p>
+              <p>等待签发 · 决策周期结束后，私人航行志将显示在此。</p>
+            </div>
+          ) : (
+            journalEntries.map((entry) => (
+              <JournalEntryCard key={entry.entryId} entry={entry} />
+            ))
+          )}
+        </div>
+      </div>
+
+      <div className="panel department-dissent-panel">
+        <div className="panel-heading compact">
+          <div>
+            <span className="eyebrow">DEPARTMENT DISSENT</span>
+            <h2>部门异议</h2>
+          </div>
+          <span className="live-mark">{dissentRecords.length}</span>
+        </div>
+        {activeStandings.length > 0 ? (
+          <div className="standing-stat-list">
+            {activeStandings.map((standing) => (
+              <StandingStatRow
+                key={standing.departmentId}
+                standing={standing}
+              />
+            ))}
+          </div>
+        ) : null}
+        <div className="dissent-stream">
+          {dissentRecords.length === 0 ? (
+            <div className="decision-empty">
+              <p>尚无部门正式异议。</p>
+              <p>等待签发 · 部门在咨询中提出异议后，将在此留痕。</p>
+            </div>
+          ) : (
+            dissentRecords.map((record) => (
+              <DissentRecordCard key={record.recordId} record={record} />
+            ))
+          )}
+        </div>
+      </div>
+
+      <div className="panel captain-watch-panel">
+        <div className="panel-heading compact">
+          <div>
+            <span className="eyebrow">CAPTAIN WATCH</span>
+            <h2>观察哨</h2>
+          </div>
+          <span className="live-mark">
+            {armedWatches.length} 生效 / {triggeredWatches.length} 已触发
+          </span>
+        </div>
+        <div className="watch-stream">
+          {armedWatches.length === 0 && triggeredWatches.length === 0 ? (
+            <div className="decision-empty">
+              <p>尚无舰长自设观察哨。</p>
+              <p>等待签发 · 舰长设定阈值条件后，将在此分组成效与已触发。</p>
+            </div>
+          ) : (
+            <>
+              {armedWatches.length > 0 ? (
+                <div className="watch-group">
+                  <span className="decision-section-label">生效中</span>
+                  {armedWatches.map((condition) => (
+                    <WatchConditionCard
+                      key={condition.watchId}
+                      condition={condition}
+                    />
+                  ))}
+                </div>
+              ) : null}
+              {triggeredWatches.length > 0 ? (
+                <div className="watch-group">
+                  <span className="decision-section-label">已触发</span>
+                  {triggeredWatches.map((condition) => (
+                    <WatchConditionCard
+                      key={condition.watchId}
+                      condition={condition}
+                    />
+                  ))}
+                </div>
+              ) : null}
+            </>
           )}
         </div>
       </div>

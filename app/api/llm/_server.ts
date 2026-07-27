@@ -194,6 +194,8 @@ function normalizePassengerSelfInvocation(
       "selfObservation",
       "publicContext",
       "previousOwnNote",
+      "society",
+      "tools",
     ],
     "passenger-self request",
   );
@@ -218,6 +220,37 @@ function normalizePassengerSelfInvocation(
           "previousOwnNote",
           512,
         );
+  const society =
+    input.society === undefined || input.society === null
+      ? null
+      : expectPublicString(input.society, "society", 4_096);
+  let tools: unknown[] | undefined;
+  if (input.tools !== undefined) {
+    if (!Array.isArray(input.tools) || input.tools.length > 8) {
+      throw new HttpRequestValidationError(
+        "passenger-self tools must be an array of at most 8 entries",
+        400,
+      );
+    }
+    for (const [index, tool] of input.tools.entries()) {
+      if (!isRecord(tool) || typeof tool.name !== "string") {
+        throw new HttpRequestValidationError(
+          `passenger-self tools[${index}] must include a string name`,
+          400,
+        );
+      }
+      if (
+        tool.name !== "file_passenger_grievance" &&
+        tool.name !== "share_passenger_rumor"
+      ) {
+        throw new HttpRequestValidationError(
+          `passenger-self tools may only include file_passenger_grievance or share_passenger_rumor`,
+          403,
+        );
+      }
+    }
+    tools = input.tools;
+  }
   if (!isRecord(input.selfObservation)) {
     throw new HttpRequestValidationError(
       "selfObservation must be an object",
@@ -374,10 +407,12 @@ function normalizePassengerSelfInvocation(
             selfObservation,
             publicContext,
             previousOwnNote,
+            ...(society ? { society } : {}),
             instruction: KEY_PASSENGER_SELF_INSTRUCTION,
           },
         },
       ],
+      ...(tools ? { tools } : {}),
       metadata: {
         intent: "passenger-self",
         privacyScope: "one-fixed-passenger",

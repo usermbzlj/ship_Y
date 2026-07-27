@@ -42,8 +42,8 @@ export function GodView({
   maintenance: MaintenanceTelemetry | null;
   simulationSeconds: number;
   missionReady: boolean;
-  onCausalEvent: (eventId: string, label: string) => void;
-  onOverride: (field: ForceField, value: number) => void;
+  onCausalEvent: (eventId: string, label: string) => void | Promise<void>;
+  onOverride: (field: ForceField, value: number) => void | Promise<void>;
   onGodAssistSessionChange: (session: GodAssistSessionHandle | null) => void;
 }) {
   const [fieldId, setFieldId] = useState<string>(FORCE_FIELDS[0].id);
@@ -68,12 +68,16 @@ export function GodView({
   const confirmPending = () => {
     if (!pendingConfirm) return;
     if (pendingConfirm.kind === "event") {
-      onCausalEvent(pendingConfirm.eventId, pendingConfirm.label);
+      void Promise.resolve(
+        onCausalEvent(pendingConfirm.eventId, pendingConfirm.label),
+      ).catch(() => {});
     } else {
       const field =
         FORCE_FIELDS.find((item) => item.label === pendingConfirm.fieldLabel) ??
         selectedField;
-      onOverride(field, pendingConfirm.value);
+      void Promise.resolve(onOverride(field, pendingConfirm.value)).catch(
+        () => {},
+      );
     }
     setPendingConfirm(null);
   };
@@ -98,7 +102,7 @@ export function GodView({
       <div className="panel god-panel">
         <div className="panel-heading">
           <div>
-            <span className="eyebrow danger">EXTERNAL AUTHORITY / 世界之外</span>
+            <span className="eyebrow danger">EXTERNAL AUTHORITY</span>
             <h2>人工干预模式</h2>
           </div>
           <StatusPill tone="critical">上帝权限</StatusPill>
@@ -264,6 +268,10 @@ export function GodView({
             ["ring-bearing-degradation", "居住环轴承劣化", "令A环真实轴承进入劣化状态，后续振动、摩擦与废热由物理链路演化"],
             ["air-handler-trip", "空气处理机跳停", "令A环处理机实体跳停，后续环路混合与CO₂积累由分舱物理演化"],
             ["water-processor-trip", "水回收机跳停", "令A环水回收机实体跳停，后续净水消耗、废水积累与浓盐水产物由水网络演化"],
+            ["water-spur-fault", "A环配水关死", "令A环配水支路卡死关闭；罐存不变，未送达需求记入欠账"],
+            ["water-spur-fault-b-degraded", "B环配水降级", "令B环配水支路进入半开降级；短欠由支路有效开度产生"],
+            ["cooling-spur-fault", "A环热送达关死", "令A环居住热送达支路卡死关闭；舱热泵能力不变，未送达冷却记入欠账"],
+            ["cooling-spur-fault-b-degraded", "B环热送达降级", "令B环居住热送达支路进入半开降级；短欠由支路有效开度产生"],
             ["passenger-emergency", "乘客急症", "从持久化乘员名册选择清醒个体并写入病例"],
           ].map(([eventId, label, detail]) => (
             <button

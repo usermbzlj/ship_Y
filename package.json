@@ -10,18 +10,21 @@
     "dev:deepseek": "node scripts/start-deepseek.mjs",
     "dev:deepseek:ps1": "pwsh -NoProfile -File scripts/start-deepseek.ps1",
     "check:env": "node scripts/check-env.mjs",
+    "check:docs": "node scripts/check-docs.mjs",
     "build": "vinext build",
-    "start": "vinext start",
+    "start": "node scripts/start-production.mjs",
     "test": "npm run build && node --test",
     "test:unit": "node --test",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
-    "check": "npm run typecheck && npm run lint && npm test"
+    "check": "npm run check:docs && npm run typecheck && npm run lint && npm test"
   },
   "dependencies": {
+    "@types/three": "^0.185.1",
     "next": "16.2.6",
     "react": "19.2.6",
-    "react-dom": "19.2.6"
+    "react-dom": "19.2.6",
+    "three": "^0.185.1"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",

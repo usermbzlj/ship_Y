@@ -15,10 +15,14 @@ import type {
   CompartmentNetworkSnapshot,
   SensorQuality,
   ZoneId,
+  ZoneRole,
 } from "./compartments";
 import type {
   CoolingNetworkSnapshot,
   CoolantPumpId,
+  CoolingHabitatRing,
+  HabitatThermalDeliverySpurCondition,
+  HabitatThermalDeliverySpurId,
   PumpCondition,
   ThermalSensorQuality,
   ThermalSensorQuantity,
@@ -58,12 +62,15 @@ import type {
   RotationSummary,
 } from "./rotation";
 import type {
+  WaterDistributionSpurCondition,
+  WaterDistributionSpurId,
   WaterLoop,
   WaterObservationFrame,
   WaterProcessor,
   WaterProcessorId,
   WaterRecoverySnapshot,
   WaterRecoverySummary,
+  WaterRing,
 } from "./water";
 import type {
   MaintenanceAssetCondition,
@@ -80,6 +87,27 @@ import type {
   ProceduralWorldSnapshot,
 } from "./procedural-world";
 import type { SurvivalSnapshot } from "./survival";
+import type { HullConsequenceSnapshot } from "./hull-consequence";
+import type {
+  ActiveSensorPackageId,
+  AgricultureBayId,
+  CaptainOperationsSnapshot,
+  CommunicationKind,
+  DutyShiftId,
+  FabricatorId,
+  MissionDisposition,
+  MissionWaypoint,
+  OxygenGeneratorId,
+  OrderPriority,
+  RemoteAssetId,
+  SecurityTeamId,
+  ShipDepartmentId,
+  TriageLevel,
+} from "./captain-operations";
+import type {
+  HeatExchangerId,
+  RadiatorId,
+} from "./cooling";
 
 export interface MissionInitialization {
   origin: string;
@@ -184,9 +212,224 @@ export type ShipOperationalCommand =
       commandedThroughputFraction: number;
     }
   | {
+      kind: "configure-water-distribution-spur";
+      actorAgentId: "captain" | "life-support";
+      spurId: WaterDistributionSpurId;
+      /** Valve open command; effective delivery also scales by spur condition. */
+      commandedOpenFraction?: number;
+      /**
+       * Crew may only repair to `nominal`. Faults (`degraded` / `stuck-closed`)
+       * remain god / environment interventions.
+       */
+      condition?: "nominal";
+    }
+  | {
+      kind: "configure-habitat-thermal-delivery-spur";
+      actorAgentId: "captain" | "engineering";
+      spurId: HabitatThermalDeliverySpurId;
+      /** Valve open command; effective delivery also scales by spur condition. */
+      commandedOpenFraction?: number;
+      /**
+       * Crew may only repair to `nominal`. Faults (`degraded` / `stuck-closed`)
+       * remain god / environment interventions.
+       */
+      condition?: "nominal";
+    }
+  | {
       kind: "schedule-maintenance";
       actorAgentId: "captain" | "engineering";
       assetId: MaintenanceAssetId;
+    }
+  | {
+      kind: "revise-mission";
+      actorAgentId: "captain";
+      disposition: MissionDisposition;
+      destination: string;
+      objective: string;
+      route: MissionWaypoint[];
+      totalDistanceLightYears: number;
+      totalLegs: number;
+    }
+  | {
+      kind: "manage-department-order";
+      actorAgentId: "captain";
+      action: "create" | "change" | "cancel" | "request-report";
+      orderId?: string;
+      departmentId?: ShipDepartmentId;
+      title?: string;
+      instruction?: string;
+      priority?: OrderPriority;
+      deadlineSeconds?: number;
+      estimatedWorkSeconds?: number;
+      reportingIntervalSeconds?: number;
+      reason?: string;
+    }
+  | {
+      kind: "publish-communication";
+      actorAgentId: "captain" | "passenger-affairs" | "passenger-service";
+      communicationKind: CommunicationKind;
+      audienceOrTarget: string;
+      subject: string;
+      message: string;
+      deliveryDelaySeconds?: number;
+      relatedGrievanceId?: string;
+    }
+  | {
+      /** 关键乘客向世界申诉队列提交一条申诉；actor 须为关键乘客本人。 */
+      kind: "file-passenger-grievance";
+      actorAgentId: string;
+      passengerId: string;
+      category: string;
+      summary: string;
+    }
+  | {
+      kind: "manage-crew-assignment";
+      actorAgentId: "captain";
+      personId: string;
+      departmentId: ShipDepartmentId;
+      role: string;
+      shiftId: DutyShiftId;
+      dutyZoneId: ZoneId | null;
+      departmentHead: boolean;
+    }
+  | {
+      kind: "manage-person";
+      actorAgentId: "captain" | "medical" | "security";
+      action:
+        | "wake"
+        | "hibernate"
+        | "triage"
+        | "treat"
+        | "transfer"
+        | "evacuate";
+      personId: string;
+      zoneId?: ZoneId;
+      triageLevel?: TriageLevel;
+      treatmentPlan?: string;
+      priority?: OrderPriority;
+    }
+  | {
+      kind: "manage-security";
+      actorAgentId: "captain" | "security";
+      action: "deploy" | "set-access" | "detain" | "release" | "investigate" | "protect";
+      teamId?: SecurityTeamId;
+      zoneId?: ZoneId;
+      connectionId?: string;
+      accessMode?: "open" | "restricted" | "sealed";
+      personId?: string;
+      caseId?: string;
+      reason: string;
+    }
+  | {
+      kind: "manage-logistics";
+      actorAgentId: "captain" | "engineering" | "life-support" | "passenger-affairs";
+      action:
+        | "set-ration"
+        | "configure-agriculture"
+        | "move-cargo"
+        | "allocate-cabin"
+        | "manufacture-part"
+        | "approve-substitution";
+      rationKgPerPersonDay?: number;
+      agricultureBayId?: AgricultureBayId;
+      crop?: string;
+      intensityFraction?: number;
+      cargoId?: string;
+      quantity?: number;
+      destinationZoneId?: ZoneId;
+      personId?: string;
+      cabinId?: string;
+      fabricatorId?: FabricatorId;
+      partId?: MaintenancePartId;
+      assetId?: MaintenanceAssetId;
+      deratingFraction?: number;
+      reason?: string;
+    }
+  | {
+      kind: "set-compartment-connection";
+      actorAgentId: "captain" | "engineering" | "life-support" | "security";
+      connectionId: string;
+      commandedOpenFraction: number;
+    }
+  | {
+      kind: "schedule-hull-repair";
+      actorAgentId: "captain" | "engineering";
+      breachId: string;
+      priority: OrderPriority;
+    }
+  | {
+      kind: "set-thermal-control";
+      actorAgentId: "captain" | "engineering";
+      targetType: "radiator" | "heat-exchanger";
+      radiatorId?: RadiatorId;
+      heatExchangerId?: HeatExchangerId;
+      controlFraction: number;
+    }
+  | {
+      kind: "set-atmosphere-supply";
+      actorAgentId: "captain" | "life-support";
+      zoneId: ZoneId;
+      gas: "oxygen" | "nitrogen" | "carbonDioxide" | "waterVapor";
+      massKg: number;
+      operation: "add" | "remove";
+    }
+  | {
+      kind: "set-oxygen-production";
+      actorAgentId: "captain" | "life-support";
+      generatorId: OxygenGeneratorId;
+      enabled: boolean;
+      targetProductionKgPerHour: number;
+    }
+  | {
+      kind: "distribute-water";
+      actorAgentId: "captain" | "engineering" | "life-support";
+      action: "set-zone-allocation" | "transfer-between-rings";
+      zoneId?: ZoneId;
+      kgPerAwakePersonDay?: number;
+      fromRing?: "a" | "b";
+      toRing?: "a" | "b";
+      massKg?: number;
+    }
+  | {
+      kind: "reset-protection";
+      actorAgentId: "captain" | "engineering";
+      targetType: "reactor" | "breaker";
+      reactorId?: FusionReactorId;
+      breakerId?: ElectricalBreakerId;
+    }
+  | {
+      kind: "manage-maintenance-task";
+      actorAgentId: "captain" | "engineering";
+      action: "cancel" | "set-priority" | "reassign";
+      taskId: string;
+      priority?: OrderPriority;
+      crewId?: string;
+      robotId?: string;
+      reason?: string;
+    }
+  | {
+      kind: "manage-sensor-operation";
+      actorAgentId: "captain" | "navigation" | "engineering" | "life-support";
+      action: "set-frequency" | "active-scan";
+      packageId: ActiveSensorPackageId;
+      sampleIntervalSeconds?: number;
+      target?: string;
+      durationSeconds?: number;
+      priority?: OrderPriority;
+    }
+  | {
+      kind: "manage-remote-asset";
+      actorAgentId: "captain" | "navigation" | "engineering" | "security";
+      assetId: RemoteAssetId;
+      action: "deploy" | "recover" | "retask";
+      mission: string;
+      target: string;
+    }
+  | {
+      kind: "set-power-allocation";
+      actorAgentId: "captain" | "engineering";
+      loadId: ElectricalLoadId;
+      maximumDemandFraction: number;
     };
 
 export interface ShipOperationalCommandResult {
@@ -225,6 +468,14 @@ export interface ShipOperationalCommandResult {
   scrubberEnabled?: boolean;
   waterProcessorId?: WaterProcessorId;
   waterProcessorCommandedThroughputFraction?: number;
+  waterDistributionSpurId?: WaterDistributionSpurId;
+  waterDistributionSpurCommandedOpenFraction?: number;
+  waterDistributionSpurCondition?: WaterDistributionSpurCondition;
+  waterDistributionSpurEffectiveDeliveryFraction?: number;
+  habitatThermalDeliverySpurId?: HabitatThermalDeliverySpurId;
+  habitatThermalDeliverySpurCommandedOpenFraction?: number;
+  habitatThermalDeliverySpurCondition?: HabitatThermalDeliverySpurCondition;
+  habitatThermalDeliverySpurEffectiveDeliveryFraction?: number;
   maintenanceAssetId?: MaintenanceAssetId;
   maintenanceTaskId?: string;
   maintenanceCrewId?: string;
@@ -258,6 +509,19 @@ export type SimulationWorkerCommand =
       requestId: string;
       realSeconds: number;
       timeScale: number;
+      /**
+       * Optional world-time boundary that this step must not cross.
+       *
+       * The Worker acquires the supplied pause token atomically when the
+       * boundary is reached, before publishing the stepped state. This keeps
+       * deadline-driven decisions from being discovered after an oversized
+       * accelerated-time step.
+       */
+      blockingBoundary?: {
+        id: string;
+        atSimulationSeconds: number;
+        pauseToken: string;
+      };
     }
   | {
       type: "set-time-control";
@@ -304,6 +568,10 @@ export interface SimulationWorkerTimeControlTelemetry {
   effectiveTimeScale: number;
   paused: boolean;
   pauseTokens: string[];
+  reachedBlockingBoundary: {
+    id: string;
+    atSimulationSeconds: number;
+  } | null;
   owedSimSeconds: number;
   fidelityLocked: boolean;
   droppedSimSecondsCumulative: number;
@@ -315,11 +583,31 @@ export interface SimulationWorkerSurvivalTelemetry {
   foodDryKg: number;
 }
 
+export interface HullConsequenceTelemetry {
+  hullIntegrity: number;
+  activeBreachCount: number;
+  totalBreachAreaSquareMeters: number;
+  jumpBlocked: boolean;
+  jumpBlockReason: string | null;
+  thrustPerformanceByRing: { a: number; b: number };
+  events: Array<{
+    id: string;
+    zoneId: ZoneId;
+    ring: "a" | "b";
+    cascadeStage: 0 | 1 | 2 | 3;
+    unrepairedSeconds: number;
+    nextCascadeSeconds: number | null;
+    appliedFaultKeys: string[];
+  }>;
+}
+
 export interface SimulationWorkerState {
   elapsedSeconds: number;
   state: ShipState;
   passengers: PassengerPopulationSummary;
   passengerHighlights: PassengerHighlightTelemetry[];
+  zoneMood: ZoneMoodTelemetry[];
+  passengerCircles: PassengerCircleTelemetry[];
   compartments: CompartmentTelemetry;
   cooling: CoolingTelemetry;
   electrical: ElectricalTelemetry;
@@ -327,10 +615,12 @@ export interface SimulationWorkerState {
   rotation: RotationTelemetry;
   waterRecovery: WaterRecoveryTelemetry;
   maintenance: MaintenanceTelemetry;
+  operations: CaptainOperationsSnapshot;
   commandBus: CommandBusTelemetry;
   timeControl: SimulationWorkerTimeControlTelemetry;
   proceduralEvents: ProceduralWorldEvent[];
   survival: SimulationWorkerSurvivalTelemetry;
+  hullConsequence: HullConsequenceTelemetry;
 }
 
 export interface MaintenanceTelemetry {
@@ -351,6 +641,15 @@ export interface MaintenanceTelemetry {
   };
 }
 
+export interface WaterDistributionSpurTelemetry {
+  spurId: WaterDistributionSpurId;
+  ring: WaterRing;
+  condition: WaterDistributionSpurCondition;
+  commandedOpenFraction: number;
+  effectiveDeliveryFraction: number;
+  lastDeliveryShortfallKg: number;
+}
+
 export interface WaterRecoveryTelemetry {
   controllers: Array<
     Pick<
@@ -358,6 +657,10 @@ export interface WaterRecoveryTelemetry {
       "id" | "ring" | "commandedThroughputFraction"
     >
   >;
+  /** Per-ring potable distribution spurs (tank → users). */
+  distributionSpurs: WaterDistributionSpurTelemetry[];
+  /** Cumulative requested potable the spurs did not deliver. */
+  undeliveredPotableKg: number;
   observed: WaterObservationFrame | null;
   truth: {
     loops: WaterLoop[];
@@ -384,6 +687,30 @@ export interface PassengerHighlightTelemetry {
   isKeyLlm: boolean;
 }
 
+/** 区带级群体情绪聚合：让关键乘客能代表周围人群发声，而不是只知道自己 */
+export interface ZoneMoodTelemetry {
+  zoneId: string;
+  awakeCount: number;
+  meanStress: number; // 0..1
+  meanTrust: number; // 0..1
+  meanPhysicalHealth: number; // 0..1
+}
+
+/** 关键乘客的关系圈成员真值投影；分档转换由消费方负责，Worker 不做认知降级 */
+export interface PassengerCircleMemberTelemetry {
+  passengerId: string;
+  displayName: string;
+  relation: "family" | "peer";
+  lifeState: "awake" | "hibernating" | "deceased";
+  physicalHealth: number; // 0..1
+  zoneId: string;
+}
+
+export interface PassengerCircleTelemetry {
+  passengerId: string;
+  members: PassengerCircleMemberTelemetry[];
+}
+
 export type PassengerEnvironmentalHazardFamily =
   | "low-pressure"
   | "hypoxia"
@@ -401,7 +728,7 @@ export interface PassengerEnvironmentalExposureState {
 }
 
 export interface RuntimeSimulationSnapshot {
-  snapshotVersion: 16;
+  snapshotVersion: 16 | 17 | 18;
   highestDirective: string;
   engine: SimulationSnapshot;
   passengers: PassengerSimulationSnapshot;
@@ -412,12 +739,15 @@ export interface RuntimeSimulationSnapshot {
   rotation: RotationSnapshot;
   water: WaterRecoverySnapshot;
   maintenance: MaintenanceSnapshot;
+  operations?: CaptainOperationsSnapshot;
   commandBus: CommandBusSnapshot;
   passengerEnvironmentalExposures:
     PassengerEnvironmentalExposureState[];
   timeDirector: TimeDirectorSnapshot;
   proceduralWorld: ProceduralWorldSnapshot;
   survival: SurvivalSnapshot;
+  /** Present on snapshotVersion >= 18; older saves restore as empty registry. */
+  hullConsequence?: HullConsequenceSnapshot;
 }
 
 export interface RotationSensorTelemetry {
@@ -589,6 +919,15 @@ export interface CoolingSensorTelemetry {
   sampleAgeSeconds: number | null;
 }
 
+export interface HabitatThermalDeliverySpurTelemetry {
+  spurId: HabitatThermalDeliverySpurId;
+  ring: CoolingHabitatRing;
+  condition: HabitatThermalDeliverySpurCondition;
+  commandedOpenFraction: number;
+  effectiveDeliveryFraction: number;
+  lastDeliveryShortfallJ: number;
+}
+
 export interface CoolingTelemetry {
   observed: {
     thermalBusTemperatureK: number | null;
@@ -597,6 +936,10 @@ export interface CoolingTelemetry {
     totalRadiatedPowerW: number | null;
   };
   sensors: CoolingSensorTelemetry[];
+  /** Per-ring habitat thermal delivery spurs (heat pump → cabin zones). */
+  habitatThermalDeliverySpurs: HabitatThermalDeliverySpurTelemetry[];
+  /** Cumulative requested habitat cooling the spurs did not deliver (J). */
+  undeliveredHabitatCoolingJ: number;
   truth: {
     thermalBusTemperatureK: number;
     averageCoolantTemperatureK: number;
@@ -640,6 +983,10 @@ export type CompartmentZoneCondition =
 
 export interface CompartmentZoneTelemetry {
   zoneId: ZoneId;
+  role: ZoneRole;
+  labelZh: string;
+  purposeZh: string;
+  ring: "A" | "B";
   condition: CompartmentZoneCondition;
   hasBreach: boolean;
   observed: {

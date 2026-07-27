@@ -10,6 +10,7 @@ import type {
   CoolingTelemetry,
   ElectricalTelemetry,
   FinalJourneyReport,
+  HullConsequenceTelemetry,
   MaintenanceTelemetry,
   NavigationTelemetry,
   PassengerHighlightTelemetry,
@@ -20,6 +21,10 @@ import type {
   KeyPassengerPollingSnapshot,
   KeyPassengerPrivateNote,
 } from "@/lib/llm/key-passenger-polling";
+import type { CaptainJournalSnapshot } from "@/lib/llm/captain-journal";
+import type { CaptainWatchSnapshot } from "@/lib/llm/captain-watch";
+import type { DepartmentStandingSnapshot } from "@/lib/llm/department-standing";
+import type { PassengerSocietySnapshot } from "@/lib/llm/passenger-society";
 
 // ─── 视图与状态 ───────────────────────────────────────────────
 
@@ -128,6 +133,8 @@ export type LlmInvokeRoutePayload = {
 export type GodAssistSessionHandle = {
   active: boolean;
   retried: boolean;
+  /** In-flight intervene requestId; rejection only attaches while this matches. */
+  pendingRequestId: string | null;
   onPhysicsRejection: ((message: string) => void) | null;
 };
 
@@ -165,6 +172,8 @@ export type CaptainDecisionEntry = {
   status: "thinking" | "decided" | "executing" | "done" | "error";
   captainText: string;
   consultations: DepartmentConsultation[];
+  /** Soft note when some department advisors failed but the cycle continued. */
+  consultationNote?: string;
   toolCalls: Array<{
     toolCallId: string;
     toolName: string;
@@ -180,17 +189,22 @@ export type RuntimeSimulationSnapshot =
   import("@/lib/sim/protocol").RuntimeSimulationSnapshot;
 
 export interface LocalSave {
-  version: 19;
+  version: 22;
   activeView: ViewId;
   missionStarted: boolean;
   paused: boolean;
   timeScale: number;
   simulationSeconds: number;
+  nextCaptainRoutineAtSimulationSeconds: number | null;
   origin: string;
   destination: string;
   directive: string;
   events: TimelineEvent[];
   keyPassengerLlm: KeyPassengerPollingSnapshot;
+  captainJournal: CaptainJournalSnapshot;
+  captainWatch: CaptainWatchSnapshot;
+  departmentStanding: DepartmentStandingSnapshot;
+  passengerSociety: PassengerSocietySnapshot;
   runtimeSnapshot: RuntimeSimulationSnapshot | null;
 }
 
@@ -215,6 +229,7 @@ export interface SimTelemetry {
   rotation: RotationTelemetry | null;
   waterRecovery: WaterRecoveryTelemetry | null;
   maintenance: MaintenanceTelemetry | null;
+  hullConsequence: HullConsequenceTelemetry | null;
   commandBus: CommandBusTelemetry | null;
   passengerHighlights: PassengerHighlightTelemetry[];
   keyPassengerPrivateNotes: KeyPassengerPrivateNote[];
@@ -230,10 +245,15 @@ export type {
   CoolingTelemetry,
   ElectricalTelemetry,
   FinalJourneyReport,
+  HullConsequenceTelemetry,
   MaintenanceTelemetry,
   NavigationTelemetry,
   PassengerHighlightTelemetry,
   RotationTelemetry,
   WaterRecoveryTelemetry,
   KeyPassengerPrivateNote,
+  CaptainJournalSnapshot,
+  CaptainWatchSnapshot,
+  DepartmentStandingSnapshot,
+  PassengerSocietySnapshot,
 };

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   TIME_SCALE_LABELS,
   isTimeScalePreset,
@@ -60,22 +60,62 @@ export function MissionClock({
   timeScale,
   effectiveTimeScale,
   paused,
+  maxLiveSimulationSeconds,
   progressLabel,
 }: {
   simulationSeconds: number;
   timeScale: number;
   effectiveTimeScale?: number;
   paused?: boolean;
+  maxLiveSimulationSeconds?: number | null;
   progressLabel?: string | null;
 }) {
-  const parts = useMemo(
-    () => splitElapsed(simulationSeconds),
-    [simulationSeconds],
-  );
   const effective =
     effectiveTimeScale !== undefined && Number.isFinite(effectiveTimeScale)
       ? effectiveTimeScale
       : timeScale;
+  const [displaySeconds, setDisplaySeconds] =
+    useState(simulationSeconds);
+
+  useEffect(() => {
+    if (paused || effective <= 0) {
+      return;
+    }
+
+    const startedAtWallMs = performance.now();
+    const startedAtSimulationSeconds = simulationSeconds;
+    const ceiling =
+      maxLiveSimulationSeconds !== null &&
+      maxLiveSimulationSeconds !== undefined &&
+      Number.isFinite(maxLiveSimulationSeconds)
+        ? Math.max(
+            startedAtSimulationSeconds,
+            maxLiveSimulationSeconds,
+          )
+        : Number.POSITIVE_INFINITY;
+    let frame = 0;
+    const renderLinearTime = (wallNowMs: number) => {
+      const projected =
+        startedAtSimulationSeconds +
+        ((wallNowMs - startedAtWallMs) / 1_000) * effective;
+      setDisplaySeconds(Math.min(ceiling, projected));
+      frame = window.requestAnimationFrame(renderLinearTime);
+    };
+    frame = window.requestAnimationFrame(renderLinearTime);
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    effective,
+    maxLiveSimulationSeconds,
+    paused,
+    simulationSeconds,
+  ]);
+
+  const visibleSeconds =
+    paused || effective <= 0 ? simulationSeconds : displaySeconds;
+  const parts = useMemo(
+    () => splitElapsed(visibleSeconds),
+    [visibleSeconds],
+  );
   const rateText = paused ? "已暂停" : formatRate(effective);
   const requestedHint =
     !paused &&

@@ -504,6 +504,39 @@ test("gateway retries continuously with capped exponential delays and exposes pa
   );
 });
 
+test("gateway stops after maxAttempts instead of retrying forever", async () => {
+  const registry = new FixedAgentRegistry(systemDefinition());
+  let calls = 0;
+  const gateway = new LlmGateway(registry, {
+    fetch: async () => {
+      calls += 1;
+      throw new Error(`offline-${calls}`);
+    },
+    resolveSecret: () => "secret",
+    retry: {
+      initialDelayMs: 1,
+      maxDelayMs: 2,
+      multiplier: 2,
+      maxAttempts: 3,
+    },
+    sleep: async () => {},
+    createCallId: () => "max-attempts-call",
+  });
+
+  await assert.rejects(
+    () =>
+      gateway.invoke({
+        agentId: "captain",
+        messages: [],
+      }),
+    (error) => {
+      assert.match(String(error.message), /exhausted 3 attempts/);
+      return true;
+    },
+  );
+  assert.equal(calls, 3);
+});
+
 test(
   "a provider attempt timeout aborts the attempt and retries from scratch",
   { timeout: 2000 },

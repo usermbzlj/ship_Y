@@ -1,20 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { resolveZoneIdForCabin } from "../../lib/sim/compartments.ts";
+
 const emitted = [];
 globalThis.postMessage = (event) => {
   emitted.push(event);
 };
 await import("../../lib/sim/worker.ts");
 
-const BASELINE_ZONE_IDS = ["A", "B"].flatMap((ring) =>
-  Array.from(
-    { length: 24 },
-    (_, index) => `${ring}-${String(index + 1).padStart(2, "0")}`,
-  ),
-);
-const TEST_ZONE_ID = "A-18";
-const NEIGHBOR_ZONE_IDS = new Set(["A-17", "A-19"]);
+const TEST_ZONE_ID = "A-05";
+const NEIGHBOR_ZONE_IDS = new Set(["A-04", "A-06"]);
 const TEST_EXPOSURE_FAMILIES = ["low-pressure", "hypoxia"];
 
 function dispatch(command) {
@@ -57,12 +53,7 @@ function snapshot(requestId) {
 }
 
 function stableZoneForCabin(cabinId) {
-  let hash = 2_166_136_261;
-  for (let index = 0; index < cabinId.length; index += 1) {
-    hash ^= cabinId.charCodeAt(index);
-    hash = Math.imul(hash, 16_777_619);
-  }
-  return BASELINE_ZONE_IDS[(hash >>> 0) % BASELINE_ZONE_IDS.length];
+  return resolveZoneIdForCabin(cabinId);
 }
 
 function derivedLivingAverages(passengers) {
@@ -115,9 +106,9 @@ function exposureState(runtimeSnapshot, family) {
 function isolateTestZone(current) {
   const response = dispatch({
     type: "ship-command",
-    requestId: "isolate-a-18-before-breach",
-    commandId: "life-support:isolate-a-18-before-breach",
-    idempotencyKey: "life-support:isolate-a-18-before-breach",
+    requestId: "isolate-a-05-before-breach",
+    commandId: "life-support:isolate-a-05-before-breach",
+    idempotencyKey: "life-support:isolate-a-05-before-breach",
     issuedAtMicroseconds: 0,
     expectedRevision: current.commandBus.revision,
     expectedStateRevision: current.state.revision,
@@ -135,10 +126,10 @@ function isolateTestZone(current) {
 function openLargeMicrometeoroidBreach() {
   const response = dispatch({
     type: "intervene",
-    requestId: "open-a-18-0.2-square-meter-breach",
+    requestId: "open-a-05-0.2-square-meter-breach",
     request: {
       actor: "player:god-mode",
-      reason: "test isolated A-18 environmental exposure",
+      reason: "test isolated A-05 environmental exposure",
       operations: [
         {
           operation: "add",
@@ -147,11 +138,11 @@ function openLargeMicrometeoroidBreach() {
         },
       ],
       declaredBalance: {
-        massKg: -0.34,
-        energyJ: 280_000_000,
-        linearMomentumKgMPerSecond: [1_180, -240, 90],
-        angularMomentumKgM2PerSecond: [0, 28_000, -74_000],
-        note: "0.2 square meter micrometeoroid penetration test",
+        massKg: -0.025,
+        energyJ: 25_000,
+        linearMomentumKgMPerSecond: [12, -2.4, 0.9],
+        angularMomentumKgM2PerSecond: [0, 280, -740],
+        note: "0.2 square meter exposure-test breach (balance mirrors procedural mm-scale grain story)",
       },
       metadata: {
         mode: "causal-event",
@@ -188,7 +179,7 @@ test("the fixed roster is the exact population authority from initialization", (
   assertEnginePopulationIsDerived(initial);
 });
 
-test("an isolated local breach exposes only awake A-18 occupants and restores idempotently", () => {
+test("an isolated local breach exposes only awake A-05 occupants and restores idempotently", () => {
   const current = initialize("init-local-environmental-exposure").payload;
   isolateTestZone(current);
 
@@ -220,7 +211,7 @@ test("an isolated local breach exposes only awake A-18 occupants and restores id
   assert.ok(hibernatingInNeighborZones.length > 0);
 
   openLargeMicrometeoroidBreach();
-  stepSimulation("cross-a-18-pressure-and-oxygen-thresholds", 60);
+  stepSimulation("cross-a-05-pressure-and-oxygen-thresholds", 60);
   const afterExposure = snapshot("after-local-environmental-exposure");
 
   const lowPressure = exposureState(afterExposure, "low-pressure");
@@ -241,7 +232,7 @@ test("an isolated local breach exposes only awake A-18 occupants and restores id
       assert.equal(
         memories.length,
         expectedMemoryCount,
-        `${person.id} must receive each reached A-18 exposure tier once`,
+        `${person.id} must receive each reached A-05 exposure tier once`,
       );
     } else {
       assert.equal(
@@ -291,7 +282,7 @@ test("an isolated local breach exposes only awake A-18 occupants and restores id
 
   const restored = dispatch({
     type: "restore",
-    requestId: "restore-active-a-18-exposure",
+    requestId: "restore-active-a-05-exposure",
     snapshot: afterExposure,
   });
   assert.equal(restored.type, "ready", restored.message);
@@ -349,7 +340,7 @@ test("an isolated local breach exposes only awake A-18 occupants and restores id
   assert.equal(rejectedExposure.type, "error");
   assert.match(
     rejectedExposure.message,
-    /environmental exposure A-18\/low-pressure does not match compartment truth/,
+    /environmental exposure A-05\/low-pressure does not match compartment truth/,
   );
   assert.deepEqual(
     snapshot("after-rejected-exposure-restore"),

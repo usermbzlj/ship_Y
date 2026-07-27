@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type CSSProperties } from "react";
 import type {
   ShipState,
   SystemTone,
@@ -14,10 +14,22 @@ import type {
   RotationTelemetry,
   SimulationWorkerSurvivalTelemetry,
 } from "@/lib/sim/protocol";
-import { STAR_SYSTEMS, INITIAL_SYSTEMS } from "../constants";
+import {
+  estimateMinLegs,
+  routeDistanceLy,
+} from "@/lib/astro/star-catalog";
+import { STAR_SYSTEMS, OFFLINE_SYSTEMS, SHIP_DESIGN_LENGTH_M } from "../constants";
 import { StarMap } from "../components/star-map";
 import { StatusPill } from "../components/status-pill";
 import { SurvivalPressure } from "../components/survival-pressure";
+
+function ringSpinPeriodSeconds(relativeRpm: number | null | undefined): number | null {
+  if (relativeRpm === null || relativeRpm === undefined) return null;
+  const abs = Math.abs(relativeRpm);
+  if (abs < 0.05) return null;
+  // 示意周期：|rpm| 越大转得越快，钳制在可读范围
+  return Math.min(48, Math.max(6, 24 / abs));
+}
 
 export function VoyageView({
   origin,
@@ -50,13 +62,8 @@ export function VoyageView({
   const destinationSystem = STAR_SYSTEMS.find(
     (system) => system.id === destination,
   )!;
-  const distanceLightYears = Math.max(
-    0.1,
-    Math.abs(
-      destinationSystem.distanceFromSolLy - originSystem.distanceFromSolLy,
-    ),
-  );
-  const routeLegs = Math.max(1, Math.ceil(distanceLightYears / 2.5));
+  const distanceLightYears = routeDistanceLy(origin, destination);
+  const routeLegs = estimateMinLegs(distanceLightYears);
   const observedCoolantTemperatureK =
     cooling?.observed.averageCoolantTemperatureK ?? null;
   const observedRadiatedPowerW =
@@ -74,6 +81,19 @@ export function VoyageView({
           (total, value) => total + value,
           0,
         ) / observedOxygenReadings.length;
+  const airHandlerFlowFractions =
+    compartments?.airHandlers.controllers.map(
+      (handler) => handler.commandedFlowFraction,
+    ) ?? [];
+  const lifeSupportLoad =
+    airHandlerFlowFractions.length === 0
+      ? null
+      : Math.min(
+          100,
+          (airHandlerFlowFractions.reduce((total, value) => total + value, 0) /
+            airHandlerFlowFractions.length) *
+            100,
+        );
   const observedGenerationKw =
     electrical?.observed.totalReactorOutputKw ?? null;
   const observedServedPowerKw =
@@ -88,6 +108,8 @@ export function VoyageView({
     rotation?.rings.find((ring) => ring.id === "ring-a") ?? null;
   const observedRingB =
     rotation?.rings.find((ring) => ring.id === "ring-b") ?? null;
+  const ringASpinPeriod = ringSpinPeriodSeconds(observedRingA?.relativeRpm);
+  const ringBSpinPeriod = ringSpinPeriodSeconds(observedRingB?.relativeRpm);
   const observedRingGravityReadings = [
     observedRingA?.artificialGravityG,
     observedRingB?.artificialGravityG,
@@ -223,13 +245,7 @@ export function VoyageView({
             observedOxygenPartialPressurePa === null
               ? "氧分压传感器延迟"
               : `O₂ 观测 ${(observedOxygenPartialPressurePa / 1_000).toFixed(1)} kPa`,
-          load: Math.min(
-            100,
-            (state.population.awake /
-              Math.max(state.population.total, 1)) *
-              100 +
-              55,
-          ),
+          load: lifeSupportLoad ?? 0,
           tone:
             observedPressurePa === null
               ? "watch"
@@ -311,14 +327,14 @@ export function VoyageView({
               : "watch",
         },
       ]
-    : INITIAL_SYSTEMS;
+    : OFFLINE_SYSTEMS;
 
   return (
     <section className="view-grid voyage-view" aria-label="航程总览">
       <div className="panel map-panel bridge-viewport">
         <div className="panel-heading">
           <div>
-            <span className="eyebrow">FORWARD OBSERVATION / 前向主视窗</span>
+            <span className="eyebrow">FORWARD OBSERVATION</span>
             <h2>
               {originSystem.name} <i>→</i> {destinationSystem.name}
             </h2>
@@ -332,29 +348,14 @@ export function VoyageView({
             originId={origin}
             destinationId={destination}
             running={missionStarted}
+            completedDistanceLightYears={completedDistanceLightYears}
+            totalDistanceLightYears={totalDistanceLightYears}
           />
           <div className="viewport-glass" aria-hidden="true" />
-          <div className="viewport-reticle" aria-hidden="true">
-            <i />
-            <i />
-            <i />
-            <i />
-          </div>
           <div className="bridge-phase-readout">
             <span>{journeyPhase.code}</span>
             <strong>{journeyPhase.title}</strong>
             <small>{journeyPhase.detail}</small>
-          </div>
-          <div className="viewport-bearing" aria-hidden="true">
-            <span>270</span>
-            <i />
-            <span>315</span>
-            <i />
-            <strong>000</strong>
-            <i />
-            <span>045</span>
-            <i />
-            <span>090</span>
           </div>
           <div className="map-readout map-readout-left">
             <span>航程完成</span>
@@ -364,18 +365,6 @@ export function VoyageView({
             <span>剩余航程</span>
             <strong>{remainingDistanceLightYears.toFixed(2)} LY</strong>
           </div>
-          {missionStarted && (
-            <div
-              className="vessel-marker"
-              aria-label="远穹号当前位置"
-              style={{
-                left: `${18 + Math.min(1, (state?.journey.completedDistanceLightYears ?? 0) / Math.max(state?.journey.totalDistanceLightYears ?? 1, 0.1)) * 64}%`,
-              }}
-            >
-              <span />
-              Y-01
-            </div>
-          )}
         </div>
         <div className="bridge-progress" aria-label={`航程完成 ${journeyProgress.toFixed(1)}%`}>
           <i style={{ width: `${journeyProgress}%` }} />
@@ -412,18 +401,40 @@ export function VoyageView({
       <div className="panel ship-panel">
         <div className="panel-heading compact">
           <div>
-            <span className="eyebrow">STARBOARD TACTICAL / 右舷战术台</span>
+            <span className="eyebrow">STARBOARD TACTICAL</span>
             <h2>远穹号 · 舰体姿态</h2>
           </div>
-          <span className="micro-code">820M · 2,120 人</span>
+          <span className="micro-code">
+            船长 {SHIP_DESIGN_LENGTH_M} m · 规格说明（非实时账本） · 2,120 人
+          </span>
         </div>
         <div className="ship-schematic" aria-label="远穹号舰体示意">
           <div className="ship-shield" />
           <div className="ship-spine" />
-          <div className="ship-ring ring-alpha">
+          <div
+            className={`ship-ring ring-alpha${ringASpinPeriod ? " ring-spinning" : ""}`}
+            style={
+              ringASpinPeriod
+                ? ({
+                    "--ring-period": `${ringASpinPeriod}s`,
+                  } as CSSProperties)
+                : undefined
+            }
+          >
+            <i className="ring-spin-marker" aria-hidden="true" />
             <span>A</span>
           </div>
-          <div className="ship-ring ring-beta">
+          <div
+            className={`ship-ring ring-beta${ringBSpinPeriod ? " ring-spinning" : ""}`}
+            style={
+              ringBSpinPeriod
+                ? ({
+                    "--ring-period": `${ringBSpinPeriod}s`,
+                  } as CSSProperties)
+                : undefined
+            }
+          >
+            <i className="ring-spin-marker" aria-hidden="true" />
             <span>B</span>
           </div>
           <div className="ship-core" />
@@ -446,10 +457,19 @@ export function VoyageView({
             <strong>48</strong>
           </div>
           <div>
-            <span>应急自持</span>
-            <strong>5 年</strong>
+            <span>聚变燃料</span>
+            <strong>
+              {observedFusionFuelMassKg === null
+                ? "建立中"
+                : `${(observedFusionFuelMassKg / 1_000).toFixed(1)} t`}
+            </strong>
           </div>
         </div>
+        <p className="panel-note ship-schematic-note">
+          {observedRingA?.relativeRpm != null && observedRingB?.relativeRpm != null
+            ? `环示意转速 A ${observedRingA.relativeRpm >= 0 ? "+" : ""}${observedRingA.relativeRpm.toFixed(3)} · B ${observedRingB.relativeRpm >= 0 ? "+" : ""}${observedRingB.relativeRpm.toFixed(3)} rpm · 示意，非姿态解算`
+            : "示意，非姿态解算"}
+        </p>
       </div>
 
       <SurvivalPressure survival={survival} />

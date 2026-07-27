@@ -128,6 +128,38 @@ test("parseGodAssistPlanFromToolCalls accepts single causal and force tools", ()
   });
 });
 
+test("parseGodAssistPlanFromToolCalls accepts water/cooling spur UI event ids", () => {
+  const plan = parseGodAssistPlanFromToolCalls([
+    {
+      name: "trigger_causal_event",
+      arguments: {
+        eventType: "water-spur-fault-b-degraded",
+        label: "B环配水降级",
+      },
+    },
+    {
+      name: "trigger_causal_event",
+      arguments: {
+        eventType: "cooling-spur-fault-a-closed",
+        label: "A环热送达关死",
+      },
+    },
+    {
+      name: "trigger_causal_event",
+      arguments: {
+        eventType: "water-spur-fault",
+        label: "A环配水关死（默认）",
+      },
+    },
+  ]);
+
+  assert.equal(plan.steps.length, 3);
+  assert.equal(plan.steps[0].kind, "causal-event");
+  assert.equal(plan.steps[0].eventType, "water-spur-fault-b-degraded");
+  assert.equal(plan.steps[1].eventType, "cooling-spur-fault-a-closed");
+  assert.equal(plan.steps[2].eventType, "water-spur-fault");
+});
+
 test("parseGodAssistPlanFromToolCalls accepts bundled intervention plans", () => {
   const plan = parseGodAssistPlanFromToolCalls([
     {
@@ -278,6 +310,12 @@ test("GodAssistRuntime.invoke returns parsed plan from provider tool calls", asy
       "ring-bearing-degradation",
       "air-handler-trip",
       "water-processor-trip",
+      "water-spur-fault",
+      "water-spur-fault-a-closed",
+      "water-spur-fault-b-degraded",
+      "cooling-spur-fault",
+      "cooling-spur-fault-a-closed",
+      "cooling-spur-fault-b-degraded",
       "passenger-emergency",
     ],
   );

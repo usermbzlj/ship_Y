@@ -30,6 +30,13 @@ export const GOD_ASSIST_CAUSAL_EVENT_TYPES = Object.freeze([
   "ring-bearing-degradation",
   "air-handler-trip",
   "water-processor-trip",
+  // water/cooling spur ids match god-view buttons; bare *-spur-fault = A stuck-closed
+  "water-spur-fault",
+  "water-spur-fault-a-closed",
+  "water-spur-fault-b-degraded",
+  "cooling-spur-fault",
+  "cooling-spur-fault-a-closed",
+  "cooling-spur-fault-b-degraded",
   "passenger-emergency",
 ] as const);
 

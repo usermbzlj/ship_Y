@@ -67,6 +67,10 @@ function step(requestId, realSeconds = 1, timeScale = MEDIUM_SCALE) {
 test("golden: pause tokens gate elapsed, ration ledger matches food, snapshot restores", () => {
   const ready = initialize();
   const foodBefore = ready.payload.state.consumables.foodDryKg;
+  const agricultureProducedBefore = ready.payload.operations.agricultureBays.reduce(
+    (total, bay) => total + bay.cumulativeFoodProducedKg,
+    0,
+  );
   assert.ok(foodBefore > 0, "initial foodDryKg must be positive");
 
   // 若干中等倍速步进 → elapsed 前进
@@ -127,18 +131,23 @@ test("golden: pause tokens gate elapsed, ration ledger matches food, snapshot re
     `elapsed must advance by ${MEDIUM_SCALE} after releasing ui`,
   );
 
-  // 口粮：步进后 foodDryKg 下降且与 survival.rationFoodConsumedKg 一致（单路径）
+  // 口粮只有 survival 路径扣减；同期农业产量按守恒式回加库存。
   const foodAfter = advanced.payload.state.consumables.foodDryKg;
   const foodDelta = foodBefore - foodAfter;
   const rationConsumed = advanced.payload.survival.rationFoodConsumedKg;
+  const agricultureProduced =
+    advanced.payload.operations.agricultureBays.reduce(
+      (total, bay) => total + bay.cumulativeFoodProducedKg,
+      0,
+    ) - agricultureProducedBefore;
   assert.ok(foodDelta > 0, `foodDryKg must decrease after stepping (Δ=${foodDelta})`);
   assert.ok(
     rationConsumed > 0,
     `survival.rationFoodConsumedKg must be positive, got ${rationConsumed}`,
   );
   assert.ok(
-    Math.abs(foodDelta - rationConsumed) < 1e-6,
-    `foodDryKg Δ (${foodDelta}) must equal survival.rationFoodConsumedKg (${rationConsumed}) — single ration path`,
+    Math.abs(foodDelta - (rationConsumed - agricultureProduced)) < 1e-6,
+    `foodDryKg Δ (${foodDelta}) must equal ration (${rationConsumed}) minus agriculture (${agricultureProduced})`,
   );
 
   // snapshot → restore → 关键字段一致

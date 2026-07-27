@@ -937,17 +937,17 @@ export function createBaselineShipState(): ShipState {
       scrubberCapacityKgPerSecond: 0.004,
     },
     water: {
-      potableKg: 3_600_000,
+      potableKg: 1_800_000,
       wastewaterKg: 120_000,
-      reserveIceKg: 8_000_000,
+      reserveIceKg: 3_000_000,
       brineWasteKg: 0,
       consumptionKgPerAwakePersonDay: 3,
-      recyclerCapacityKgPerDay: 6_000,
+      recyclerCapacityKgPerDay: 1_800,
       recyclerEfficiency: 0.981,
       recycledKgCumulative: 0,
     },
     consumables: {
-      foodDryKg: 1_200_000,
+      foodDryKg: 500_000,
       foodConsumedKgCumulative: 0,
     },
     population: {
@@ -1782,9 +1782,15 @@ export class SimulationEngine {
     );
 
     const wasteHeatJoules = energyConsumedKWh * 3_600_000 * 0.008;
-    thermal.coolantTemperatureK +=
-      wasteHeatJoules /
-      (thermal.coolantHeatCapacityKJPerK * 1_000);
+    // When thermal is externally authored (Worker cooling network), jump waste
+    // heat is applied on the thermal bus; skip aggregate coolant warming here
+    // to avoid a second heat-capacity model that synchronizeThermalAggregate
+    // would overwrite.
+    if (this.thermalAuthorityValue === "aggregate") {
+      thermal.coolantTemperatureK +=
+        wasteHeatJoules /
+        (thermal.coolantHeatCapacityKJPerK * 1_000);
+    }
 
     const arrived =
       journey.totalDistanceLightYears -
@@ -1802,6 +1808,38 @@ export class SimulationEngine {
       jumpsCompleted: journey.jumpsCompleted,
       status: journey.status,
     };
+  }
+
+  reviseJourneyPlan(input: {
+    destination: string;
+    totalDistanceLightYears: number;
+    totalLegs: number;
+    abandoned?: boolean;
+  }): JourneyState {
+    const destination = input.destination.trim();
+    if (!destination) throw new TypeError("journey destination must be non-empty");
+    assertFiniteNumber(input.totalDistanceLightYears, "totalDistanceLightYears");
+    if (input.totalDistanceLightYears <= 0 || input.totalDistanceLightYears > 100_000) {
+      throw new RangeError("replanned journey distance must be within 100000 light-years");
+    }
+    if (!Number.isSafeInteger(input.totalLegs) || input.totalLegs < 1 || input.totalLegs > 10_000) {
+      throw new RangeError("replanned journey legs must be an integer from 1 to 10000");
+    }
+    const journey = this.stateValue.journey;
+    journey.destination = destination;
+    journey.totalDistanceLightYears = input.totalDistanceLightYears;
+    journey.completedDistanceLightYears = 0;
+    journey.currentLeg = 1;
+    journey.totalLegs = input.totalLegs;
+    journey.jumpsCompleted = 0;
+    journey.status = input.abandoned
+      ? "stranded"
+      : journey.jumpDriveChargeKWh >= journey.requiredChargePerJumpKWh
+        ? "ready"
+        : "charging";
+    this.stateValue.revision += 1;
+    validateShipState(this.stateValue);
+    return cloneData(journey);
   }
 
   acceptExternallySuppliedJumpDriveEnergy(
@@ -2153,6 +2191,14 @@ export class SimulationEngine {
     this.stateValue.revision += 1;
     validateShipState(this.stateValue);
     return consumed;
+  }
+
+  addFoodInventoryKg(amountKg: number): number {
+    assertNonNegative(amountKg, "addFoodInventoryKg.amountKg");
+    this.stateValue.consumables.foodDryKg += amountKg;
+    this.stateValue.revision += 1;
+    validateShipState(this.stateValue);
+    return this.stateValue.consumables.foodDryKg;
   }
 
   getState(): ShipState {

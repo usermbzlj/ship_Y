@@ -1,6 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { zoneCatalogEntry } from "../../lib/sim/compartments.ts";
+
+/** Mirrors worker cabin heat-pump cold-side ZoneRole weights. */
+const CABIN_HEAT_PUMP_COLD_SIDE_ROLE_WEIGHT = {
+  living: 1,
+  public: 1,
+  medical: 1,
+  galley: 1,
+  agriculture: 0.5,
+  cargo: 0.25,
+  industrial: 0.25,
+  access: 0.25,
+};
+
 const emitted = [];
 globalThis.postMessage = (event) => {
   emitted.push(event);
@@ -64,16 +78,16 @@ const micrometeoroidRequest = {
     },
   ],
   declaredBalance: {
-    massKg: -0.34,
-    energyJ: 280_000_000,
-    linearMomentumKgMPerSecond: [1_180, -240, 90],
-    angularMomentumKgM2PerSecond: [0, 28_000, -74_000],
-    note: "test projectile balance",
+    massKg: -0.025,
+    energyJ: 25_000,
+    linearMomentumKgMPerSecond: [12, -2.4, 0.9],
+    angularMomentumKgM2PerSecond: [0, 280, -740],
+    note: "test ~φ7.6 mm Whipple-caught grain puncture balance",
   },
   metadata: {
     mode: "causal-event",
     eventType: "micrometeoroid",
-    targetZoneId: "A-18",
+    targetZoneId: "A-05",
     sourceKnownToAi: false,
   },
 };
@@ -131,10 +145,68 @@ test("time director pause tokens freeze stepping and enter the runtime snapshot"
     requestId: "time-control-snapshot",
   });
   assert.equal(saved.type, "snapshot");
-  assert.equal(saved.payload.snapshot.snapshotVersion, 16);
+  assert.equal(saved.payload.snapshot.snapshotVersion, 18);
   assert.equal(saved.payload.snapshot.timeDirector.timeScale, 3_600);
   assert.deepEqual(saved.payload.snapshot.timeDirector.pauseTokens, []);
   assert.ok(saved.payload.snapshot.timeDirector.totalSimSecondsAdvanced > 0);
+});
+
+test("worker stops exactly at a blocking decision boundary without catch-up debt", () => {
+  const ready = dispatch({
+    type: "initialize",
+    requestId: "init-exact-decision-boundary",
+    mission: {
+      origin: "太阳系",
+      destination: "鲸鱼座 τ",
+      directive: "保证乘员存续并安全抵达。",
+      seed: "exact-decision-boundary",
+      totalDistanceLightYears: 11.9,
+      totalLegs: 3,
+      timeScale: 86_400,
+    },
+  });
+  assert.equal(ready.type, "ready");
+  releaseUiPause("release-exact-decision-boundary");
+
+  const stopped = dispatch({
+    type: "step",
+    requestId: "step-to-exact-decision-boundary",
+    realSeconds: 1,
+    timeScale: 86_400,
+    blockingBoundary: {
+      id: "captain-routine:21600",
+      atSimulationSeconds: 21_600,
+      pauseToken: "llm-waiting",
+    },
+  });
+  assert.equal(stopped.type, "stepped", stopped.message);
+  assert.equal(stopped.payload.elapsedSeconds, 21_600);
+  assert.equal(stopped.payload.timeControl.paused, true);
+  assert.deepEqual(stopped.payload.timeControl.pauseTokens, ["llm-waiting"]);
+  assert.deepEqual(
+    stopped.payload.timeControl.reachedBlockingBoundary,
+    {
+      id: "captain-routine:21600",
+      atSimulationSeconds: 21_600,
+    },
+  );
+  assert.equal(stopped.payload.timeControl.owedSimSeconds, 0);
+
+  const resumed = dispatch({
+    type: "set-time-control",
+    requestId: "resume-after-exact-decision-boundary",
+    timeScale: 60,
+    releasePauseTokens: ["llm-waiting"],
+  });
+  assert.equal(resumed.type, "ready", resumed.message);
+  const nextMinute = dispatch({
+    type: "step",
+    requestId: "step-after-exact-decision-boundary",
+    realSeconds: 1,
+    timeScale: 60,
+  });
+  assert.equal(nextMinute.payload.elapsedSeconds, 21_660);
+  assert.equal(nextMinute.payload.timeControl.owedSimSeconds, 0);
 });
 
 test("worker couples 48 zones, population, aggregate state, and atomic saves", () => {
@@ -231,6 +303,10 @@ test("worker couples 48 zones, population, aggregate state, and atomic saves", (
   const foodBefore = foodInventoryKg(ready.payload.state);
   const foodConsumedBefore =
     ready.payload.state.consumables.foodConsumedKgCumulative;
+  const agricultureProducedBefore = ready.payload.operations.agricultureBays.reduce(
+    (total, bay) => total + bay.cumulativeFoodProducedKg,
+    0,
+  );
 
   const oxygenBefore = ready.payload.state.atmosphere.gasesKg.oxygen;
   const stepped = dispatch({
@@ -256,13 +332,21 @@ test("worker couples 48 zones, population, aggregate state, and atomic saves", (
   );
   const foodDelta =
     foodBefore - foodInventoryKg(stepped.payload.state);
+  const agricultureProduced =
+    stepped.payload.operations.agricultureBays.reduce(
+      (total, bay) => total + bay.cumulativeFoodProducedKg,
+      0,
+    ) - agricultureProducedBefore;
   const cumulativeDelta =
     stepped.payload.state.consumables.foodConsumedKgCumulative -
     foodConsumedBefore;
   assert.ok(
-    Math.abs(foodDelta - stepped.payload.survival.rationFoodConsumedKg) <
+    Math.abs(
+      foodDelta -
+        (stepped.payload.survival.rationFoodConsumedKg - agricultureProduced),
+    ) <
       1e-6,
-    "foodDryKg must decrease only by the survival ration path",
+    "foodDryKg must conserve ration consumption and agriculture production",
   );
   assert.ok(
     Math.abs(cumulativeDelta - stepped.payload.survival.rationFoodConsumedKg) <
@@ -279,7 +363,7 @@ test("worker couples 48 zones, population, aggregate state, and atomic saves", (
     requestId: "snapshot-coupling",
   });
   assert.equal(saved.type, "snapshot");
-  assert.equal(saved.payload.snapshot.snapshotVersion, 16);
+  assert.equal(saved.payload.snapshot.snapshotVersion, 18);
   assert.equal(saved.payload.snapshot.timeDirector.snapshotVersion, 1);
   assert.equal(saved.payload.snapshot.proceduralWorld.snapshotVersion, 1);
   assert.equal(saved.payload.snapshot.survival.snapshotVersion, 1);
@@ -340,6 +424,10 @@ test("worker couples 48 zones, population, aggregate state, and atomic saves", (
   assert.equal(
     saved.payload.snapshot.engine.clock.elapsedMicroseconds,
     saved.payload.snapshot.maintenance.elapsedMicroseconds,
+  );
+  assert.equal(
+    saved.payload.snapshot.engine.clock.elapsedMicroseconds,
+    saved.payload.snapshot.operations.elapsedMicroseconds,
   );
   assert.equal(
     saved.payload.snapshot.commandBus.revision,
@@ -491,7 +579,7 @@ test("a split-step one-leg voyage closes both energy ledgers and reaches its fin
   );
 });
 
-test("a micrometeoroid creates a real zone breach and activates fidelity limiting", () => {
+test("a micrometeoroid creates a real zone breach without reducing the selected time scale", () => {
   initialize("init-breach");
   const intervention = dispatch({
     type: "intervene",
@@ -502,7 +590,7 @@ test("a micrometeoroid creates a real zone breach and activates fidelity limitin
   assert.equal(intervention.payload.compartments.activeBreaches, 1);
   const interventionZone =
     intervention.payload.compartments.zones.find(
-      (zone) => zone.zoneId === "A-18",
+      (zone) => zone.zoneId === "A-05",
     );
   assert.equal(interventionZone.hasBreach, true);
   assert.equal(
@@ -519,7 +607,7 @@ test("a micrometeoroid creates a real zone breach and activates fidelity limitin
       person.memories.some(
         (memory) =>
           memory.incident?.eventId ===
-          `${intervention.payload.record.id}:A-18-impact`,
+          `${intervention.payload.record.id}:A-05-impact`,
       ),
     );
   assert.ok(
@@ -543,18 +631,18 @@ test("a micrometeoroid creates a real zone breach and activates fidelity limitin
     realSeconds: 1,
     timeScale: 21_600,
   });
-  assert.equal(stepped.type, "stepped");
-  assert.equal(stepped.payload.elapsedSeconds, 60);
+  assert.equal(stepped.type, "stepped", stepped.message);
+  assert.equal(stepped.payload.elapsedSeconds, 21_600);
   assert.equal(stepped.payload.compartments.requestedTimeScale, 21_600);
-  assert.equal(stepped.payload.compartments.effectiveTimeScale, 60);
-  assert.equal(stepped.payload.compartments.fidelityLimited, true);
+  assert.equal(stepped.payload.compartments.effectiveTimeScale, 21_600);
+  assert.equal(stepped.payload.compartments.fidelityLimited, false);
   assert.equal(
     stepped.payload.compartments.fidelityMode,
-    "transient-fine",
+    "equilibrium-fast",
   );
   assert.ok(stepped.payload.compartments.totalVentedGasKg > 0);
   const observedZone = stepped.payload.compartments.zones.find(
-    (zone) => zone.zoneId === "A-18",
+    (zone) => zone.zoneId === "A-05",
   );
   assert.notEqual(observedZone.observed.pressurePa, null);
   const expectedPressureCondition =
@@ -567,20 +655,20 @@ test("a micrometeoroid creates a real zone breach and activates fidelity limitin
 
   const isolateEnvelope = {
     type: "ship-command",
-    requestId: "isolate-a18",
-    commandId: "life-support:isolate-a18",
-    idempotencyKey: "life-support:isolate-a18",
-    issuedAtMicroseconds: 60_000_000,
+    requestId: "isolate-a05",
+    commandId: "life-support:isolate-a05",
+    idempotencyKey: "life-support:isolate-a05",
+    issuedAtMicroseconds: 21_600_000_000,
     expectedRevision: stepped.payload.commandBus.revision,
     expectedStateRevision: stepped.payload.state.revision,
     command: {
       kind: "isolate-pressure-zone",
       actorAgentId: "life-support",
-      zoneId: "A-18",
+      zoneId: "A-05",
     },
   };
   const isolated = dispatch(isolateEnvelope);
-  assert.equal(isolated.type, "ship-command");
+  assert.equal(isolated.type, "ship-command", isolated.message);
   assert.ok(isolated.payload.result.actuatedConnections > 0);
   assert.equal(isolated.payload.commandBus.revision, 1);
   const isolatedSnapshot = dispatch({
@@ -590,8 +678,8 @@ test("a micrometeoroid creates a real zone breach and activates fidelity limitin
   const incidentConnections =
     isolatedSnapshot.compartments.connections.filter(
       (connection) =>
-        connection.zoneAId === "A-18" ||
-        connection.zoneBId === "A-18",
+        connection.zoneAId === "A-05" ||
+        connection.zoneBId === "A-05",
     );
   assert.ok(incidentConnections.length > 0);
   assert.ok(
@@ -602,7 +690,7 @@ test("a micrometeoroid creates a real zone breach and activates fidelity limitin
 
   const replayed = dispatch({
     ...isolateEnvelope,
-    requestId: "isolate-a18-transport-retry",
+    requestId: "isolate-a05-transport-retry",
   });
   assert.equal(replayed.type, "ship-command");
   assert.equal(replayed.payload.commandBus.revision, 1);
@@ -612,7 +700,7 @@ test("a micrometeoroid creates a real zone breach and activates fidelity limitin
     requestId: "navigation-medical-forbidden",
     commandId: "navigation:medical-forbidden",
     idempotencyKey: "navigation:medical-forbidden",
-    issuedAtMicroseconds: 60_000_000,
+    issuedAtMicroseconds: 21_600_000_000,
     expectedRevision: 1,
     expectedStateRevision: replayed.payload.state.revision,
     command: {
@@ -643,7 +731,7 @@ test("a micrometeoroid creates a real zone breach and activates fidelity limitin
     requestId: "future-command",
     commandId: "life-support:future-isolation",
     idempotencyKey: "life-support:future-isolation",
-    issuedAtMicroseconds: 60_000_001,
+    issuedAtMicroseconds: 21_600_000_001,
     expectedRevision: 1,
     expectedStateRevision: replayed.payload.state.revision,
     command: {
@@ -1122,6 +1210,100 @@ test("electrical generation force and fusion trip update authoritative state", (
   );
 });
 
+test("procedural power-fluctuation and hibernation-complication inject electrical causality", () => {
+  const ready = initialize("init-procedural-electrical");
+  const beforeGenerationKw = ready.payload.state.power.generationKw;
+  const derated = dispatch({
+    type: "intervene",
+    requestId: "procedural-power-fluctuation",
+    request: {
+      id: "procedural:proc-power-fluctuation-test",
+      actor: "environment:procedural",
+      reason:
+        "B 母线出现电压扰动，bus-b 电压传感器已降级，聚变模块 3 目标出力已临时降额。",
+      operations: [],
+      declaredBalance: {
+        massKg: 0,
+        energyJ: 0,
+        linearMomentumKgMPerSecond: [0, 0, 0],
+        angularMomentumKgM2PerSecond: [0, 0, 0],
+        note: "Electrical topology / sensor fault",
+      },
+      metadata: {
+        mode: "causal-event",
+        eventType: "power-fluctuation",
+        targetSensorId: "sensor:bus-b:voltageV",
+        targetReactorId: "fusion-3",
+        powerAction: "reactor-derate",
+        sourceKnownToAi: false,
+      },
+    },
+  });
+  assert.equal(derated.type, "intervention", derated.message);
+  const fusion3 = derated.payload.electrical.truth.reactors.find(
+    (reactor) => reactor.id === "fusion-3",
+  );
+  assert.ok(fusion3.targetOutputKw < 210_500);
+  assert.equal(fusion3.targetOutputKw, Math.round(210_500 * 0.85));
+  const afterDerate = dispatch({
+    type: "snapshot",
+    requestId: "procedural-power-snapshot",
+  }).payload.snapshot;
+  assert.equal(
+    afterDerate.electrical.sensors.find(
+      (sensor) => sensor.id === "sensor:bus-b:voltageV",
+    ).condition,
+    "degraded",
+  );
+  // Ramp toward the derated target; generation should fall within a few seconds.
+  const stepped = dispatch({
+    type: "step",
+    requestId: "procedural-power-step",
+    realSeconds: 1,
+    timeScale: 30,
+  });
+  assert.equal(stepped.type, "stepped", stepped.message);
+  assert.ok(
+    stepped.payload.state.power.generationKw < beforeGenerationKw,
+  );
+
+  const hibernationTrip = dispatch({
+    type: "intervene",
+    requestId: "procedural-hibernation-complication",
+    request: {
+      id: "procedural:proc-hibernation-complication-test",
+      actor: "environment:procedural",
+      reason:
+        "休眠馈线 A（hibernation-a）出现间歇性欠压，保护已跳开断路器；本地储备开始放电。",
+      operations: [],
+      declaredBalance: {
+        massKg: 0,
+        energyJ: 0,
+        linearMomentumKgMPerSecond: [0, 0, 0],
+        angularMomentumKgM2PerSecond: [0, 0, 0],
+        note: "Hibernation feeder protection trip",
+      },
+      metadata: {
+        mode: "causal-event",
+        eventType: "hibernation-complication",
+        targetLoadId: "hibernation-a",
+        sourceKnownToAi: false,
+      },
+    },
+  });
+  assert.equal(hibernationTrip.type, "intervention", hibernationTrip.message);
+  const afterHibernation = dispatch({
+    type: "snapshot",
+    requestId: "procedural-hibernation-snapshot",
+  }).payload.snapshot;
+  assert.equal(
+    afterHibernation.electrical.breakers.find(
+      (breaker) => breaker.id === "breaker:hibernation-a",
+    ).condition,
+    "tripped",
+  );
+});
+
 test("per-load electrical service drives jump charging, scrubbers, and cooling pumps", () => {
   const ready = initialize("init-load-coupling");
   let current = ready.payload;
@@ -1388,7 +1570,7 @@ test("A/B water recovery obeys commands, feeder service, God faults, and snapsho
   );
   assert.equal(
     configure.payload.state.water.recyclerCapacityKgPerDay,
-    4_500,
+    1_350,
   );
   current = configure.payload;
 
@@ -1523,6 +1705,271 @@ test("A/B water recovery obeys commands, feeder service, God faults, and snapsho
   assert.match(rejected.message, /not causally derived/);
 });
 
+test("life-support configures water distribution spur open fraction and may repair to nominal", () => {
+  let current = initialize("init-water-spur-command").payload;
+
+  const throttle = dispatch({
+    type: "ship-command",
+    requestId: "life-support-throttle-spur-a",
+    commandId: "life-support:throttle-spur-a",
+    idempotencyKey: "life-support:throttle-spur-a",
+    issuedAtMicroseconds: 0,
+    expectedRevision: current.commandBus.revision,
+    expectedStateRevision: current.state.revision,
+    command: {
+      kind: "configure-water-distribution-spur",
+      actorAgentId: "life-support",
+      spurId: "water-spur-a",
+      commandedOpenFraction: 0.4,
+    },
+  });
+  assert.equal(throttle.type, "ship-command", throttle.message);
+  assert.equal(
+    throttle.payload.result.waterDistributionSpurCommandedOpenFraction,
+    0.4,
+  );
+  assert.equal(
+    throttle.payload.result.waterDistributionSpurEffectiveDeliveryFraction,
+    0.4,
+  );
+  assert.equal(
+    throttle.payload.waterRecovery.distributionSpurs.find(
+      (spur) => spur.spurId === "water-spur-a",
+    ).effectiveDeliveryFraction,
+    0.4,
+  );
+  current = throttle.payload;
+
+  const captainThrottle = dispatch({
+    type: "ship-command",
+    requestId: "captain-throttle-spur-b",
+    commandId: "captain:throttle-spur-b",
+    idempotencyKey: "captain:throttle-spur-b",
+    issuedAtMicroseconds: 0,
+    expectedRevision: current.commandBus.revision,
+    expectedStateRevision: current.state.revision,
+    command: {
+      kind: "configure-water-distribution-spur",
+      actorAgentId: "captain",
+      spurId: "water-spur-b",
+      commandedOpenFraction: 0.25,
+    },
+  });
+  assert.equal(captainThrottle.type, "ship-command", captainThrottle.message);
+  assert.equal(
+    captainThrottle.payload.result.waterDistributionSpurEffectiveDeliveryFraction,
+    0.25,
+  );
+  current = captainThrottle.payload;
+
+  const engineeringForbidden = dispatch({
+    type: "ship-command",
+    requestId: "engineering-spur-forbidden",
+    commandId: "engineering:spur-forbidden",
+    idempotencyKey: "engineering:spur-forbidden",
+    issuedAtMicroseconds: 0,
+    expectedRevision: current.commandBus.revision,
+    expectedStateRevision: current.state.revision,
+    command: {
+      kind: "configure-water-distribution-spur",
+      actorAgentId: "engineering",
+      spurId: "water-spur-a",
+      commandedOpenFraction: 1,
+    },
+  });
+  assert.equal(engineeringForbidden.type, "error");
+  assert.match(engineeringForbidden.message, /FORBIDDEN/);
+
+  const faulted = dispatch({
+    type: "intervene",
+    requestId: "god-fault-spur-a-closed",
+    request: {
+      actor: "player:god-mode",
+      reason: "Close A spur for crew repair test",
+      operations: [],
+      declaredBalance: {
+        massKg: 0,
+        energyJ: 0,
+        linearMomentumKgMPerSecond: [0, 0, 0],
+        angularMomentumKgM2PerSecond: [0, 0, 0],
+        note: "spur fault",
+      },
+      metadata: {
+        mode: "causal-event",
+        eventType: "water-spur-fault",
+        targetSpurId: "water-spur-a",
+        spurCondition: "stuck-closed",
+      },
+    },
+  });
+  assert.equal(faulted.type, "intervention", faulted.message);
+  assert.equal(
+    faulted.payload.waterRecovery.distributionSpurs.find(
+      (spur) => spur.spurId === "water-spur-a",
+    ).condition,
+    "stuck-closed",
+  );
+  assert.equal(
+    faulted.payload.waterRecovery.distributionSpurs.find(
+      (spur) => spur.spurId === "water-spur-a",
+    ).effectiveDeliveryFraction,
+    0,
+  );
+  current = faulted.payload;
+
+  const repair = dispatch({
+    type: "ship-command",
+    requestId: "life-support-repair-spur-a",
+    commandId: "life-support:repair-spur-a",
+    idempotencyKey: "life-support:repair-spur-a",
+    issuedAtMicroseconds: 0,
+    expectedRevision: current.commandBus.revision,
+    expectedStateRevision: current.state.revision,
+    command: {
+      kind: "configure-water-distribution-spur",
+      actorAgentId: "life-support",
+      spurId: "water-spur-a",
+      condition: "nominal",
+    },
+  });
+  assert.equal(repair.type, "ship-command", repair.message);
+  assert.equal(repair.payload.result.waterDistributionSpurCondition, "nominal");
+  assert.equal(
+    repair.payload.result.waterDistributionSpurEffectiveDeliveryFraction,
+    0.4,
+  );
+  assert.equal(
+    repair.payload.waterRecovery.distributionSpurs.find(
+      (spur) => spur.spurId === "water-spur-a",
+    ).effectiveDeliveryFraction,
+    0.4,
+  );
+});
+
+test("habitat thermal delivery spur faults scale ring cooling and ledger shortfall", () => {
+  const ready = initialize("init-cooling-spur");
+  let current = ready.payload;
+  assert.equal(
+    current.cooling.habitatThermalDeliverySpurs.find(
+      (spur) => spur.spurId === "cooling-spur-a",
+    ).effectiveDeliveryFraction,
+    1,
+  );
+
+  const throttle = dispatch({
+    type: "ship-command",
+    requestId: "engineering-throttle-cooling-spur-a",
+    commandId: "engineering:throttle-cooling-spur-a",
+    idempotencyKey: "engineering:throttle-cooling-spur-a",
+    issuedAtMicroseconds: 0,
+    expectedRevision: current.commandBus.revision,
+    expectedStateRevision: current.state.revision,
+    command: {
+      kind: "configure-habitat-thermal-delivery-spur",
+      actorAgentId: "engineering",
+      spurId: "cooling-spur-a",
+      commandedOpenFraction: 0.5,
+    },
+  });
+  assert.equal(throttle.type, "ship-command", throttle.message);
+  assert.equal(
+    throttle.payload.result.habitatThermalDeliverySpurEffectiveDeliveryFraction,
+    0.5,
+  );
+  current = throttle.payload;
+
+  const lifeSupportForbidden = dispatch({
+    type: "ship-command",
+    requestId: "life-support-cooling-spur-forbidden",
+    commandId: "life-support:cooling-spur-forbidden",
+    idempotencyKey: "life-support:cooling-spur-forbidden",
+    issuedAtMicroseconds: 0,
+    expectedRevision: current.commandBus.revision,
+    expectedStateRevision: current.state.revision,
+    command: {
+      kind: "configure-habitat-thermal-delivery-spur",
+      actorAgentId: "life-support",
+      spurId: "cooling-spur-a",
+      commandedOpenFraction: 1,
+    },
+  });
+  assert.equal(lifeSupportForbidden.type, "error");
+  assert.match(lifeSupportForbidden.message, /FORBIDDEN/);
+
+  const faulted = dispatch({
+    type: "intervene",
+    requestId: "god-fault-cooling-spur-a-closed",
+    request: {
+      actor: "player:god-mode",
+      reason: "Close A habitat thermal spur",
+      operations: [],
+      declaredBalance: {
+        massKg: 0,
+        energyJ: 0,
+        linearMomentumKgMPerSecond: [0, 0, 0],
+        angularMomentumKgM2PerSecond: [0, 0, 0],
+        note: "cooling spur fault",
+      },
+      metadata: {
+        mode: "causal-event",
+        eventType: "cooling-spur-fault",
+        targetSpurId: "cooling-spur-a",
+        spurCondition: "stuck-closed",
+      },
+    },
+  });
+  assert.equal(faulted.type, "intervention");
+  assert.equal(
+    faulted.payload.cooling.habitatThermalDeliverySpurs.find(
+      (spur) => spur.spurId === "cooling-spur-a",
+    ).effectiveDeliveryFraction,
+    0,
+  );
+  current = faulted.payload;
+
+  const stepped = dispatch({
+    type: "step",
+    requestId: "step-cooling-spur-shortfall",
+    realSeconds: 1,
+    timeScale: 60,
+  });
+  assert.equal(stepped.type, "stepped");
+  const spurA = stepped.payload.cooling.habitatThermalDeliverySpurs.find(
+    (spur) => spur.spurId === "cooling-spur-a",
+  );
+  assert.equal(spurA.condition, "stuck-closed");
+  assert.ok(
+    spurA.lastDeliveryShortfallJ > 0,
+    "stuck-closed spur should ledger undelivered habitat cooling",
+  );
+  assert.ok(stepped.payload.cooling.undeliveredHabitatCoolingJ > 0);
+
+  const repair = dispatch({
+    type: "ship-command",
+    requestId: "captain-repair-cooling-spur-a",
+    commandId: "captain:repair-cooling-spur-a",
+    idempotencyKey: "captain:repair-cooling-spur-a",
+    issuedAtMicroseconds: 0,
+    expectedRevision: stepped.payload.commandBus.revision,
+    expectedStateRevision: stepped.payload.state.revision,
+    command: {
+      kind: "configure-habitat-thermal-delivery-spur",
+      actorAgentId: "captain",
+      spurId: "cooling-spur-a",
+      condition: "nominal",
+    },
+  });
+  assert.equal(repair.type, "ship-command", repair.message);
+  assert.equal(
+    repair.payload.result.habitatThermalDeliverySpurCondition,
+    "nominal",
+  );
+  assert.equal(
+    repair.payload.result.habitatThermalDeliverySpurEffectiveDeliveryFraction,
+    0.5,
+  );
+});
+
 test("powered feeders cannot remove cabin heat through commanded-off pumps", () => {
   const ready = initialize("init-commanded-off-pumps");
   let current = ready.payload;
@@ -1618,17 +2065,18 @@ test("cabin heat pumps obey Qhot equals Qcold plus served compressor work", () =
     type: "snapshot",
     requestId: "before-cabin-heat-pump",
   }).payload.snapshot;
-  const zoneVolume = before.compartments.zones.reduce(
-    (total, zone) => total + zone.volumeCubicMeters,
-    0,
-  );
-  const cabinTemperatureK =
-    before.compartments.zones.reduce(
-      (total, zone) =>
-        total +
-        zone.temperatureK * zone.volumeCubicMeters,
-      0,
-    ) / zoneVolume;
+  let weightedTemperatureSum = 0;
+  let weightSum = 0;
+  for (const zone of before.compartments.zones) {
+    const weight =
+      zone.volumeCubicMeters *
+      CABIN_HEAT_PUMP_COLD_SIDE_ROLE_WEIGHT[
+        zoneCatalogEntry(zone.id).role
+      ];
+    weightedTemperatureSum += zone.temperatureK * weight;
+    weightSum += weight;
+  }
+  const cabinTemperatureK = weightedTemperatureSum / weightSum;
   const thermalBusTemperatureK = before.cooling.nodes.find(
     (node) => node.id === "thermal-bus",
   ).temperatureK;
@@ -2059,10 +2507,18 @@ test("fixed AI roles issue causal navigation, electrical, and cooling controls",
     configured.commandBus.actors.map(({ id, role }) => ({ id, role })),
     [
       { id: "captain", role: "captain" },
+      ...Array.from({ length: 12 }, (_, index) => ({
+        id: `crew-${String(index + 1).padStart(4, "0")}`,
+        role: "key-passenger",
+      })),
       { id: "engineering", role: "engineering" },
       { id: "life-support", role: "life-support" },
       { id: "medical", role: "medical" },
       { id: "navigation", role: "navigation" },
+      ...Array.from({ length: 20 }, (_, index) => ({
+        id: `passenger-${String(index + 1).padStart(4, "0")}`,
+        role: "key-passenger",
+      })),
       {
         id: "passenger-affairs",
         role: "passenger-affairs",
@@ -2619,6 +3075,61 @@ test("captain and engineering ring commands are authorized, causal, and atomic",
   );
 });
 
+test("a feeder-capped historical rotation request does not block later commands", () => {
+  initialize("init-feeder-capped-rotation-request");
+  const stepped = dispatch({
+    type: "step",
+    requestId: "step-feeder-capped-rotation-request",
+    realSeconds: 1,
+    timeScale: 60,
+  });
+  assert.equal(stepped.type, "stepped", stepped.message);
+  const snapshot = dispatch({
+    type: "snapshot",
+    requestId: "snapshot-feeder-capped-rotation-request",
+  }).payload.snapshot;
+
+  const feederAcceptedRequestJ = [
+    "rotation-drive-a",
+    "rotation-drive-b",
+  ].reduce(
+    (total, loadId) =>
+      total +
+      snapshot.electrical.ledger.demandedLoadEnergyKWhById[loadId] *
+        3_600_000,
+    0,
+  );
+  snapshot.rotation.energyLedger.requestedElectricalEnergyJ =
+    feederAcceptedRequestJ * 1.02;
+
+  const restored = dispatch({
+    type: "restore",
+    requestId: "restore-feeder-capped-rotation-request",
+    snapshot,
+  });
+  assert.equal(restored.type, "ready", restored.message);
+
+  const command = dispatch({
+    type: "ship-command",
+    requestId: "command-after-feeder-capped-rotation-request",
+    commandId: "captain:ring-command-after-feeder-cap",
+    idempotencyKey: "captain:ring-command-after-feeder-cap",
+    issuedAtMicroseconds: Math.round(
+      restored.payload.elapsedSeconds * 1_000_000,
+    ),
+    expectedRevision: restored.payload.commandBus.revision,
+    expectedStateRevision: restored.payload.state.revision,
+    command: {
+      kind: "set-habitat-ring-control",
+      actorAgentId: "captain",
+      ringId: "ring-a",
+      controlMode: "coast",
+      targetRelativeRpm: 0,
+    },
+  });
+  assert.equal(command.type, "ship-command", command.message);
+});
+
 test("single-ring coast, braking, and feeder loss exchange real carrier momentum", () => {
   let current = initialize("init-single-ring-reaction").payload;
   const issue = (commandId, actorAgentId, command) => {
@@ -3053,7 +3564,10 @@ test("malformed nine-clock, cross-ledger, and command-bus restores are rejected 
     snapshot: inconsistentWaterClock,
   });
   assert.equal(waterClockRejected.type, "error");
-  assert.match(waterClockRejected.message, /water.*maintenance clocks/);
+  assert.match(
+    waterClockRejected.message,
+    /water.*maintenance.*operations clocks/,
+  );
 
   const inconsistentMaintenanceClock = structuredClone(snapshot);
   inconsistentMaintenanceClock.maintenance.elapsedMicroseconds += 1_000_000;
@@ -3063,7 +3577,10 @@ test("malformed nine-clock, cross-ledger, and command-bus restores are rejected 
     snapshot: inconsistentMaintenanceClock,
   });
   assert.equal(maintenanceClockRejected.type, "error");
-  assert.match(maintenanceClockRejected.message, /maintenance clocks/);
+  assert.match(
+    maintenanceClockRejected.message,
+    /maintenance.*operations clocks/,
+  );
 
   const forgedMaintenanceInventory = structuredClone(snapshot);
   forgedMaintenanceInventory.maintenance.inventory["pump-service-kit"] += 1;
@@ -3131,7 +3648,7 @@ test("malformed nine-clock, cross-ledger, and command-bus restores are rejected 
   assert.equal(forgedRotationDemandRejected.type, "error");
   assert.match(
     forgedRotationDemandRejected.message,
-    /rotation requested electrical energy/,
+    /electrical rotation-drive demand exceeds its authoritative upstream request/,
   );
 
   const forgedRotationService = structuredClone(snapshot);

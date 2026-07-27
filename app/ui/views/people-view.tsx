@@ -4,27 +4,139 @@ import type {
   ShipState,
   PassengerHighlightTelemetry,
   KeyPassengerPrivateNote,
+  CompartmentTelemetry,
+  PassengerSocietySnapshot,
 } from "../types";
+import {
+  zoneCatalogEntry,
+  ZONE_ROLE_LABELS_ZH,
+  type ZoneId,
+  type ZoneRole,
+} from "@/lib/sim/compartments";
 import { formatDuration } from "../utils";
 import { StatusPill } from "../components/status-pill";
+
+const RUMOR_DISPLAY_LIMIT = 8;
+
+/** Prefer compartment zone telemetry labelZh/role; fall back to zone catalog. */
+function zoneRoleLabelZh(
+  zoneId: string,
+  zones: CompartmentTelemetry["zones"] | undefined,
+): string | null {
+  const telemetry = zones?.find((zone) => zone.zoneId === zoneId);
+  if (telemetry?.labelZh) {
+    return telemetry.labelZh;
+  }
+  if (telemetry?.role && telemetry.role in ZONE_ROLE_LABELS_ZH) {
+    return ZONE_ROLE_LABELS_ZH[telemetry.role as ZoneRole];
+  }
+  try {
+    return zoneCatalogEntry(zoneId as ZoneId).labelZh;
+  } catch {
+    return null;
+  }
+}
+
+function formatRelativeAgo(
+  nowSimulationSeconds: number,
+  atSimulationSeconds: number,
+): string {
+  const elapsedSeconds = Math.max(
+    0,
+    Math.floor(nowSimulationSeconds - atSimulationSeconds),
+  );
+  const totalMinutes = Math.floor(elapsedSeconds / 60);
+  const days = Math.floor(totalMinutes / (24 * 60));
+  const hours = Math.floor((totalMinutes % (24 * 60)) / 60);
+  const minutes = totalMinutes % 60;
+  if (days > 0) {
+    return `${days} 天 ${hours} 小时前`;
+  }
+  if (hours > 0) {
+    return `${hours} 小时 ${minutes} 分钟前`;
+  }
+  if (minutes > 0) {
+    return `${minutes} 分钟前`;
+  }
+  return "刚刚";
+}
+
+function RumorBoard({
+  passengerSociety,
+  simulationSeconds,
+}: {
+  passengerSociety: PassengerSocietySnapshot;
+  simulationSeconds: number;
+}) {
+  const rumors = passengerSociety.rumors
+    .slice()
+    .sort(
+      (left, right) =>
+        right.createdAtSimulationSeconds - left.createdAtSimulationSeconds,
+    )
+    .slice(0, RUMOR_DISPLAY_LIMIT);
+
+  return (
+    <div className="rumor-board">
+      <div className="rumor-board-head">
+        <div>
+          <span className="eyebrow">CIRCULATING</span>
+          <strong>乘客传言</strong>
+        </div>
+        <span className="rumor-unverified">未经证实</span>
+      </div>
+      {rumors.length === 0 ? (
+        <div className="rumor-empty panel-note">
+          <p>尚无流传中的乘客传言。</p>
+          <p>等待签发 · 关键乘客分享见闻后，未经证实的传言将显示在此。</p>
+        </div>
+      ) : (
+        <div className="rumor-list">
+          {rumors.map((rumor) => (
+            <article className="rumor-item" key={rumor.rumorId}>
+              <div className="rumor-item-meta">
+                <strong>{rumor.originDisplayName}</strong>
+                <span>{rumor.zoneId}</span>
+                <span className="rumor-unverified-chip">未经证实</span>
+                <span>
+                  {formatRelativeAgo(
+                    simulationSeconds,
+                    rumor.createdAtSimulationSeconds,
+                  )}
+                </span>
+              </div>
+              <p className="rumor-text">{rumor.text}</p>
+              <span className="rumor-hear">
+                {rumor.hearCount.toLocaleString("zh-CN")} 人听到 ·{" "}
+                {formatDuration(rumor.createdAtSimulationSeconds)}
+              </span>
+            </article>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function PeopleView({
   state,
   highlights,
   privateNotes,
+  compartments = null,
+  passengerSociety,
+  simulationSeconds,
 }: {
   state: ShipState | null;
   highlights: PassengerHighlightTelemetry[];
   privateNotes: KeyPassengerPrivateNote[];
+  compartments?: CompartmentTelemetry | null;
+  passengerSociety: PassengerSocietySnapshot;
+  simulationSeconds: number;
 }) {
-  const total = state?.population.total ?? 2_120;
-  const awake = state?.population.awake ?? 218;
-  const hibernating = state?.population.hibernating ?? 1_902;
-  const health = (state?.population.averageHealth ?? 0.985) * 100;
-  const morale = state?.population.averageMorale ?? 0.82;
   const privateNoteByPassengerId = new Map(
     privateNotes.map((note) => [note.passengerId, note]),
   );
+  const zones = compartments?.zones;
   const displayedPassengers = highlights.map((person) => {
     const privateNote = privateNoteByPassengerId.get(person.passengerId);
     return {
@@ -33,6 +145,7 @@ export function PeopleView({
       role: person.occupation,
       cabin: person.cabinId,
       zoneId: person.zoneId,
+      zoneRoleLabel: zoneRoleLabelZh(person.zoneId, zones),
       zoneCondition: person.zoneCondition,
       zoneObservation:
         person.lifeState === "hibernating"
@@ -57,12 +170,83 @@ export function PeopleView({
             : `身体 ${(person.physicalHealth * 100).toFixed(0)}% · 压力 ${(person.stress * 100).toFixed(0)}% · 等待私人终端轮询`,
     };
   });
+
+  if (state == null) {
+    return (
+      <section className="view-grid people-view habitat-surface" aria-label="乘员状态">
+        <div className="panel population-panel is-offline">
+          <div className="panel-heading">
+            <div>
+              <span className="eyebrow">POPULATION</span>
+              <h2>乘员遥测未联机</h2>
+            </div>
+            <StatusPill tone="watch">未联机</StatusPill>
+          </div>
+          <div className="population-orbit">
+            <div className="population-core">
+              <strong>—</strong>
+              <span>等待签发</span>
+            </div>
+            <div className="orbit-ring orbit-one" />
+            <div className="orbit-ring orbit-two" />
+            <span className="population-tag tag-awake">清醒 · 未联机</span>
+            <span className="population-tag tag-sleep">休眠 · 未联机</span>
+            <span className="population-tag tag-care">死亡 · 未联机</span>
+          </div>
+          <div className="population-metrics">
+            <div>
+              <span>群体健康</span>
+              <strong>未联机</strong>
+            </div>
+            <div>
+              <span>社会压力</span>
+              <strong>未联机</strong>
+            </div>
+            <div>
+              <span>休眠舱占用</span>
+              <strong>未联机</strong>
+            </div>
+          </div>
+          <p className="panel-note population-offline-note">
+            等待签发 · 人口与健康遥测未接入。任务启动后将显示真实乘员计数，不会使用占位人数。
+          </p>
+        </div>
+        <div className="panel passenger-panel">
+          <div className="panel-heading compact">
+            <div>
+              <span className="eyebrow">KEY PASSENGERS</span>
+              <h2>关键乘客观察</h2>
+            </div>
+          </div>
+          <RumorBoard
+            passengerSociety={passengerSociety}
+            simulationSeconds={simulationSeconds}
+          />
+          <div className="passenger-list">
+            <div className="passenger-empty-note panel-note">
+              <strong>关键槽位已预留 · 列表为空</strong>
+              <p>
+                32 个固定关键乘客槽位已登记，当前尚无遥测入库。任务启动后，当乘员清醒时将开始私人终端轮询；在此之前本列表保持空白，不会显示占位乘客。
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  const total = state.population.total;
+  const awake = state.population.awake;
+  const hibernating = state.population.hibernating;
+  const health = state.population.averageHealth * 100;
+  const morale = state.population.averageMorale;
+
   return (
-    <section className="view-grid people-view" aria-label="乘员状态">
+    <section className="view-grid people-view habitat-surface" aria-label="乘员状态">
       <div className="panel population-panel">
         <div className="panel-heading">
           <div>
-            <span className="eyebrow">POPULATION / 个体持续模拟</span>
+            <span className="eyebrow">POPULATION</span>
             <h2>{total.toLocaleString("zh-CN")} 名乘员</h2>
           </div>
           <StatusPill
@@ -85,13 +269,13 @@ export function PeopleView({
           <div className="orbit-ring orbit-one" />
           <div className="orbit-ring orbit-two" />
           <span className="population-tag tag-awake">
-            {((awake / total) * 100).toFixed(1)}% 清醒
+            {total > 0 ? ((awake / total) * 100).toFixed(1) : "0.0"}% 清醒
           </span>
           <span className="population-tag tag-sleep">
             {hibernating.toLocaleString("zh-CN")} 休眠
           </span>
           <span className="population-tag tag-care">
-            {(state?.population.deceased ?? 0).toLocaleString("zh-CN")} 死亡
+            {state.population.deceased.toLocaleString("zh-CN")} 死亡
           </span>
         </div>
         <div className="population-metrics">
@@ -109,7 +293,7 @@ export function PeopleView({
           <div>
             <span>休眠舱占用</span>
             <strong>
-              {(state?.hibernation.occupiedPods ?? 1_902).toLocaleString("zh-CN")}
+              {state.hibernation.occupiedPods.toLocaleString("zh-CN")}
             </strong>
           </div>
         </div>
@@ -117,10 +301,14 @@ export function PeopleView({
       <div className="panel passenger-panel">
         <div className="panel-heading compact">
           <div>
-            <span className="eyebrow">KEY PASSENGERS / 固定关键槽位 32</span>
+            <span className="eyebrow">KEY PASSENGERS</span>
             <h2>关键乘客观察</h2>
           </div>
         </div>
+        <RumorBoard
+          passengerSociety={passengerSociety}
+          simulationSeconds={simulationSeconds}
+        />
         <div className="passenger-list">
           {displayedPassengers.length === 0 ? (
             <div className="passenger-empty-note panel-note">
@@ -136,8 +324,10 @@ export function PeopleView({
                 <div>
                   <strong>{passenger.name}</strong>
                   <span>
-                    {passenger.role} · {passenger.cabin} ·{" "}
-                    {passenger.zoneId}
+                    {passenger.role} · {passenger.cabin} · {passenger.zoneId}
+                    {passenger.zoneRoleLabel
+                      ? ` · ${passenger.zoneRoleLabel}`
+                      : ""}
                   </span>
                   <p>{passenger.note}</p>
                 </div>

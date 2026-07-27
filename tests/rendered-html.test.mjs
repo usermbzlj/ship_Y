@@ -42,10 +42,12 @@ test("server-renders the Far Horizon mission shell", async () => {
   assert.match(html, /人工干预/);
   assert.match(html, /2,120/);
   assert.doesNotMatch(html, /react-loading-skeleton|Codex is working/i);
+  assert.doesNotMatch(html, /名乘员/);
+  assert.doesNotMatch(html, /当前清醒/);
 });
 
 test("production source contains a real worker-backed simulator, not starter UI", async () => {
-  const [page, layout, missionControl, simulationWorker, packageJson, css] =
+  const [page, layout, missionControl, simulationWorker, packageJson, css, peopleView] =
     await Promise.all([
       readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
       readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
@@ -53,6 +55,7 @@ test("production source contains a real worker-backed simulator, not starter UI"
       readFile(new URL("../lib/sim/worker.ts", import.meta.url), "utf8"),
       readFile(new URL("../package.json", import.meta.url), "utf8"),
       readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+      readFile(new URL("../app/ui/views/people-view.tsx", import.meta.url), "utf8"),
     ]);
 
   assert.match(page, /<MissionControl \/>/);
@@ -70,9 +73,49 @@ test("production source contains a real worker-backed simulator, not starter UI"
   assert.match(simulationWorker, /environment:procedural/);
   assert.match(simulationWorker, /ProceduralWorldScheduler/);
   assert.match(simulationWorker, /SimulationTimeDirector/);
-  assert.match(missionControl, /farhorizon-save/);
+  assert.match(missionControl, /local-save-idb/);
+  assert.match(missionControl, /putManualSave/);
+  assert.match(missionControl, /migrateLocalStorageSaveOnce/);
   assert.match(missionControl, /TimeControlBar/);
   assert.match(missionControl, /sim-status-strip/);
+  assert.match(missionControl, /showSecondarySimStatus/);
+  assert.match(missionControl, /仿真已暂停 · 等待 AI 舰长研判/);
+  assert.match(missionControl, /保真度锁定 · 有效推进倍率已受限/);
+  assert.match(missionControl, /hullThreat/);
+  assert.match(missionControl, /projectCaptainHullThreatObservation/);
+  assert.match(missionControl, /truthConditions/);
+  assert.match(missionControl, /hull-threat:/);
+  assert.match(missionControl, /case "passenger-emergency"/);
+  assert.match(
+    missionControl,
+    /default:\s*\r?\n\s*showToast\(`不支持的因果事件类型/,
+  );
+  assert.match(
+    missionControl,
+    /此外层存档格式为 LocalSave v18，已不再支持/,
+  );
+  assert.doesNotMatch(missionControl, /snapshot v16/);
+  assert.match(missionControl, /knownAlertIds\.current\.clear\(\)/);
+  assert.match(missionControl, /setCaptainDecisionLog\(\[\]\)/);
+
+  const [alertBanner, aiConstants] = await Promise.all([
+    readFile(
+      new URL("../app/ui/components/alert-banner.tsx", import.meta.url),
+      "utf8",
+    ),
+    readFile(new URL("../app/ui/constants.ts", import.meta.url), "utf8"),
+  ]);
+  assert.match(alertBanner, /jump-ready:\$\{jumpCycle\}/);
+  assert.match(alertBanner, /jumpsCompleted/);
+  assert.doesNotMatch(alertBanner, /push\("jump-ready"/);
+  assert.match(aiConstants, /model: "配置端点"/);
+  assert.doesNotMatch(aiConstants, /DeepSeek V4 Pro/);
+  assert.doesNotMatch(aiConstants, /处理 14 项请求/);
+
+  assert.match(peopleView, /乘员遥测未联机/);
+  assert.match(peopleView, /等待签发 · 人口与健康遥测未接入/);
+  assert.doesNotMatch(peopleView, /population\.total \?\?/);
+  assert.doesNotMatch(peopleView, /population\.awake \?\?/);
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
   assert.doesNotMatch(missionControl, /SkeletonPreview/);
 

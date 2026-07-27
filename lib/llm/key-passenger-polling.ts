@@ -11,9 +11,9 @@ export const KEY_PASSENGER_DAILY_ATTEMPT_LIMIT = 64;
 export const KEY_PASSENGER_FAILURE_RETRY_BASE_SECONDS = 30 * 60;
 export const KEY_PASSENGER_FAILURE_RETRY_MAX_SECONDS = 6 * 60 * 60;
 
-type ConditionBand = "stable" | "watch" | "critical";
-type StressBand = "low" | "moderate" | "high";
-type TrustBand = "low" | "mixed" | "high";
+export type ConditionBand = "stable" | "watch" | "critical";
+export type StressBand = "low" | "moderate" | "high";
+export type TrustBand = "low" | "mixed" | "high";
 type ObservedPressureBand =
   | "unknown"
   | "low"

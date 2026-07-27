@@ -5,20 +5,40 @@
  * one owner. Domestic use transfers potable water to wastewater; metabolic
  * water leaves this domain for the compartment atmosphere; processing passes
  * wastewater through a primary recovery stage and a brine-polishing stage.
+ *
+ * Per-ring distribution spurs are a minimal faultable delivery edge (not a
+ * full pipe network): requested potable withdrawals for crew / ops / growth
+ * are scaled by effectiveDeliveryFraction; undelivered mass is ledgered.
  */
 
-export const WATER_RECOVERY_SNAPSHOT_VERSION = 2 as const;
-export const WATER_RECOVERY_SNAPSHOT_VERSIONS = [1, 2] as const;
+export const WATER_RECOVERY_SNAPSHOT_VERSION = 3 as const;
+export const WATER_RECOVERY_SNAPSHOT_VERSIONS = [1, 2, 3] as const;
 export const WATER_LOOP_IDS = ["water-loop-a", "water-loop-b"] as const;
 export const WATER_PROCESSOR_IDS = [
   "water-processor-a",
   "water-processor-b",
 ] as const;
+export const WATER_DISTRIBUTION_SPUR_IDS = [
+  "water-spur-a",
+  "water-spur-b",
+] as const;
 
 export type WaterLoopId = (typeof WATER_LOOP_IDS)[number];
 export type WaterProcessorId = (typeof WATER_PROCESSOR_IDS)[number];
+export type WaterDistributionSpurId =
+  (typeof WATER_DISTRIBUTION_SPUR_IDS)[number];
 export type WaterRing = "a" | "b";
 export type WaterProcessorCondition = "nominal" | "degraded" | "stuck-off";
+export type WaterDistributionSpurCondition =
+  | "nominal"
+  | "degraded"
+  | "stuck-closed";
+
+export interface WaterDistributionSpur {
+  id: WaterDistributionSpurId;
+  condition: WaterDistributionSpurCondition;
+  commandedOpenFraction: number;
+}
 
 export interface WaterLoop {
   id: WaterLoopId;
@@ -32,6 +52,10 @@ export interface WaterLoop {
   awakeOccupants: number;
   consumptionKgPerAwakePersonDay: number;
   unmetDemandKgCumulative: number;
+  /** Ring potable distribution spur (tank → users). */
+  distributionSpur: WaterDistributionSpur;
+  /** Last domestic/ops delivery shortfall attributed to the spur. */
+  lastDeliveryShortfallKg: number;
 }
 
 export interface WaterProcessor {
@@ -59,6 +83,8 @@ export interface WaterMassLedger {
   externallyAddedKg: number;
   /** Accumulated floating-point closure residual; not a physical source/sink. */
   numericalResidualKg: number;
+  /** Cumulative requested potable that the spur did not deliver. */
+  undeliveredPotableKg: number;
   wastewaterProcessedKg: number;
   primaryRecoveredKg: number;
   brineRecoveredKg: number;
@@ -70,6 +96,7 @@ export interface WaterObservationFrame {
   availableAtMicroseconds: number;
   potableKgByRing: Record<WaterRing, number>;
   wastewaterKgByRing: Record<WaterRing, number>;
+  deliveryShortfallKgByRing: Record<WaterRing, number>;
   processorThroughputKgPerDay: Record<WaterProcessorId, number>;
 }
 
@@ -96,6 +123,8 @@ export interface WaterRecoverySummary {
   recyclerCapacityKgPerDay: number;
   recyclerEfficiency: number;
   totalUnmetDemandKg: number;
+  undeliveredPotableKg: number;
+  deliveryShortfallKgByRing: Record<WaterRing, number>;
   massClosureErrorKg: number;
 }
 
@@ -104,6 +133,10 @@ export type WaterProcessorPatch = Partial<
     WaterProcessor,
     "commandedThroughputFraction" | "condition"
   >
+>;
+
+export type WaterDistributionSpurPatch = Partial<
+  Pick<WaterDistributionSpur, "commandedOpenFraction" | "condition">
 >;
 
 const MICROSECONDS_PER_SECOND = 1_000_000;
@@ -115,13 +148,26 @@ const RING_BY_LOOP: Readonly<Record<WaterLoopId, WaterRing>> = {
   "water-loop-a": "a",
   "water-loop-b": "b",
 };
-const BASELINE_POTABLE_KG_PER_LOOP = 1_800_000;
+const SPUR_BY_RING: Readonly<Record<WaterRing, WaterDistributionSpurId>> = {
+  a: "water-spur-a",
+  b: "water-spur-b",
+};
+const LOOP_BY_SPUR: Readonly<
+  Record<WaterDistributionSpurId, WaterLoopId>
+> = {
+  "water-spur-a": "water-loop-a",
+  "water-spur-b": "water-loop-b",
+};
+const BASELINE_POTABLE_KG_PER_LOOP = 900_000;
 const BASELINE_WASTEWATER_KG_PER_LOOP = 60_000;
-const BASELINE_RESERVE_ICE_KG_PER_LOOP = 4_000_000;
+/** Dual-loop total ≈3e6 kg — tense vs ~1.8e6 kg potable, not a slack ocean. */
+const BASELINE_RESERVE_ICE_KG_PER_LOOP = 1_500_000;
 const POTABLE_CAPACITY_KG_PER_LOOP = 2_200_000;
 const WASTEWATER_CAPACITY_KG_PER_LOOP = 300_000;
+/** Living-role baseline until ops syncs person-weighted ZoneRole demand. */
 const CONSUMPTION_KG_PER_AWAKE_PERSON_DAY = 3;
-const RATED_THROUGHPUT_KG_PER_DAY = 3_000;
+/** Per-loop rated recovery; dual-nominal ≈2× awake demand, single-loop failure is tense. */
+const RATED_THROUGHPUT_KG_PER_DAY = 900;
 const PRIMARY_RECOVERY_FRACTION = 0.85;
 const BRINE_RECOVERY_FRACTION = 0.87;
 const DEGRADED_THROUGHPUT_MULTIPLIER = 0.5;
@@ -168,6 +214,38 @@ function processorConditionMultiplier(
   }
 }
 
+function spurConditionMultiplier(
+  condition: WaterDistributionSpurCondition,
+): number {
+  switch (condition) {
+    case "nominal":
+      return 1;
+    case "degraded":
+      return DEGRADED_THROUGHPUT_MULTIPLIER;
+    case "stuck-closed":
+      return 0;
+  }
+}
+
+export function effectiveDeliveryFraction(
+  spur: Pick<
+    WaterDistributionSpur,
+    "commandedOpenFraction" | "condition"
+  >,
+): number {
+  return (
+    spur.commandedOpenFraction * spurConditionMultiplier(spur.condition)
+  );
+}
+
+function createNominalSpur(ring: WaterRing): WaterDistributionSpur {
+  return {
+    id: SPUR_BY_RING[ring],
+    condition: "nominal",
+    commandedOpenFraction: 1,
+  };
+}
+
 function combinedRecoveryFraction(processor: WaterProcessor): number {
   return (
     processor.primaryRecoveryFraction +
@@ -199,6 +277,8 @@ function createLoops(): WaterLoop[] {
     consumptionKgPerAwakePersonDay:
       CONSUMPTION_KG_PER_AWAKE_PERSON_DAY,
     unmetDemandKgCumulative: 0,
+    distributionSpur: createNominalSpur(RING_BY_LOOP[id]),
+    lastDeliveryShortfallKg: 0,
   }));
 }
 
@@ -253,6 +333,7 @@ function createSnapshot(): WaterRecoverySnapshot {
       condensateInflowKg: 0,
       externallyAddedKg: 0,
       numericalResidualKg: 0,
+      undeliveredPotableKg: 0,
       wastewaterProcessedKg: 0,
       primaryRecoveredKg: 0,
       brineRecoveredKg: 0,
@@ -278,6 +359,10 @@ function createObservationFrame(
     wastewaterKgByRing: {
       a: loopA.wastewaterKg,
       b: loopB.wastewaterKg,
+    },
+    deliveryShortfallKgByRing: {
+      a: loopA.lastDeliveryShortfallKg,
+      b: loopB.lastDeliveryShortfallKg,
     },
     processorThroughputKgPerDay: Object.fromEntries(
       snapshot.processors.map((processor) => [
@@ -309,6 +394,10 @@ function validateObservationFrame(
     assertNonNegative(
       frame.wastewaterKgByRing[ring],
       `${label}.wastewaterKgByRing.${ring}`,
+    );
+    assertNonNegative(
+      frame.deliveryShortfallKgByRing[ring],
+      `${label}.deliveryShortfallKgByRing.${ring}`,
     );
   }
   for (const processorId of WATER_PROCESSOR_IDS) {
@@ -350,24 +439,62 @@ function migrateWaterSnapshot(
   snapshot: WaterRecoverySnapshot,
 ): WaterRecoverySnapshot {
   const version = snapshot.snapshotVersion as number;
-  if (
-    version !== 1 &&
-    version !== WATER_RECOVERY_SNAPSHOT_VERSION
-  ) {
+  if (version !== 1 && version !== 2 && version !== 3) {
     throw new Error("unsupported water-recovery snapshot version");
   }
   const ledger = snapshot.ledger as WaterMassLedger & {
     numericalResidualKg?: number;
+    undeliveredPotableKg?: number;
   };
+  const migratedLoops = snapshot.loops.map((loop) => {
+    const raw = loop as WaterLoop & {
+      distributionSpur?: WaterDistributionSpur;
+      lastDeliveryShortfallKg?: number;
+    };
+    return {
+      ...raw,
+      distributionSpur: raw.distributionSpur ?? createNominalSpur(raw.ring),
+      lastDeliveryShortfallKg: raw.lastDeliveryShortfallKg ?? 0,
+    };
+  });
   const migrated: WaterRecoverySnapshot = {
     ...snapshot,
     snapshotVersion: WATER_RECOVERY_SNAPSHOT_VERSION,
+    loops: migratedLoops,
     ledger: {
       ...ledger,
       numericalResidualKg: ledger.numericalResidualKg ?? 0,
+      undeliveredPotableKg: ledger.undeliveredPotableKg ?? 0,
     },
+    observation: migrateObservation(snapshot.observation),
   };
   return migrated;
+}
+
+function migrateObservation(
+  observation: WaterObservationState,
+): WaterObservationState {
+  const migrateFrame = (
+    frame: WaterObservationFrame | null,
+  ): WaterObservationFrame | null => {
+    if (frame === null) return null;
+    const raw = frame as WaterObservationFrame & {
+      deliveryShortfallKgByRing?: Record<WaterRing, number>;
+    };
+    return {
+      ...raw,
+      deliveryShortfallKgByRing: raw.deliveryShortfallKgByRing ?? {
+        a: 0,
+        b: 0,
+      },
+    };
+  };
+  return {
+    published: migrateFrame(observation.published),
+    pending: observation.pending.map(
+      (frame) => migrateFrame(frame) as WaterObservationFrame,
+    ),
+  };
 }
 
 function validateSnapshot(snapshot: WaterRecoverySnapshot): void {
@@ -414,17 +541,39 @@ function validateSnapshot(snapshot: WaterRecoverySnapshot): void {
         `${loop.id}.consumptionKgPerAwakePersonDay`,
       ],
       [loop.unmetDemandKgCumulative, `${loop.id}.unmetDemandKgCumulative`],
+      [
+        loop.lastDeliveryShortfallKg,
+        `${loop.id}.lastDeliveryShortfallKg`,
+      ],
     ] as const) {
       assertNonNegative(value, label);
     }
     if (!Number.isSafeInteger(loop.awakeOccupants)) {
       throw new TypeError(`${loop.id}.awakeOccupants must be a safe integer`);
     }
+    const spur = loop.distributionSpur;
+    if (
+      !spur ||
+      spur.id !== SPUR_BY_RING[loop.ring] ||
+      LOOP_BY_SPUR[spur.id] !== loop.id
+    ) {
+      throw new Error(`${loop.id} distribution spur topology is invalid`);
+    }
+    assertFraction(
+      spur.commandedOpenFraction,
+      `${loop.id}.distributionSpur.commandedOpenFraction`,
+    );
+    if (
+      spur.condition !== "nominal" &&
+      spur.condition !== "degraded" &&
+      spur.condition !== "stuck-closed"
+    ) {
+      throw new Error(`${loop.id} distribution spur has an invalid condition`);
+    }
     if (
       loop.potableCapacityKg !== POTABLE_CAPACITY_KG_PER_LOOP ||
       loop.wastewaterCapacityKg !== WASTEWATER_CAPACITY_KG_PER_LOOP ||
-      loop.consumptionKgPerAwakePersonDay !==
-        CONSUMPTION_KG_PER_AWAKE_PERSON_DAY ||
+      loop.consumptionKgPerAwakePersonDay > 12 ||
       loop.potableKg > loop.potableCapacityKg + 1e-9 ||
       loop.wastewaterKg > loop.wastewaterCapacityKg + 1e-9
     ) {
@@ -636,6 +785,40 @@ export class WaterRecoveryNetwork {
       expectedActualThroughput(processor);
   }
 
+  configureDistributionSpur(
+    id: WaterDistributionSpurId,
+    patch: WaterDistributionSpurPatch,
+  ): void {
+    const loop = this.requireLoop(LOOP_BY_SPUR[id]);
+    const spur = loop.distributionSpur;
+    if (spur.id !== id) {
+      throw new Error(`unknown water distribution spur: ${id}`);
+    }
+    if (patch.commandedOpenFraction !== undefined) {
+      assertFraction(
+        patch.commandedOpenFraction,
+        `${id}.commandedOpenFraction`,
+      );
+      spur.commandedOpenFraction = patch.commandedOpenFraction;
+    }
+    if (patch.condition !== undefined) {
+      if (
+        patch.condition !== "nominal" &&
+        patch.condition !== "degraded" &&
+        patch.condition !== "stuck-closed"
+      ) {
+        throw new Error(`${id} has an invalid condition`);
+      }
+      spur.condition = patch.condition;
+    }
+    validateSnapshot(this.stateValue);
+  }
+
+  getDistributionSpur(id: WaterDistributionSpurId): WaterDistributionSpur {
+    const loop = this.requireLoop(LOOP_BY_SPUR[id]);
+    return cloneData(loop.distributionSpur);
+  }
+
   withdrawMetabolicWater(
     withdrawalsKg: Readonly<Record<WaterRing, number>>,
   ): void {
@@ -693,6 +876,74 @@ export class WaterRecoveryNetwork {
     validateSnapshot(this.stateValue);
   }
 
+  transferPotableWater(
+    fromRing: WaterRing,
+    toRing: WaterRing,
+    massKg: number,
+  ): void {
+    assertNonNegative(massKg, "potable transfer mass");
+    if (fromRing === toRing) throw new Error("potable transfer rings must differ");
+    const from = this.requireLoop(
+      fromRing === "a" ? "water-loop-a" : "water-loop-b",
+    );
+    const to = this.requireLoop(
+      toRing === "a" ? "water-loop-a" : "water-loop-b",
+    );
+    if (massKg > from.potableKg + 1e-9) {
+      throw new Error(`${from.id} has insufficient potable water`);
+    }
+    if (to.potableKg + massKg > to.potableCapacityKg + 1e-9) {
+      throw new Error(`${to.id} has insufficient potable tank headroom`);
+    }
+    from.potableKg = Math.max(0, from.potableKg - massKg);
+    to.potableKg = Math.min(to.potableCapacityKg, to.potableKg + massKg);
+    absorbNumericalMassResidual(this.stateValue);
+    validateSnapshot(this.stateValue);
+  }
+
+  setConsumptionKgPerAwakePersonDayByRing(
+    allocation: Readonly<Record<WaterRing, number>>,
+  ): void {
+    for (const ring of ["a", "b"] as const) {
+      assertNonNegative(allocation[ring], `water consumption allocation ${ring}`);
+      if (allocation[ring] > 12) {
+        throw new RangeError(`water consumption allocation ${ring} exceeds service bound`);
+      }
+      this.requireLoop(
+        ring === "a" ? "water-loop-a" : "water-loop-b",
+      ).consumptionKgPerAwakePersonDay = allocation[ring];
+    }
+    validateSnapshot(this.stateValue);
+  }
+
+  withdrawPotableForOperations(
+    withdrawalsKg: Readonly<Record<WaterRing, number>>,
+  ): void {
+    for (const ring of ["a", "b"] as const) {
+      assertNonNegative(withdrawalsKg[ring], `operations withdrawal ${ring}`);
+    }
+    for (const ring of ["a", "b"] as const) {
+      const needed = withdrawalsKg[ring];
+      const loop = this.requireLoop(
+        ring === "a" ? "water-loop-a" : "water-loop-b",
+      );
+      const deliveryFraction = effectiveDeliveryFraction(
+        loop.distributionSpur,
+      );
+      const attempted = needed * deliveryFraction;
+      const spurShortfall = needed - attempted;
+      if (attempted > loop.potableKg + 1e-9) {
+        throw new Error(`${loop.id} has insufficient potable water for operations`);
+      }
+      loop.potableKg = Math.max(0, loop.potableKg - attempted);
+      loop.lastDeliveryShortfallKg = spurShortfall;
+      this.stateValue.ledger.externallyAddedKg -= attempted;
+      this.stateValue.ledger.undeliveredPotableKg += spurShortfall;
+    }
+    absorbNumericalMassResidual(this.stateValue);
+    validateSnapshot(this.stateValue);
+  }
+
   step(deltaSeconds: number): void {
     assertNonNegative(deltaSeconds, "deltaSeconds");
     const deltaMicroseconds = Math.round(
@@ -710,13 +961,20 @@ export class WaterRecoveryNetwork {
           loop.consumptionKgPerAwakePersonDay *
           normalizedSeconds) /
         86_400;
+      const deliveryFraction = effectiveDeliveryFraction(
+        loop.distributionSpur,
+      );
+      const attempted = demanded * deliveryFraction;
+      const spurShortfall = demanded - attempted;
       const wastewaterHeadroom =
         loop.wastewaterCapacityKg - loop.wastewaterKg;
-      const supplied = Math.min(loop.potableKg, demanded, wastewaterHeadroom);
+      const supplied = Math.min(loop.potableKg, attempted, wastewaterHeadroom);
       loop.potableKg -= supplied;
       loop.wastewaterKg += supplied;
-      loop.unmetDemandKgCumulative += demanded - supplied;
+      loop.unmetDemandKgCumulative += attempted - supplied;
+      loop.lastDeliveryShortfallKg = spurShortfall;
       this.stateValue.ledger.domesticTransferredKg += supplied;
+      this.stateValue.ledger.undeliveredPotableKg += spurShortfall;
     }
 
     for (const processor of this.stateValue.processors) {
@@ -830,6 +1088,11 @@ export class WaterRecoveryNetwork {
         (total, loop) => total + loop.unmetDemandKgCumulative,
         0,
       ),
+      undeliveredPotableKg: this.stateValue.ledger.undeliveredPotableKg,
+      deliveryShortfallKgByRing: {
+        a: this.requireLoop("water-loop-a").lastDeliveryShortfallKg,
+        b: this.requireLoop("water-loop-b").lastDeliveryShortfallKg,
+      },
       massClosureErrorKg: massClosureError(this.stateValue),
     };
   }

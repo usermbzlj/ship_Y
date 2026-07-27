@@ -18,20 +18,20 @@ function describeStep(step: GodAssistPlanStep): string {
   return `覆写 · ${step.label} → ${step.value} (${field})`;
 }
 
-function executePlanStep(
+async function executePlanStep(
   step: GodAssistPlanStep,
-  onCausalEvent: (eventType: string, label: string) => void,
-  onOverride: (field: ForceField, value: number) => void,
+  onCausalEvent: (eventType: string, label: string) => void | Promise<void>,
+  onOverride: (field: ForceField, value: number) => void | Promise<void>,
 ) {
   if (step.kind === "causal-event") {
-    onCausalEvent(step.eventType, step.label);
+    await onCausalEvent(step.eventType, step.label);
     return;
   }
   const field = FORCE_FIELDS.find((item) => item.id === step.fieldId);
   if (!field) {
     throw new Error(`未知原力字段：${step.fieldId}`);
   }
-  onOverride(field, step.value);
+  await onOverride(field, step.value);
 }
 
 export function GodAssistPanel({
@@ -43,8 +43,8 @@ export function GodAssistPanel({
 }: {
   missionReady: boolean;
   worldContext?: Record<string, unknown>;
-  onCausalEvent: (eventType: string, label: string) => void;
-  onOverride: (field: ForceField, value: number) => void;
+  onCausalEvent: (eventType: string, label: string) => void | Promise<void>;
+  onOverride: (field: ForceField, value: number) => void | Promise<void>;
   onSessionChange: (session: GodAssistSessionHandle | null) => void;
 }) {
   const [input, setInput] = useState("");
@@ -121,14 +121,17 @@ export function GodAssistPanel({
       onSessionChange({
         active: true,
         retried: false,
+        pendingRequestId: null,
         onPhysicsRejection: (message) => {
           endSession();
           retryAfterRejection(message, userMessage);
         },
       });
+      // No short idle clear while steps may still be in flight — rejection is
+      // bound to pendingRequestId in mission-control. Long safety net only.
       sessionTimerRef.current = window.setTimeout(() => {
         endSession();
-      }, 4_000);
+      }, 120_000);
     },
     [clearSessionTimer, endSession, onSessionChange, retryAfterRejection],
   );
@@ -151,22 +154,31 @@ export function GodAssistPanel({
     if (!plan) {
       return;
     }
+    const steps = plan.steps;
     setPhase("executing");
     registerExecutionSession(lastUserMessage);
-    try {
-      for (const step of plan.steps) {
-        executePlanStep(step, onCausalEvent, onOverride);
+    void (async () => {
+      try {
+        for (const step of steps) {
+          await executePlanStep(step, onCausalEvent, onOverride);
+        }
+        endSession();
+        setPlan(null);
+        setInput("");
+        setPhase("idle");
+      } catch (cause) {
+        // Physics rejection already triggers session onPhysicsRejection → retry.
+        if (retriedRef.current) {
+          setPlan(null);
+          return;
+        }
+        endSession();
+        setError(
+          cause instanceof Error ? cause.message : "干预计划执行失败",
+        );
+        setPhase("idle");
       }
-      setPlan(null);
-      setInput("");
-      setPhase("idle");
-    } catch (cause) {
-      endSession();
-      setError(
-        cause instanceof Error ? cause.message : "干预计划执行失败",
-      );
-      setPhase("idle");
-    }
+    })();
   };
 
   const handleCancelPlan = () => {

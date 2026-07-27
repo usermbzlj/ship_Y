@@ -8,6 +8,7 @@ import {
   COOLING_SNAPSHOT_VERSION,
   CoolingThermalNetwork,
   EXTERNAL_THERMAL_SOURCE_IDS,
+  effectiveHabitatThermalDeliveryFraction,
   HEAT_EXCHANGER_IDS,
   RADIATOR_IDS,
   THERMAL_NODE_IDS,
@@ -28,7 +29,18 @@ test("baseline exposes two complete redundant entity loops and five SI thermal n
   const snapshot = network.snapshot();
 
   assert.equal(snapshot.snapshotVersion, COOLING_SNAPSHOT_VERSION);
-  assert.equal(COOLING_SNAPSHOT_VERSION, 5);
+  assert.equal(COOLING_SNAPSHOT_VERSION, 6);
+  assert.equal(snapshot.ledger.undeliveredHabitatCoolingJ, 0);
+  assert.equal(
+    snapshot.loops[0].habitatThermalDeliverySpur.id,
+    "cooling-spur-a",
+  );
+  assert.equal(
+    effectiveHabitatThermalDeliveryFraction(
+      snapshot.loops[0].habitatThermalDeliverySpur,
+    ),
+    1,
+  );
   assert.deepEqual(
     Object.keys(snapshot.ledger.externalEnergyBySourceJ),
     EXTERNAL_THERMAL_SOURCE_IDS,
@@ -447,4 +459,64 @@ test("a six-hour high-rate step remains fast, deterministic, and energy bounded"
   const restoredContinuation = restored.step(3_600);
   assert.deepEqual(restoredContinuation, originalContinuation);
   assert.deepEqual(restored.snapshot(), original.snapshot());
+});
+
+test("v5 cooling snapshots migrate onto nominal habitat thermal delivery spurs", () => {
+  const live = new CoolingThermalNetwork({ seed: "migrate-spur" });
+  live.step(30);
+  const v5 = live.snapshot();
+  v5.snapshotVersion = 5;
+  for (const loop of v5.loops) {
+    delete loop.habitatThermalDeliverySpur;
+    delete loop.lastHabitatThermalDeliveryShortfallJ;
+  }
+  delete v5.ledger.undeliveredHabitatCoolingJ;
+  const restored = CoolingThermalNetwork.restore(v5);
+  assert.equal(restored.snapshot().snapshotVersion, 6);
+  assert.equal(
+    restored.getHabitatThermalDeliverySpur("cooling-spur-a").condition,
+    "nominal",
+  );
+  assert.equal(
+    restored.getHabitatThermalDeliverySpur("cooling-spur-a")
+      .commandedOpenFraction,
+    1,
+  );
+  assert.equal(restored.snapshot().ledger.undeliveredHabitatCoolingJ, 0);
+});
+
+test("stuck-closed habitat thermal spur records full shortfall", () => {
+  const network = new CoolingThermalNetwork({ seed: "spur-shortfall" });
+  network.configureHabitatThermalDeliverySpur("cooling-spur-a", {
+    condition: "stuck-closed",
+  });
+  assert.equal(
+    effectiveHabitatThermalDeliveryFraction(
+      network.getHabitatThermalDeliverySpur("cooling-spur-a"),
+    ),
+    0,
+  );
+  network.recordHabitatThermalDeliveryShortfall("cooling-spur-a", 12_000);
+  assert.equal(network.snapshot().ledger.undeliveredHabitatCoolingJ, 12_000);
+  assert.equal(
+    network.listLoops().find((loop) => loop.id === "loop-a")
+      .lastHabitatThermalDeliveryShortfallJ,
+    12_000,
+  );
+});
+
+test("degraded habitat thermal spur delivers half the commanded open fraction", () => {
+  const network = new CoolingThermalNetwork({ seed: "spur-degraded" });
+  network.configureHabitatThermalDeliverySpur("cooling-spur-b", {
+    condition: "degraded",
+    commandedOpenFraction: 0.8,
+  });
+  assertClose(
+    effectiveHabitatThermalDeliveryFraction(
+      network.getHabitatThermalDeliverySpur("cooling-spur-b"),
+    ),
+    0.4,
+    1e-12,
+    "degraded delivery",
+  );
 });

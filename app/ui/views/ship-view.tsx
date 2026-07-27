@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
 import type {
   ShipState,
   SystemTone,
@@ -9,8 +10,180 @@ import type {
   WaterRecoveryTelemetry,
   MaintenanceTelemetry,
 } from "../types";
-import type { RotationTelemetry } from "@/lib/sim/protocol";
+import type {
+  CompartmentZoneCondition,
+  CompartmentZoneTelemetry,
+  RotationTelemetry,
+} from "@/lib/sim/protocol";
+import {
+  ZONE_CATALOG,
+  ZONE_ROLE_LABELS_ZH,
+  type ZoneRole,
+} from "@/lib/sim/compartments";
 import { StatusPill } from "../components/status-pill";
+import { HullSection } from "../components/hull-section";
+
+type ZoneTelemetry = CompartmentZoneTelemetry;
+
+function zoneLabel(zone: ZoneTelemetry): string {
+  return zone.labelZh || zone.zoneId;
+}
+
+function zoneRoleLabel(zone: ZoneTelemetry): string {
+  const role = zone.role as ZoneRole | undefined;
+  if (role && role in ZONE_ROLE_LABELS_ZH) {
+    return ZONE_ROLE_LABELS_ZH[role];
+  }
+  return zone.role || "—";
+}
+
+function formatPa(value: number | null, digits = 1): string {
+  return value === null ? "—" : `${(value / 1_000).toFixed(digits)} kPa`;
+}
+
+function formatTemp(value: number | null): string {
+  return value === null ? "—" : `${value.toFixed(1)} K`;
+}
+
+function bearingHint(vibrationMmPerS: number | null | undefined): string {
+  if (vibrationMmPerS === null || vibrationMmPerS === undefined) {
+    return "轴承振感建立中";
+  }
+  if (vibrationMmPerS > 7.1) {
+    return `轴承振感 ${vibrationMmPerS.toFixed(1)} mm/s · 危险`;
+  }
+  if (vibrationMmPerS > 3.5) {
+    return `轴承振感 ${vibrationMmPerS.toFixed(1)} mm/s · 关注`;
+  }
+  return `轴承振感 ${vibrationMmPerS.toFixed(1)} mm/s`;
+}
+
+function causalSentence(zone: ZoneTelemetry): string {
+  const ring = zone.ring;
+  const roleText = zoneRoleLabel(zone);
+  const purpose = zone.purposeZh;
+  const roleClause = purpose
+    ? `本区为「${roleText}」：${purpose.replace(/。$/, "")}`
+    : `本区属 ${ring} 环「${roleText}」`;
+
+  if (zone.hasBreach) {
+    return `${roleClause}。活动破口会泄压并触发壳体威胁联锁（禁跃迁、该环推进降额）；未及时封堵会随时间撕大并级联同环 AHU/冷却泵/轴承/休眠馈线。`;
+  }
+  if (zone.condition === "critical") {
+    return `${roleClause}。当前读数已越界：相邻区经门/风管会继续耦合交换；${ring} 环空气处理机仍按整环均分捕集 CO₂。`;
+  }
+  if (zone.condition === "watch") {
+    return `${roleClause}。关注态下仍与相邻区经门/风管耦合；该环空气处理机按整环均分捕集 CO₂。`;
+  }
+  if (zone.condition === "offline") {
+    return `${roleClause}。遥测尚未就绪；联机后本区将与相邻区经门/风管耦合，并由 ${ring} 环空气处理机均分捕集 CO₂。`;
+  }
+  return `${roleClause}。破口会使本区与相邻区经门/风管耦合泄压；该环空气处理机按整环均分捕集 CO₂。`;
+}
+
+function pickDefaultZoneId(zones: ZoneTelemetry[]): string {
+  const priority =
+    zones.find((zone) => zone.hasBreach) ??
+    zones.find((zone) => zone.condition === "critical") ??
+    zones.find((zone) => zone.condition === "watch") ??
+    zones.find((zone) => zone.zoneId === "A-01") ??
+    zones[0];
+  return priority?.zoneId ?? "A-01";
+}
+
+function conditionLabel(condition: CompartmentZoneCondition): string {
+  switch (condition) {
+    case "critical":
+      return "危险";
+    case "watch":
+      return "关注";
+    case "offline":
+      return "离线";
+    default:
+      return "名义";
+  }
+}
+
+function spurConditionLabel(
+  condition: "nominal" | "degraded" | "stuck-closed" | undefined,
+): string {
+  switch (condition) {
+    case "degraded":
+      return "降级";
+    case "stuck-closed":
+      return "关死";
+    case "nominal":
+    default:
+      return "名义";
+  }
+}
+
+function spurStatusLine(
+  spur:
+    | {
+        ring: "a" | "b";
+        condition: "nominal" | "degraded" | "stuck-closed";
+        lastDeliveryShortfallKg: number;
+      }
+    | undefined,
+  ring: "a" | "b",
+): string {
+  const ringLabel = ring === "a" ? "A" : "B";
+  if (!spur) {
+    return `水支路 ${ringLabel} · —`;
+  }
+  const shortfall =
+    spur.lastDeliveryShortfallKg > 0
+      ? ` · 短欠 ${spur.lastDeliveryShortfallKg.toFixed(1)} kg`
+      : "";
+  return `水支路 ${ringLabel} · ${spurConditionLabel(spur.condition)}${shortfall}`;
+}
+
+function coolingSpurStatusLine(
+  spur:
+    | {
+        ring: "a" | "b";
+        condition: "nominal" | "degraded" | "stuck-closed";
+        lastDeliveryShortfallJ: number;
+      }
+    | undefined,
+  ring: "a" | "b",
+): string {
+  const ringLabel = ring === "a" ? "A" : "B";
+  if (!spur) {
+    return `热支路 ${ringLabel} · —`;
+  }
+  const shortfall =
+    spur.lastDeliveryShortfallJ > 0
+      ? ` · 短欠 ${(spur.lastDeliveryShortfallJ / 1_000).toFixed(1)} kJ`
+      : "";
+  return `热支路 ${ringLabel} · ${spurConditionLabel(spur.condition)}${shortfall}`;
+}
+
+function offlineZones(): ZoneTelemetry[] {
+  return ZONE_CATALOG.map((entry) => ({
+    zoneId: entry.id,
+    role: entry.role,
+    labelZh: entry.labelZh,
+    purposeZh: entry.purposeZh,
+    ring: entry.ring,
+    condition: "offline" as const,
+    hasBreach: false,
+    observed: {
+      pressurePa: null,
+      temperatureK: null,
+      oxygenPartialPressurePa: null,
+      carbonDioxidePartialPressurePa: null,
+    },
+    quality: {
+      pressure: "offline" as const,
+      temperature: "offline" as const,
+      oxygen: "offline" as const,
+      carbonDioxide: "offline" as const,
+    },
+    newestSampleAgeSeconds: null,
+  }));
+}
 
 export function ShipView({
   state,
@@ -20,6 +193,10 @@ export function ShipView({
   rotation,
   waterRecovery,
   maintenance,
+  hullConsequence = null,
+  focusZoneId = null,
+  focusRingId = null,
+  focusToken = 0,
 }: {
   state: ShipState | null;
   compartments: CompartmentTelemetry | null;
@@ -28,38 +205,133 @@ export function ShipView({
   rotation: RotationTelemetry["observed"] | null;
   waterRecovery: WaterRecoveryTelemetry | null;
   maintenance: MaintenanceTelemetry | null;
+  hullConsequence?: import("@/lib/sim/protocol").HullConsequenceTelemetry | null;
+  /** 警报深链：选中并高亮该压力区 */
+  focusZoneId?: string | null;
+  /** 警报深链：高亮拓扑环卡片，并选中该环首区（无 zoneId 时） */
+  focusRingId?: "A" | "B" | null;
+  /** 递增以在同一目标上重复触发脉冲 */
+  focusToken?: number;
 }) {
-  const criticalZones =
-    compartments?.zones.filter(
-      (zone) => zone.condition === "critical",
-    ).length ?? 0;
-  const watchZones =
-    compartments?.zones.filter(
-      (zone) => zone.condition === "watch",
-    ).length ?? 0;
-  const offlineZones =
-    compartments?.zones.filter(
-      (zone) => zone.condition === "offline",
-    ).length ?? 0;
+  const zones = compartments?.zones ?? offlineZones();
+  const [selectedZoneId, setSelectedZoneId] = useState(() =>
+    pickDefaultZoneId(zones),
+  );
+  const [prevFocusToken, setPrevFocusToken] = useState(focusToken);
+  const [focusPulse, setFocusPulse] = useState(false);
+  const [highlightedRingId, setHighlightedRingId] = useState<"A" | "B" | null>(
+    null,
+  );
+
+  // Adjust selection during render when the selected zone leaves the list.
+  if (!zones.some((zone) => zone.zoneId === selectedZoneId)) {
+    setSelectedZoneId(pickDefaultZoneId(zones));
+  }
+
+  // Adjust selection / pulse during render when deep-link focusToken changes.
+  if (focusToken !== prevFocusToken) {
+    setPrevFocusToken(focusToken);
+
+    let targetZoneId = focusZoneId;
+    if (
+      (!targetZoneId || !zones.some((zone) => zone.zoneId === targetZoneId)) &&
+      focusRingId
+    ) {
+      targetZoneId =
+        zones.find((zone) => zone.ring === focusRingId)?.zoneId ?? null;
+    }
+
+    if (targetZoneId && zones.some((zone) => zone.zoneId === targetZoneId)) {
+      setSelectedZoneId(targetZoneId);
+    }
+
+    const ringFromZone = targetZoneId
+      ? (zones.find((zone) => zone.zoneId === targetZoneId)?.ring ?? null)
+      : null;
+    setHighlightedRingId(focusRingId ?? ringFromZone);
+    setFocusPulse(true);
+  }
+
+  // Timer-only effect: clear the focus pulse after a short highlight window.
+  useEffect(() => {
+    if (!focusPulse) return;
+    const timer = window.setTimeout(() => {
+      setFocusPulse(false);
+      setHighlightedRingId(null);
+    }, 2400);
+    return () => window.clearTimeout(timer);
+  }, [focusPulse, focusToken]);
+
+  const criticalZones = zones.filter(
+    (zone) => zone.condition === "critical",
+  ).length;
+  const watchZones = zones.filter((zone) => zone.condition === "watch").length;
+  const offlineZoneCount = zones.filter(
+    (zone) => zone.condition === "offline",
+  ).length;
+  const breachZones = zones.filter((zone) => zone.hasBreach).length;
   const overallTone: SystemTone =
-    criticalZones > 0
+    criticalZones > 0 || breachZones > 0
       ? "critical"
-      : watchZones > 0 || offlineZones > 0
+      : watchZones > 0 || offlineZoneCount > 0
         ? "watch"
         : "nominal";
+
   const electricalReading = (
     targetId: string,
     quantity: ElectricalTelemetry["sensors"][number]["quantity"],
   ) =>
     electrical?.sensors.find(
       (sensor) =>
-        sensor.targetId === targetId &&
-        sensor.quantity === quantity,
+        sensor.targetId === targetId && sensor.quantity === quantity,
     )?.value ?? null;
   const busAServedPowerKw = electricalReading("bus-a", "servedPowerKw");
   const busBServedPowerKw = electricalReading("bus-b", "servedPowerKw");
   const ringA = rotation?.rings.find((ring) => ring.id === "ring-a") ?? null;
   const ringB = rotation?.rings.find((ring) => ring.id === "ring-b") ?? null;
+
+  const airHandlers = compartments?.airHandlers.controllers ?? [];
+  const airHandlerA = airHandlers.find((handler) => handler.ring === "A");
+  const airHandlerB = airHandlers.find((handler) => handler.ring === "B");
+  const airHandlerSummary =
+    airHandlers.length === 0
+      ? "建立中"
+      : `${airHandlers.filter((h) => h.scrubberEnabled).length}/${airHandlers.length} 吸附在线 · 均流 ${(
+          (airHandlers.reduce((t, h) => t + h.commandedFlowFraction, 0) /
+            airHandlers.length) *
+          100
+        ).toFixed(0)}%`;
+  const spurA = waterRecovery?.distributionSpurs.find(
+    (spur) => spur.ring === "a",
+  );
+  const spurB = waterRecovery?.distributionSpurs.find(
+    (spur) => spur.ring === "b",
+  );
+  const undeliveredPotableKg = waterRecovery?.undeliveredPotableKg ?? 0;
+  const coolingSpurA = cooling?.habitatThermalDeliverySpurs.find(
+    (spur) => spur.ring === "a",
+  );
+  const coolingSpurB = cooling?.habitatThermalDeliverySpurs.find(
+    (spur) => spur.ring === "b",
+  );
+  const undeliveredHabitatCoolingJ =
+    cooling?.undeliveredHabitatCoolingJ ?? 0;
+
+  const selectedZone =
+    zones.find((zone) => zone.zoneId === selectedZoneId) ?? zones[0] ?? null;
+
+  const roleLegend = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const zone of zones) {
+      const label = zoneRoleLabel(zone);
+      if (!label || label === "—") continue;
+      counts.set(label, (counts.get(label) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0], "zh-CN"))
+      .slice(0, 8);
+  }, [zones]);
+
   const networks: Array<[string, string, number]> = state
     ? [
         [
@@ -68,7 +340,10 @@ export function ShipView({
             ? `${(electrical.observed.totalReactorOutputKw / 1_000).toFixed(0)} MW`
             : "建立中",
           electrical?.observed.totalReactorOutputKw != null
-            ? Math.min(100, (electrical.observed.totalReactorOutputKw / 1_350_000) * 100)
+            ? Math.min(
+                100,
+                (electrical.observed.totalReactorOutputKw / 1_350_000) * 100,
+              )
             : 0,
         ],
         [
@@ -95,7 +370,10 @@ export function ShipView({
             ? `${(cooling.observed.totalRadiatedPowerW / 1_000_000).toFixed(1)} MW`
             : "建立中",
           cooling?.observed.totalRadiatedPowerW != null
-            ? Math.min(100, (cooling.observed.totalRadiatedPowerW / 800_000_000) * 100)
+            ? Math.min(
+                100,
+                (cooling.observed.totalRadiatedPowerW / 800_000_000) * 100,
+              )
             : 0,
         ],
         [
@@ -104,7 +382,11 @@ export function ShipView({
             ? `${cooling.observed.averageCoolantTemperatureK.toFixed(1)} K`
             : "建立中",
           cooling?.observed.averageCoolantTemperatureK != null
-            ? Math.min(100, ((cooling.observed.averageCoolantTemperatureK - 280) / 120) * 100)
+            ? Math.min(
+                100,
+                ((cooling.observed.averageCoolantTemperatureK - 280) / 120) *
+                  100,
+              )
             : 0,
         ],
         [
@@ -113,7 +395,10 @@ export function ShipView({
             ? `${(waterRecovery.observed.potableKgByRing.a / 1_000).toFixed(0)} t`
             : "建立中",
           waterRecovery?.observed?.potableKgByRing?.a != null
-            ? Math.min(100, (waterRecovery.observed.potableKgByRing.a / 2_000_000) * 100)
+            ? Math.min(
+                100,
+                (waterRecovery.observed.potableKgByRing.a / 2_000_000) * 100,
+              )
             : 0,
         ],
         [
@@ -122,7 +407,62 @@ export function ShipView({
             ? `${(waterRecovery.observed.potableKgByRing.b / 1_000).toFixed(0)} t`
             : "建立中",
           waterRecovery?.observed?.potableKgByRing?.b != null
-            ? Math.min(100, (waterRecovery.observed.potableKgByRing.b / 2_000_000) * 100)
+            ? Math.min(
+                100,
+                (waterRecovery.observed.potableKgByRing.b / 2_000_000) * 100,
+              )
+            : 0,
+        ],
+        [
+          "水支路 A",
+          spurA
+            ? `${spurConditionLabel(spurA.condition)}${
+                spurA.lastDeliveryShortfallKg > 0
+                  ? ` · 短欠 ${spurA.lastDeliveryShortfallKg.toFixed(1)} kg`
+                  : ""
+              }`
+            : "建立中",
+          spurA
+            ? Math.min(100, spurA.effectiveDeliveryFraction * 100)
+            : 0,
+        ],
+        [
+          "水支路 B",
+          spurB
+            ? `${spurConditionLabel(spurB.condition)}${
+                spurB.lastDeliveryShortfallKg > 0
+                  ? ` · 短欠 ${spurB.lastDeliveryShortfallKg.toFixed(1)} kg`
+                  : ""
+              }`
+            : "建立中",
+          spurB
+            ? Math.min(100, spurB.effectiveDeliveryFraction * 100)
+            : 0,
+        ],
+        [
+          "热支路 A",
+          coolingSpurA
+            ? `${spurConditionLabel(coolingSpurA.condition)}${
+                coolingSpurA.lastDeliveryShortfallJ > 0
+                  ? ` · 短欠 ${(coolingSpurA.lastDeliveryShortfallJ / 1_000).toFixed(1)} kJ`
+                  : ""
+              }`
+            : "建立中",
+          coolingSpurA
+            ? Math.min(100, coolingSpurA.effectiveDeliveryFraction * 100)
+            : 0,
+        ],
+        [
+          "热支路 B",
+          coolingSpurB
+            ? `${spurConditionLabel(coolingSpurB.condition)}${
+                coolingSpurB.lastDeliveryShortfallJ > 0
+                  ? ` · 短欠 ${(coolingSpurB.lastDeliveryShortfallJ / 1_000).toFixed(1)} kJ`
+                  : ""
+              }`
+            : "建立中",
+          coolingSpurB
+            ? Math.min(100, coolingSpurB.effectiveDeliveryFraction * 100)
             : 0,
         ],
         [
@@ -146,22 +486,114 @@ export function ShipView({
       ]
     : [];
 
+  const topologyNodes = [
+    {
+      key: "ring-a",
+      className: `topology-node topology-node-1 topology-node-live${
+        highlightedRingId === "A" && focusPulse ? " topology-node-focus" : ""
+      }`,
+      title: "居住环 A",
+      value:
+        ringA?.artificialGravityG != null
+          ? `${ringA.artificialGravityG.toFixed(3)} g`
+          : "—",
+      detail:
+        ringA?.relativeRpm != null
+          ? `${ringA.relativeRpm >= 0 ? "+" : ""}${ringA.relativeRpm.toFixed(3)} rpm · ${bearingHint(ringA.vibrationMmPerS)}`
+          : bearingHint(ringA?.vibrationMmPerS),
+    },
+    {
+      key: "ring-b",
+      className: `topology-node topology-node-2 topology-node-live${
+        highlightedRingId === "B" && focusPulse ? " topology-node-focus" : ""
+      }`,
+      title: "居住环 B",
+      value:
+        ringB?.artificialGravityG != null
+          ? `${ringB.artificialGravityG.toFixed(3)} g`
+          : "—",
+      detail:
+        ringB?.relativeRpm != null
+          ? `${ringB.relativeRpm >= 0 ? "+" : ""}${ringB.relativeRpm.toFixed(3)} rpm · ${bearingHint(ringB.vibrationMmPerS)}`
+          : bearingHint(ringB?.vibrationMmPerS),
+    },
+    {
+      key: "air",
+      className: "topology-node topology-node-3 topology-node-live",
+      title: "空气处理",
+      value: airHandlerSummary,
+      detail:
+        airHandlerA || airHandlerB
+          ? `A 流 ${(
+              (airHandlerA?.commandedFlowFraction ?? 0) * 100
+            ).toFixed(0)}% · B 流 ${(
+              (airHandlerB?.commandedFlowFraction ?? 0) * 100
+            ).toFixed(0)}%`
+          : compartments
+            ? `舱压均 ${formatPa(compartments.observedPressureAveragePa)}`
+            : "等待舱室总线",
+    },
+    {
+      key: "water",
+      className: "topology-node topology-node-4 topology-node-live",
+      title: "水回收 A/B",
+      value:
+        waterRecovery?.observed?.potableKgByRing?.a != null &&
+        waterRecovery?.observed?.potableKgByRing?.b != null
+          ? `${(waterRecovery.observed.potableKgByRing.a / 1_000).toFixed(0)} / ${(waterRecovery.observed.potableKgByRing.b / 1_000).toFixed(0)} t`
+          : "—",
+      detail: waterRecovery
+        ? `${spurStatusLine(spurA, "a")} · ${spurStatusLine(spurB, "b")}${
+            undeliveredPotableKg > 0
+              ? ` · 累计未送达 ${undeliveredPotableKg.toFixed(0)} kg`
+              : ""
+          }`
+        : "可饮水观测库存",
+    },
+    {
+      key: "cooling",
+      className: "topology-node topology-node-5 topology-node-live",
+      title: "冷却 / 热送达",
+      value:
+        cooling?.observed.totalRadiatedPowerW != null
+          ? `${(cooling.observed.totalRadiatedPowerW / 1_000_000).toFixed(1)} MW`
+          : "—",
+      detail: cooling
+        ? `${coolingSpurStatusLine(coolingSpurA, "a")} · ${coolingSpurStatusLine(coolingSpurB, "b")}${
+            undeliveredHabitatCoolingJ > 0
+              ? ` · 累计未送达 ${(undeliveredHabitatCoolingJ / 1_000_000).toFixed(1)} MJ`
+              : ""
+          }`
+        : "居住热送达支路",
+    },
+  ];
+
   return (
     <section className="view-grid detail-view" aria-label="舰体系统">
       <div className="panel topology-panel">
         <div className="panel-heading">
           <div>
-            <span className="eyebrow">HULL INTEGRITY / 结构</span>
-            <h2>舰体与压力区</h2>
+            <span className="eyebrow">HULL THREAT</span>
+            <h2>舰体破口与压力区</h2>
           </div>
-          <StatusPill tone={overallTone}>
-            {criticalZones > 0
+          <StatusPill
+            tone={
+              hullConsequence && hullConsequence.hullIntegrity < 0.92
+                ? "critical"
+                : overallTone
+            }
+          >
+            {hullConsequence
+              ? `完整度 ${(hullConsequence.hullIntegrity * 100).toFixed(0)}% · 破口 ${hullConsequence.activeBreachCount}`
+              : criticalZones > 0
               ? `${criticalZones} 区危险`
-              : watchZones > 0
-                ? `${watchZones} 区关注`
-                : offlineZones > 0
-                  ? `${offlineZones} 区离线`
-                  : "48 区正常"}
+              : breachZones > 0
+                ? `${breachZones} 区破口`
+                : watchZones > 0
+                  ? `${watchZones} 区关注`
+                  : offlineZoneCount > 0
+                    ? `${offlineZoneCount} 区离线`
+                    : "48 区正常"}
           </StatusPill>
         </div>
         <div className="topology-grid">
@@ -173,16 +605,17 @@ export function ShipView({
                 : "—"}
             </strong>
           </div>
-          {["A 环", "B 环", "工程脊柱", "休眠舱群"].map((label, index) => (
-            <div
-              className={`topology-node topology-node-${index + 1}`}
-              key={label}
-            >
-              <span>{label}</span>
-              <i />
+          {topologyNodes.map((node) => (
+            <div className={node.className} key={node.key}>
+              <span>{node.title}</span>
+              <strong>{node.value}</strong>
+              <small>{node.detail}</small>
             </div>
           ))}
         </div>
+        <p className="panel-note topology-note">
+          工程脊柱与休眠舱群不在本 48 区大气网内；休眠为环级供电负载。
+        </p>
       </div>
       <div className="panel network-panel">
         <div className="panel-heading compact">
@@ -214,37 +647,101 @@ export function ShipView({
         <div className="panel-heading compact">
           <div>
             <span className="eyebrow">PRESSURE SECTORS</span>
-            <h2>48 个主要压力区</h2>
+            <h2>48 个环段压力区（按功能区带命名）</h2>
           </div>
         </div>
-        <div className="sector-matrix">
-          {(compartments?.zones ??
-            Array.from({ length: 48 }, (_, index) => ({
-              zoneId: `${index < 24 ? "A" : "B"}-${String(
-                (index % 24) + 1,
-              ).padStart(2, "0")}`,
-              condition: "offline" as const,
-              hasBreach: false,
-              observed: { pressurePa: null },
-            }))).map((zone) => (
-            <span
-              key={zone.zoneId}
-              className={`sector-${zone.condition}`}
-              role="img"
-              tabIndex={0}
-              aria-label={`${zone.zoneId}，${
-                zone.observed.pressurePa === null
-                  ? "压力遥测等待中"
-                  : `压力 ${(zone.observed.pressurePa / 1_000).toFixed(2)} 千帕，状态 ${zone.condition}`
-              }`}
-              title={`${zone.zoneId} · ${
-                zone.observed.pressurePa === null
-                  ? "压力遥测等待中"
-                  : `${(zone.observed.pressurePa / 1_000).toFixed(2)} kPa`
-              }`}
-            />
-          ))}
-        </div>
+        {roleLegend.length > 0 && (
+          <div className="sector-role-legend" aria-label="区带角色图例">
+            {roleLegend.map(([role, count]) => (
+              <span key={role}>
+                {role}
+                <i>{count}</i>
+              </span>
+            ))}
+          </div>
+        )}
+        <HullSection
+          zones={zones}
+          selectedZoneId={selectedZoneId}
+          onSelectZone={setSelectedZoneId}
+          focusPulse={focusPulse}
+        />
+        {selectedZone && (
+          <aside
+            className={`zone-inspector${focusPulse ? " zone-inspector-focus" : ""}`}
+            aria-live="polite"
+          >            <div className="zone-inspector-head">
+              <div>
+                <span className="eyebrow">ZONE INSPECTOR</span>
+                <h3>
+                  {zoneLabel(selectedZone)}
+                  <small>{selectedZone.zoneId}</small>
+                </h3>
+              </div>
+              <StatusPill
+                tone={
+                  selectedZone.condition === "critical" || selectedZone.hasBreach
+                    ? "critical"
+                    : selectedZone.condition === "nominal"
+                      ? "nominal"
+                      : "watch"
+                }
+              >
+                {selectedZone.hasBreach
+                  ? "破口"
+                  : conditionLabel(selectedZone.condition)}
+              </StatusPill>
+            </div>
+            <dl className="zone-inspector-meta">
+              <div>
+                <dt>环</dt>
+                <dd>{selectedZone.ring}</dd>
+              </div>
+              <div>
+                <dt>角色</dt>
+                <dd>{zoneRoleLabel(selectedZone)}</dd>
+              </div>
+              <div>
+                <dt>用途</dt>
+                <dd title={selectedZone.purposeZh}>
+                  {selectedZone.purposeZh || "—"}
+                </dd>
+              </div>
+              <div>
+                <dt>破口</dt>
+                <dd>{selectedZone.hasBreach ? "有" : "无"}</dd>
+              </div>
+            </dl>
+            <div className="zone-inspector-readings">
+              <div>
+                <span>压力</span>
+                <strong>{formatPa(selectedZone.observed.pressurePa, 2)}</strong>
+              </div>
+              <div>
+                <span>O₂</span>
+                <strong>
+                  {formatPa(selectedZone.observed.oxygenPartialPressurePa, 2)}
+                </strong>
+              </div>
+              <div>
+                <span>CO₂</span>
+                <strong>
+                  {formatPa(
+                    selectedZone.observed.carbonDioxidePartialPressurePa,
+                    2,
+                  )}
+                </strong>
+              </div>
+              <div>
+                <span>温度</span>
+                <strong>{formatTemp(selectedZone.observed.temperatureK)}</strong>
+              </div>
+            </div>
+            <p className="zone-inspector-causal">
+              {causalSentence(selectedZone)}
+            </p>
+          </aside>
+        )}
         <p className="panel-note">
           {compartments
             ? compartments.fidelityLimited

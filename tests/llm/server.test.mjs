@@ -276,6 +276,28 @@ test("server invocation enforces sender topology and fixed world-tool permission
     }),
     AgentPermissionError,
   );
+  for (const forbiddenControlPlaneTool of [
+    "save_game",
+    "load_game",
+    "set_time_scale",
+    "pause_simulation",
+    "god_intervention",
+  ]) {
+    await assert.rejects(
+      runtime.invoke({
+        agentId: "captain",
+        messages: [],
+        tools: [
+          {
+            name: forbiddenControlPlaneTool,
+            inputSchema: emptySchema,
+          },
+        ],
+      }),
+      LlmInputValidationError,
+      `captain must not reach player control-plane tool ${forbiddenControlPlaneTool}`,
+    );
+  }
   assert.equal(fetchCalls, 0);
 });
 
@@ -822,5 +844,249 @@ test("routine tickets expire and the in-memory store evicts oldest entries at it
         toolCallId: third.toolCalls[0].id,
       }),
     RoutineTicketNotFoundError,
+  );
+});
+
+const MEMORY_AND_SOCIAL_TOOLS = [
+  {
+    name: "record_captain_log",
+    agentId: "captain",
+    fromAgentId: undefined,
+    permissionsOk: true,
+  },
+  {
+    name: "set_watch_condition",
+    agentId: "captain",
+    fromAgentId: undefined,
+    permissionsOk: true,
+  },
+  {
+    name: "file_dissent",
+    agentId: "engineering",
+    fromAgentId: "captain",
+    permissionsOk: true,
+  },
+  {
+    name: "file_passenger_grievance",
+    agentId: "crew-0001",
+    fromAgentId: "passenger-service",
+    permissionsOk: true,
+  },
+  {
+    name: "share_passenger_rumor",
+    agentId: "crew-0001",
+    fromAgentId: "passenger-service",
+    permissionsOk: true,
+  },
+];
+
+test("memory and social tools pass the world-tool registry and reach the provider", async () => {
+  const source = JSON.parse(await readFile(exampleConfigUrl, "utf8"));
+  const emptySchema = {
+    type: "object",
+    properties: {},
+    additionalProperties: false,
+  };
+  const forwarded = [];
+
+  for (const entry of MEMORY_AND_SOCIAL_TOOLS) {
+    let capturedBody;
+    const runtime = new FixedLlmServerRuntime(
+      expandFarHorizonFixedTopology(source),
+      {
+        fetch: async (_url, init) => {
+          capturedBody = JSON.parse(init.body);
+          return toolResponse(`${entry.name}-call`, entry.name, {
+            note: entry.name,
+          });
+        },
+        readEnvironment: () => "server-secret",
+        createCallId: () => `${entry.name}-invocation`,
+        now: () => 40_000,
+      },
+    );
+
+    const result = await runtime.invoke({
+      agentId: entry.agentId,
+      ...(entry.fromAgentId ? { fromAgentId: entry.fromAgentId } : {}),
+      messages: [{ role: "user", content: entry.name }],
+      tools: [
+        {
+          name: entry.name,
+          inputSchema: emptySchema,
+        },
+      ],
+    });
+
+    assert.ok(
+      capturedBody.tools.some((tool) => tool.function.name === entry.name),
+      `${entry.name} must be forwarded to the provider`,
+    );
+    assert.equal(result.toolCalls[0].name, entry.name);
+    assert.deepEqual(result.routineTickets, []);
+    assert.equal(runtime.status().pendingRoutineTickets, 0);
+    forwarded.push(entry.name);
+  }
+
+  assert.deepEqual(
+    forwarded,
+    MEMORY_AND_SOCIAL_TOOLS.map((entry) => entry.name),
+  );
+});
+
+test("memory and social tools reject unauthorized agents and unknown names", async () => {
+  const emptySchema = {
+    type: "object",
+    properties: {},
+    additionalProperties: false,
+  };
+  let fetchCalls = 0;
+  const unauthorizedConfig = singleAgentConfiguration();
+  unauthorizedConfig.agents[0].permissions = [];
+  const unauthorized = new FixedLlmServerRuntime(unauthorizedConfig, {
+    fetch: async () => {
+      fetchCalls += 1;
+      throw new Error("permission failures must precede network access");
+    },
+    readEnvironment: () => "server-secret",
+  });
+
+  for (const name of [
+    "record_captain_log",
+    "set_watch_condition",
+    "file_dissent",
+    "file_passenger_grievance",
+    "share_passenger_rumor",
+  ]) {
+    await assert.rejects(
+      unauthorized.invoke({
+        agentId: "captain",
+        messages: [],
+        tools: [{ name, inputSchema: emptySchema }],
+      }),
+      AgentPermissionError,
+      `empty-permission agent must not receive ${name}`,
+    );
+  }
+
+  const captainWithoutCommunicate = new FixedLlmServerRuntime(
+    singleAgentConfiguration(),
+    {
+      fetch: async () => {
+        fetchCalls += 1;
+        throw new Error("permission failures must precede network access");
+      },
+      readEnvironment: () => "server-secret",
+    },
+  );
+  for (const name of [
+    "file_dissent",
+    "file_passenger_grievance",
+    "share_passenger_rumor",
+  ]) {
+    await assert.rejects(
+      captainWithoutCommunicate.invoke({
+        agentId: "captain",
+        messages: [],
+        tools: [{ name, inputSchema: emptySchema }],
+      }),
+      AgentPermissionError,
+      `captain without ship:communicate must not receive ${name}`,
+    );
+  }
+
+  await assert.rejects(
+    captainWithoutCommunicate.invoke({
+      agentId: "captain",
+      messages: [],
+      tools: [
+        {
+          name: "invent_captain_memory_tool",
+          inputSchema: emptySchema,
+        },
+      ],
+    }),
+    LlmInputValidationError,
+  );
+  assert.equal(fetchCalls, 0);
+});
+
+test("captain memory tools do not issue or consume routine tickets", async () => {
+  const emptySchema = {
+    type: "object",
+    properties: {},
+    additionalProperties: false,
+  };
+  const responses = [
+    ["log-tool-1", "record_captain_log", { voice: "steady" }],
+    ["watch-tool-1", "set_watch_condition", { metricId: "hullIntegrity" }],
+    [
+      "routine-tool-contrast",
+      "configure_self_routine",
+      { discussionDepth: 3 },
+    ],
+  ];
+  const callIds = ["log-call", "watch-call", "routine-contrast-call"];
+  const runtime = new FixedLlmServerRuntime(singleAgentConfiguration(), {
+    fetch: async () => {
+      const response = responses.shift();
+      return toolResponse(...response);
+    },
+    readEnvironment: () => "server-secret",
+    createCallId: () => callIds.shift(),
+    now: () => 50_000,
+  });
+
+  for (const toolName of ["record_captain_log", "set_watch_condition"]) {
+    const result = await runtime.invoke({
+      agentId: "captain",
+      messages: [{ role: "user", content: toolName }],
+      tools: [{ name: toolName, inputSchema: emptySchema }],
+    });
+    assert.equal(result.toolCalls[0].name, toolName);
+    assert.deepEqual(result.routineTickets, []);
+    assert.equal(runtime.status().pendingRoutineTickets, 0);
+    assert.throws(
+      () =>
+        runtime.consumeRoutineTicket({
+          callId: result.callId,
+          toolCallId: result.toolCalls[0].id,
+        }),
+      UnsupportedRoutineToolError,
+    );
+    assert.equal(
+      runtime.routines.get("captain").discussionDepth,
+      2,
+      `${toolName} must not mutate routine settings`,
+    );
+  }
+
+  const contrast = await runtime.invoke({
+    agentId: "captain",
+    messages: [{ role: "user", content: "tune routine" }],
+  });
+  assert.deepEqual(contrast.routineTickets, [
+    {
+      callId: "routine-contrast-call",
+      toolCallId: "routine-tool-contrast",
+      expiresAtEpochMs: 50_000 + 5 * 60_000,
+    },
+  ]);
+  assert.equal(runtime.status().pendingRoutineTickets, 1);
+  assert.deepEqual(
+    runtime.consumeRoutineTicket({
+      callId: contrast.callId,
+      toolCallId: contrast.toolCalls[0].id,
+    }),
+    {
+      callId: "routine-contrast-call",
+      toolCallId: "routine-tool-contrast",
+      agentId: "captain",
+      routine: {
+        systemInfoIntervalSimSeconds: 300,
+        discussionDepth: 3,
+        discussionRounds: 4,
+      },
+    },
   );
 });

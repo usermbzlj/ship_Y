@@ -17,19 +17,11 @@ const SCALE_SHORT: Record<TimeScalePreset, string> = {
   86_400: "1D",
 };
 
-function formatOwed(seconds: number): string {
-  if (seconds < 60) return `${Math.round(seconds)}s`;
-  if (seconds < 3_600) return `${Math.round(seconds / 60)}m`;
-  if (seconds < 86_400) return `${(seconds / 3_600).toFixed(1)}h`;
-  return `${(seconds / 86_400).toFixed(1)}d`;
-}
-
 export function TimeControlBar({
   timeScale,
   paused,
   effectiveTimeScale,
   fidelityLocked,
-  owedSimSeconds,
   pauseTokens,
   onSetTimeScale,
   onTogglePause,
@@ -40,7 +32,6 @@ export function TimeControlBar({
   paused: boolean;
   effectiveTimeScale?: number;
   fidelityLocked?: boolean;
-  owedSimSeconds?: number;
   pauseTokens?: string[];
   onSetTimeScale: (scale: number) => void;
   onTogglePause: () => void;
@@ -52,11 +43,12 @@ export function TimeControlBar({
     effectiveTimeScale !== undefined && Number.isFinite(effectiveTimeScale)
       ? effectiveTimeScale
       : timeScale;
+  const tokens = pauseTokens ?? [];
+  const modelPaused = tokens.includes("llm-waiting");
+  const visiblyPaused = paused || modelPaused;
   const showEffective =
     fidelityLocked || Math.abs(effective - timeScale) > 0.5;
-  const owed = owedSimSeconds ?? 0;
-  const tokens = pauseTokens ?? [];
-  const pauseLabel = tokens.includes("llm-waiting")
+  const pauseLabel = modelPaused
     ? "决策中"
     : tokens.includes("mission-ended")
       ? "已抵达"
@@ -71,7 +63,7 @@ export function TimeControlBar({
 
   return (
     <div
-      className={`time-control-bar${paused ? " is-paused" : ""}${disabled ? " is-disabled" : ""}`}
+      className={`time-control-bar${visiblyPaused ? " is-paused" : ""}${disabled ? " is-disabled" : ""}`}
       role="group"
       aria-label="仿真时间控制"
     >
@@ -86,20 +78,11 @@ export function TimeControlBar({
             实际 {effective.toLocaleString("zh-CN")}×
           </span>
         )}
-        {owed > 1 && (
-          <span
-            className="owed-chip"
-            role="status"
-            title="欠账追赶：尚未结算的仿真时间"
-          >
-            追赶 {formatOwed(owed)}
-          </span>
-        )}
       </div>
 
       <div className="scale-ladder" role="toolbar" aria-label="倍速阶梯">
         {TIME_SCALE_PRESETS.map((scale, index) => {
-          const pressed = activePreset === scale && !paused;
+          const pressed = activePreset === scale && !visiblyPaused;
           return (
             <button
               key={scale}
@@ -119,15 +102,15 @@ export function TimeControlBar({
 
       <button
         type="button"
-        className={`pause-button${paused ? " is-paused" : ""}${tokens.includes("llm-waiting") ? " thinking" : ""}`}
-        aria-pressed={paused}
-        aria-label={paused ? "继续模拟（Space）" : "暂停模拟（Space）"}
+        className={`pause-button${visiblyPaused ? " is-paused" : ""}${modelPaused ? " thinking" : ""}`}
+        aria-pressed={visiblyPaused}
+        aria-label={modelPaused ? "AI 研判期间仿真暂停" : paused ? "继续模拟（Space）" : "暂停模拟（Space）"}
         title="快捷键 Space"
         disabled={pauseDisabled}
         onClick={onTogglePause}
       >
         <span className="pause-glyph" aria-hidden="true">
-          {paused ? "▶" : "Ⅱ"}
+          {modelPaused ? "…" : visiblyPaused ? "▶" : "Ⅱ"}
         </span>
         {pauseLabel}
       </button>

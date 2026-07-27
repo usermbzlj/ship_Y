@@ -277,6 +277,7 @@ const MAX_CARRIER_ANGULAR_SPEED_RAD_PER_S = 10;
 const MAX_CARRIER_INERTIA_KG_M2 = 1e22;
 const MAX_TORQUE_NM = 1e10;
 const MAX_CONTROL_POWER_W = 1e9;
+const FIXED_ROTATION_DRIVE_ELECTRICAL_RATING_W = 7_500_000;
 const MAX_SENSOR_INTERVAL_MICROSECONDS =
   24 * 60 * 60 * ROTATION_MICROSECONDS_PER_SECOND;
 const MAX_SENSOR_DELAY_MICROSECONDS =
@@ -1184,9 +1185,9 @@ function previewRequestedEnergy(
       0,
       active.mechanicalWorkJByRing[index],
     );
-    return (
-      control +
-      positiveMechanicalWork / ring.drive.efficiency
+    return Math.min(
+      FIXED_ROTATION_DRIVE_ELECTRICAL_RATING_W * durationSeconds,
+      control + positiveMechanicalWork / ring.drive.efficiency,
     );
   }) as Pair;
 }

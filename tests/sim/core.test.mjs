@@ -274,6 +274,41 @@ test("a jump consumes stored energy, deposits waste heat, and advances the route
   assert.ok(after.thermal.coolantTemperatureK > before.thermal.coolantTemperatureK);
 });
 
+test("external thermal authority skips aggregate jump coolant warming", () => {
+  const engine = new SimulationEngine({
+    thermalAuthority: "external-network",
+  });
+  engine.applyExternalIntervention({
+    actor: "test-fixture",
+    reason: "Prepare a fully charged drive for external-thermal jump test",
+    operations: [
+      {
+        operation: "set",
+        path: "journey.jumpDriveChargeKWh",
+        value: 6_000_000,
+      },
+      {
+        operation: "set",
+        path: "journey.status",
+        value: "ready",
+      },
+    ],
+    declaredBalance: {
+      ...zeroBalance,
+      energyJ: 12_960_000_000_000,
+    },
+  });
+
+  const beforeCoolantK = engine.getState().thermal.coolantTemperatureK;
+  const result = engine.executeJump(4.2);
+
+  assert.ok(result.wasteHeatJoules > 0);
+  assert.equal(
+    engine.getState().thermal.coolantTemperatureK,
+    beforeCoolantK,
+  );
+});
+
 test("aggregate population can only synchronize to a reconciled individual roster", () => {
   const engine = new SimulationEngine();
   engine.synchronizePopulationCounts({

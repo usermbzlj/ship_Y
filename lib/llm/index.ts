@@ -193,6 +193,8 @@ export interface RetryPolicy {
   initialDelayMs: number;
   maxDelayMs: number;
   multiplier: number;
+  /** Cap on provider attempts before the gateway fails the call. */
+  maxAttempts: number;
 }
 
 export interface GatewayAvailabilityEvent {
@@ -629,6 +631,7 @@ const DEFAULT_RETRY_POLICY: RetryPolicy = {
   initialDelayMs: 500,
   maxDelayMs: 30_000,
   multiplier: 2,
+  maxAttempts: 6,
 };
 const DEFAULT_ROUTINE_TICKET_TTL_MS = 5 * 60_000;
 const DEFAULT_MAX_ROUTINE_TICKETS = 1024;
@@ -673,6 +676,14 @@ const CLIENT_WORLD_TOOL_PERMISSIONS: Readonly<
     "engineering:command",
     "life-support:command",
   ],
+  configure_water_distribution_spur: [
+    "ship:command",
+    "life-support:command",
+  ],
+  configure_habitat_thermal_delivery_spur: [
+    "ship:command",
+    "engineering:command",
+  ],
   schedule_maintenance: [
     "ship:command",
     "engineering:command",
@@ -683,6 +694,30 @@ const CLIENT_WORLD_TOOL_PERMISSIONS: Readonly<
     "life-support:command",
     "security:command",
   ],
+  revise_mission: ["ship:command"],
+  manage_department_order: ["ship:command"],
+  publish_communication: ["ship:command", "passenger-affairs:command", "passenger-service:command"],
+  manage_crew_assignment: ["ship:command"],
+  manage_person: ["ship:command", "medical:command", "security:command"],
+  manage_security: ["ship:command", "security:command"],
+  manage_logistics: ["ship:command", "engineering:command", "life-support:command", "passenger-affairs:command"],
+  set_compartment_connection: ["ship:command", "engineering:command", "life-support:command", "security:command"],
+  schedule_hull_repair: ["ship:command", "engineering:command"],
+  set_thermal_control: ["ship:command", "engineering:command"],
+  set_atmosphere_supply: ["ship:command", "life-support:command"],
+  set_oxygen_production: ["ship:command", "life-support:command"],
+  distribute_water: ["ship:command", "engineering:command", "life-support:command"],
+  reset_protection: ["ship:command", "engineering:command"],
+  manage_maintenance_task: ["ship:command", "engineering:command"],
+  manage_sensor_operation: ["ship:command", "navigation:command", "engineering:command", "life-support:command"],
+  manage_remote_asset: ["ship:command", "navigation:command", "engineering:command", "security:command"],
+  set_power_allocation: ["ship:command", "engineering:command"],
+  consult_departments: ["ship:communicate"],
+  record_captain_log: ["llm:routine:configure-self"],
+  set_watch_condition: ["llm:routine:configure-self"],
+  file_dissent: ["ship:communicate"],
+  file_passenger_grievance: ["ship:communicate"],
+  share_passenger_rumor: ["ship:communicate"],
 });
 
 export class LlmGateway {
@@ -763,6 +798,12 @@ export class LlmGateway {
               !error.retryable
             ) {
               throw error;
+            }
+
+            if (attempts >= this.#retry.maxAttempts) {
+              throw new Error(
+                `LLM provider exhausted ${this.#retry.maxAttempts} attempts: ${errorMessage(error)}`,
+              );
             }
 
             retrying = true;
@@ -2140,7 +2181,10 @@ function validateRetryPolicy(policy: RetryPolicy): void {
     !Number.isFinite(policy.maxDelayMs) ||
     policy.maxDelayMs < policy.initialDelayMs ||
     !Number.isFinite(policy.multiplier) ||
-    policy.multiplier < 1
+    policy.multiplier < 1 ||
+    !Number.isFinite(policy.maxAttempts) ||
+    !Number.isInteger(policy.maxAttempts) ||
+    policy.maxAttempts < 1
   ) {
     throw new LlmConfigurationError("Invalid LLM retry policy");
   }

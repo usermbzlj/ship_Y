@@ -642,7 +642,7 @@ test("aggregate coupling helpers preserve distribution and exact global totals",
   );
 });
 
-test("breaches, significant pressure gradients, and entity faults force fine fidelity", () => {
+test("breaches use accelerated venting without reducing time scale while other transients force fine fidelity", () => {
   const pressureSnapshot = withoutOccupants(
     new CompartmentAtmosphereNetwork({ seed: "pressure-fallback" }),
   ).snapshot();
@@ -676,9 +676,19 @@ test("breaches, significant pressure gradients, and entity faults force fine fid
       .getFidelityRequirement()
       .reasons.includes("active-breach"),
   );
+  assert.equal(
+    breach.getFidelityRequirement().maximumSimulatedSecondsPerStep,
+    null,
+  );
   const breachResult = breach.step(1);
-  assert.equal(breachResult.fidelityMode, "transient-fine");
-  assert.ok(breachResult.fineSubsteps >= 10);
+  assert.equal(breachResult.fidelityMode, "equilibrium-fast");
+  assert.equal(breachResult.fineSubsteps, 0);
+  assert.ok(
+    Object.values(breachResult.ventedGasesKg).reduce(
+      (total, mass) => total + mass,
+      0,
+    ) > 0,
+  );
 
   const fault = withoutOccupants(
     new CompartmentAtmosphereNetwork({ seed: "fault-fallback" }),
@@ -694,6 +704,41 @@ test("breaches, significant pressure gradients, and entity faults force fine fid
   const faultResult = fault.step(1);
   assert.equal(faultResult.fidelityMode, "transient-fine");
   assert.ok(faultResult.fineSubsteps >= 10);
+});
+
+test("six-hour equilibrium breach advances in one fast interval", () => {
+  const network = withoutOccupants(
+    new CompartmentAtmosphereNetwork({ seed: "accelerated-breach" }),
+  );
+  network.upsertBreach({
+    id: "breach:accelerated",
+    zoneId: "A-03",
+    areaSquareMeters: 0.0005,
+    dischargeCoefficient: 0.7,
+  });
+  const massBefore = Object.values(
+    network.getAggregateState().gasesKg,
+  ).reduce((total, mass) => total + mass, 0);
+
+  const startedAt = performance.now();
+  const result = network.step(21_600);
+  const elapsedMilliseconds = performance.now() - startedAt;
+  const aggregate = network.getAggregateState();
+
+  assert.equal(result.fidelityMode, "equilibrium-fast");
+  assert.equal(result.equilibriumIntervals, 1);
+  assert.equal(result.fineSubsteps, 0);
+  assert.ok(aggregate.ventedGasKg > 0);
+  assert.ok(
+    Object.values(aggregate.gasesKg).reduce(
+      (total, mass) => total + mass,
+      0,
+    ) < massBefore,
+  );
+  assert.ok(
+    elapsedMilliseconds < 1_000,
+    `six-hour accelerated breach took ${elapsedMilliseconds.toFixed(1)} ms`,
+  );
 });
 
 test("six-hour equilibrium step has a generous performance guard and restores deterministically", () => {
