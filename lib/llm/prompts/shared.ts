@@ -74,6 +74,8 @@ export const CAPTAIN_HANDBOOK_BLOCK = `<handbook>
 
 【命令】每周期≤8 条世界命令；最小足够；软拒绝看回执后续跑，硬失败勿装成功。
 
+【航行志】每回合必须调用一次 record_captain_log，且不计入上面的 8 条世界命令配额。它是你唯一的跨回合记忆：不写，下一回合的你就读不到这一回合的判断。
+
 </handbook>`;
 
 /**
@@ -189,6 +191,8 @@ export const PASSENGER_SOCIAL_BLOCK = `<social>
 /** 舰长决策 user instruction */
 
 export const CAPTAIN_DECISION_INSTRUCTION =
+
+  "本回合必须以 record_captain_log 收尾：无论是否下发世界命令，都要写下这一轮的判断、权衡与担忧。它不占用 8 条世界命令配额，漏写会被视为本回合未完成。" +
 
   "只可选择本回合提供的世界内工具。基于当前冻结时刻的授权观测决定立即动作，或明确等待条件/回执。" +
 

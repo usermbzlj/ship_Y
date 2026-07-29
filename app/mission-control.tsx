@@ -3259,16 +3259,69 @@ export function MissionControl() {
         );
 
         const preliminaryReceipts: CaptainDeviceReceiptSummary[] = [];
-        const captainLogCall = payload.result.toolCalls.find(
+        let captainLogCall = payload.result.toolCalls.find(
           (toolCall) => toolCall.name === RECORD_CAPTAIN_LOG_TOOL_NAME,
         );
         if (!captainLogCall) {
-          appendCaptainCommandEvent(
-            simulationSeconds,
-            "舰长本轮未调用 record_captain_log，航行志未更新。",
-            "watch",
-          );
-        } else {
+          // 航行志是舰长唯一的跨回合记忆，漏写会让下一回合读不到本回合的判断。
+          // 这里不代笔：只把补写请求退回给舰长本人，且工具表只留航行志一项，
+          // 模型没有别的动作可选，比在近 40 个工具里重复叮嘱可靠得多。
+          try {
+            assertCurrentCaptainDecision();
+            const logResponse = await fetch("/api/llm/invoke", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              signal: decisionController.signal,
+              body: JSON.stringify({
+                intent: "captain-decision",
+                invocation: {
+                  messages: [
+                    {
+                      role: "user",
+                      content: {
+                        event: triggerReason,
+                        highestDirective: directive,
+                        yourDecisionThisCycle: payload.result.text,
+                        instruction:
+                          "你本回合没有调用 record_captain_log。现在补写这一条航行志：" +
+                          "用第一人称记下刚才的判断、权衡与担忧，不要复述遥测读数。" +
+                          "本次只允许调用 record_captain_log，没有其他可用工具。",
+                      },
+                    },
+                  ],
+                  tools: [RECORD_CAPTAIN_LOG_TOOL],
+                  metadata: { triggerKey, captainLogRetry: true },
+                },
+              }),
+            });
+            assertCurrentCaptainDecision();
+            const logPayload =
+              (await logResponse.json()) as LlmInvokeRoutePayload;
+            captainLogCall = logPayload.result?.toolCalls.find(
+              (toolCall) =>
+                toolCall.name === RECORD_CAPTAIN_LOG_TOOL_NAME,
+            );
+          } catch (error) {
+            if (
+              !isCurrentCaptainDecision() ||
+              isCaptainConsultationHardFailure(error, [
+                supersededDecisionError,
+                staleObservationError,
+              ])
+            ) {
+              throw error;
+            }
+            // 补写失败只损失这一轮记忆，不该连累已经形成的世界命令。
+          }
+          if (!captainLogCall) {
+            appendCaptainCommandEvent(
+              simulationSeconds,
+              "舰长本轮未调用 record_captain_log，补写请求同样未返回，航行志未更新。",
+              "watch",
+            );
+          }
+        }
+        if (captainLogCall) {
           const parsedLog = parseCaptainLogToolCall(
             captainLogCall.arguments,
           );
@@ -4798,22 +4851,6 @@ export function MissionControl() {
   return (
     <main className={`game-shell${activeAlerts.some((a) => !a.acknowledged && a.level === "critical") ? " alert-active" : ""}`}>
       <div className="noise-layer" />
-      <AlertBanner
-        alerts={activeAlerts}
-        onAcknowledge={(id) =>
-          setActiveAlerts((prev) =>
-            prev.map((a) => (a.id === id ? { ...a, acknowledged: true } : a)),
-          )
-        }
-        onLocate={(alert) => {
-          setActiveView("ship");
-          setShipFocus((prev) => ({
-            zoneId: alert.zoneId ?? null,
-            ringId: alert.ringId ?? null,
-            token: prev.token + 1,
-          }));
-        }}
-      />
       <header className="topbar">
         <div className="brand-lockup">
           <span className="brand-mark">Y</span>
@@ -4908,13 +4945,32 @@ export function MissionControl() {
         </div>
       </header>
 
-      {decisionTheater.active ? (
-        <DecisionTheater
-          key={decisionTheater.cycleToken ?? "active"}
-          state={decisionTheater}
-          compact
+      {/* 顶栏下方的浮层堆叠：绝对定位，不参与 game-shell 网格流。 */}
+      <div className="hud-dock">
+        <AlertBanner
+          alerts={activeAlerts}
+          onAcknowledge={(id) =>
+            setActiveAlerts((prev) =>
+              prev.map((a) => (a.id === id ? { ...a, acknowledged: true } : a)),
+            )
+          }
+          onLocate={(alert) => {
+            setActiveView("ship");
+            setShipFocus((prev) => ({
+              zoneId: alert.zoneId ?? null,
+              ringId: alert.ringId ?? null,
+              token: prev.token + 1,
+            }));
+          }}
         />
-      ) : null}
+        {decisionTheater.active ? (
+          <DecisionTheater
+            key={decisionTheater.cycleToken ?? "active"}
+            state={decisionTheater}
+            compact
+          />
+        ) : null}
+      </div>
 
       <aside className="sidebar" aria-label="主导航">
         <div className="sidebar-index">Y-01</div>
@@ -5028,6 +5084,7 @@ export function MissionControl() {
               captainJournal={captainJournalSnapshot}
               departmentStanding={departmentStandingSnapshot}
               captainWatch={captainWatchSnapshot}
+              missionStarted={missionStarted}
             />
           )}
           {activeView === "god" && (

@@ -611,6 +611,7 @@ export function AiView({
   captainJournal,
   departmentStanding,
   captainWatch,
+  missionStarted,
 }: {
   status: LlmRuntimeStatus | null;
   callPhase: LlmCallPhase;
@@ -620,6 +621,8 @@ export function AiView({
   captainJournal: CaptainJournalSnapshot;
   departmentStanding: DepartmentStandingSnapshot;
   captainWatch: CaptainWatchSnapshot;
+  /** 空态文案要据此区分「还没签发」和「已签发但舰长确实还没产出」。 */
+  missionStarted: boolean;
 }) {
   const [logTab, setLogTab] = useState<"decisions" | "calls">("decisions");
   const recentCalls = status?.recentCalls ?? [];
@@ -906,8 +909,19 @@ export function AiView({
         <div className="journal-stream">
           {journalEntries.length === 0 ? (
             <div className="decision-empty">
-              <p>舰长尚未写下第一条记录。</p>
-              <p>等待签发 · 决策周期结束后，私人航行志将显示在此。</p>
+              {missionStarted ? (
+                <>
+                  <p>舰长尚未写下第一条记录。</p>
+                  <p>
+                    每个决策周期收尾时舰长会记一条主观航行志；本轮周期结束后就会出现在这里。
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p>航行志为空。</p>
+                  <p>等待签发 · 舰长接管后才会开始记录。</p>
+                </>
+              )}
             </div>
           ) : (
             journalEntries.map((entry) => (
@@ -938,8 +952,21 @@ export function AiView({
         <div className="dissent-stream">
           {dissentRecords.length === 0 ? (
             <div className="decision-empty">
-              <p>尚无部门正式异议。</p>
-              <p>等待签发 · 部门在咨询中提出异议后，将在此留痕。</p>
+              {missionStarted ? (
+                <>
+                  <p>尚无部门正式异议。</p>
+                  <p>
+                    {activeStandings.length > 0
+                      ? "上方各部门已建档，但至今没有一次咨询让它们提出反对意见。"
+                      : "舰长默认不开会；只有发生多域冲突或不可逆高代价动作时才会咨询部门。"}
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p>尚无部门正式异议。</p>
+                  <p>等待签发 · 部门在咨询中提出异议后，将在此留痕。</p>
+                </>
+              )}
             </div>
           ) : (
             dissentRecords.map((record) => (
@@ -962,8 +989,19 @@ export function AiView({
         <div className="watch-stream">
           {armedWatches.length === 0 && triggeredWatches.length === 0 ? (
             <div className="decision-empty">
-              <p>尚无舰长自设观察哨。</p>
-              <p>等待签发 · 舰长设定阈值条件后，将在此分组成效与已触发。</p>
+              {missionStarted ? (
+                <>
+                  <p>舰长还没有设过观察哨。</p>
+                  <p>
+                    舰长可对 12 项核心遥测自设至多 6 条阈值条件；设立后在此分为生效中与已触发。
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p>尚无舰长自设观察哨。</p>
+                  <p>等待签发 · 舰长设定阈值条件后，将在此分组成效与已触发。</p>
+                </>
+              )}
             </div>
           ) : (
             <>

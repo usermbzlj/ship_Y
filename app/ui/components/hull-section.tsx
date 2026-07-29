@@ -574,9 +574,6 @@ export function HullSection({
     hover &&
     (zones.find((z) => z.zoneId === hover.zone.zoneId) ?? hover.zone);
 
-  const ringZonesA = zones.filter((z) => z.ring === "A");
-  const ringZonesB = zones.filter((z) => z.ring === "B");
-
   return (
     <div className={styles.root} ref={rootRef}>
       <div className={styles.stage} aria-label="舰体剖视三维模型">
@@ -629,30 +626,52 @@ export function HullSection({
           </div>
         )}
       </div>
+    </div>
+  );
+}
 
-      <div className={styles.zoneList} aria-label="压力区键盘列表">
-        <span className={styles.ringLabel}>A</span>
-        <div className={styles.ringButtons}>
-          {ringZonesA.map((zone) => (
-            <ZoneListButton
-              key={zone.zoneId}
-              zone={zone}
-              selected={selectedZoneId === zone.zoneId}
-              onSelect={onSelectZone}
-            />
-          ))}
-        </div>
-        <span className={styles.ringLabel}>B</span>
-        <div className={styles.ringButtons}>
-          {ringZonesB.map((zone) => (
-            <ZoneListButton
-              key={zone.zoneId}
-              zone={zone}
-              selected={selectedZoneId === zone.zoneId}
-              onSelect={onSelectZone}
-            />
-          ))}
-        </div>
+/**
+ * 48 区键盘可达列表。
+ *
+ * 与三维舞台分开导出：舰务页把剖视图放在主视觉位、把区带选择器放在下方的
+ * 检查器面板里，两者不再共用一个容器高度，剖视图才能占满首屏而不被挤到折叠线以下。
+ * 选中态由调用方持有，因此两个组件始终指向同一个区带。
+ */
+export function HullZonePicker({
+  zones,
+  selectedZoneId,
+  onSelectZone,
+}: {
+  zones: ZoneTelemetry[];
+  selectedZoneId: string;
+  onSelectZone: (zoneId: string) => void;
+}) {
+  const ringZonesA = zones.filter((z) => z.ring === "A");
+  const ringZonesB = zones.filter((z) => z.ring === "B");
+
+  return (
+    <div className={styles.zoneList} aria-label="压力区键盘列表">
+      <span className={styles.ringLabel}>A</span>
+      <div className={styles.ringButtons}>
+        {ringZonesA.map((zone) => (
+          <ZoneListButton
+            key={zone.zoneId}
+            zone={zone}
+            selected={selectedZoneId === zone.zoneId}
+            onSelect={onSelectZone}
+          />
+        ))}
+      </div>
+      <span className={styles.ringLabel}>B</span>
+      <div className={styles.ringButtons}>
+        {ringZonesB.map((zone) => (
+          <ZoneListButton
+            key={zone.zoneId}
+            zone={zone}
+            selected={selectedZoneId === zone.zoneId}
+            onSelect={onSelectZone}
+          />
+        ))}
       </div>
     </div>
   );

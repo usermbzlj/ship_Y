@@ -1,3 +1,10 @@
+import { splitInlineReasoning } from "./reasoning-split.ts";
+
+export {
+  splitInlineReasoning,
+  type SplitReasoningResult,
+} from "./reasoning-split.ts";
+
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue =
   | JsonPrimitive
@@ -141,7 +148,10 @@ export interface LlmUsage {
 export interface LlmInvocationResult {
   callId: string;
   agentId: AgentId;
+  /** 对外正文：内联思维链已在网关解析层剥离。 */
   text: string;
+  /** 模型实际返回的内联思维链原文；没有则为 null。仅供观察层如实展示。 */
+  reasoning: string | null;
   toolCalls: readonly LlmToolCall[];
   finishReason: string | null;
   usage: LlmUsage;
@@ -594,6 +604,8 @@ export class InMemoryObservationLedger implements ObservationSink {
 
 interface ParsedResponse {
   text: string;
+  /** 从正文里剥出的内联思维链；模型未使用内联标签时为 null。 */
+  reasoning: string | null;
   toolCalls: LlmToolCall[];
   finishReason: string | null;
   usage: LlmUsage;
@@ -872,6 +884,7 @@ export class LlmGateway {
           callId,
           agentId: agent.id,
           text: parsed.text,
+          reasoning: parsed.reasoning,
           toolCalls: Object.freeze(parsed.toolCalls),
           finishReason: parsed.finishReason,
           usage: deepFreeze(parsed.usage),
@@ -2421,8 +2434,12 @@ async function parseJsonResponse(
   const payload: unknown = JSON.parse(
     await readBoundedResponseText(response, maxResponseBytes, signal),
   );
+  const split = splitInlineReasoning(
+    textValue(getAtPath(payload, mapping.textPath)),
+  );
   return {
-    text: textValue(getAtPath(payload, mapping.textPath)),
+    text: split.text,
+    reasoning: split.reasoning,
     toolCalls: parseToolCalls(
       getAtPath(payload, mapping.toolCallsPath),
       mapping.toolCall,
@@ -2524,8 +2541,10 @@ async function parseStreamResponse(
     );
   }
 
+  const split = splitInlineReasoning(text);
   return {
-    text,
+    text: split.text,
+    reasoning: split.reasoning,
     toolCalls: [...streamTools.values()].map(finalizeStreamToolCall),
     finishReason,
     usage,

@@ -549,6 +549,8 @@ test("server runtime passes custom thinking and mapped tools through an injected
     callId: "server-call",
     agentId: "captain",
     text: "Isolate coolant loop B.",
+    // 正文没有内联思维链标签，网关据实报告 null，而不是空串。
+    reasoning: null,
     toolCalls: [
       {
         id: "tool-1",

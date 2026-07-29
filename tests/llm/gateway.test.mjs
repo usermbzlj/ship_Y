@@ -803,3 +803,38 @@ for (const format of ["sse", "ndjson"]) {
     assert.match(errors[0], /byte response limit/);
   });
 }
+
+test("gateway strips inline reasoning from text before any consumer sees it", async () => {
+  // 部分模型把思维链写进 content 而不是独立字段；未清洗的正文会同时污染
+  // 舰内日志、下一轮 prompt 与部门立场存档，因此必须在网关解析层就拆开。
+  const registry = new FixedAgentRegistry(systemDefinition());
+  const observation = new InMemoryObservationLedger();
+
+  const gateway = new LlmGateway(registry, {
+    fetch: async () =>
+      Response.json({
+        result: {
+          answer:
+            "<thinking>Let me analyze the situation carefully.</thinking>" +
+            "工程部门结论：跃迁前置条件不满足。",
+          stop: "complete",
+          actions: [],
+        },
+        metering: { input: 1, output: 1, total: 2 },
+      }),
+    resolveSecret: () => "secret",
+    sleep: async () => {},
+    observation,
+    createCallId: () => "reasoning-call",
+  });
+
+  const result = await gateway.invoke({ agentId: "captain", messages: [] });
+
+  assert.equal(result.text, "工程部门结论：跃迁前置条件不满足。");
+  assert.doesNotMatch(result.text, /thinking/i);
+  assert.match(result.reasoning, /Let me analyze the situation carefully/);
+
+  // 观察账本同样只记录对外正文，避免 AI 观察页把英文思维链当成正文摘要。
+  const [record] = observation.recent();
+  assert.doesNotMatch(record.responseSummary, /thinking/i);
+});

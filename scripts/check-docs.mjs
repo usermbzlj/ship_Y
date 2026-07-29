@@ -86,13 +86,12 @@ for (const [path, pattern, label] of versionChecks) {
 }
 
 // Current-state docs must not claim an older Worker runtime as "current".
-// Historical handoff (2026-07-24) may still describe the v16→v17 upgrade.
+// Archived handoffs under docs/archive/handoff/ may still describe older runtime versions.
 if (runtimeVersion) {
   const currentStateDocs = [
     resolve(root, "docs/PROJECT_STATUS.md"),
     resolve(root, "docs/PRODUCT_SPEC.md"),
     resolve(root, "docs/ENGINE_ARCHITECTURE.md"),
-    resolve(root, "docs/HANDOFF_2026-07-26.md"),
     resolve(root, "README.md"),
   ];
   for (const docPath of currentStateDocs) {

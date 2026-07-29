@@ -21,7 +21,7 @@ import {
   type ZoneRole,
 } from "@/lib/sim/compartments";
 import { StatusPill } from "../components/status-pill";
-import { HullSection } from "../components/hull-section";
+import { HullSection, HullZonePicker } from "../components/hull-section";
 
 type ZoneTelemetry = CompartmentZoneTelemetry;
 
@@ -118,46 +118,19 @@ function spurConditionLabel(
   }
 }
 
-function spurStatusLine(
-  spur:
-    | {
-        ring: "a" | "b";
-        condition: "nominal" | "degraded" | "stuck-closed";
-        lastDeliveryShortfallKg: number;
-      }
-    | undefined,
-  ring: "a" | "b",
-): string {
-  const ringLabel = ring === "a" ? "A" : "B";
-  if (!spur) {
-    return `水支路 ${ringLabel} · —`;
-  }
-  const shortfall =
-    spur.lastDeliveryShortfallKg > 0
-      ? ` · 短欠 ${spur.lastDeliveryShortfallKg.toFixed(1)} kg`
-      : "";
-  return `水支路 ${ringLabel} · ${spurConditionLabel(spur.condition)}${shortfall}`;
-}
-
-function coolingSpurStatusLine(
-  spur:
-    | {
-        ring: "a" | "b";
-        condition: "nominal" | "degraded" | "stuck-closed";
-        lastDeliveryShortfallJ: number;
-      }
-    | undefined,
-  ring: "a" | "b",
-): string {
-  const ringLabel = ring === "a" ? "A" : "B";
-  if (!spur) {
-    return `热支路 ${ringLabel} · —`;
-  }
-  const shortfall =
-    spur.lastDeliveryShortfallJ > 0
-      ? ` · 短欠 ${(spur.lastDeliveryShortfallJ / 1_000).toFixed(1)} kJ`
-      : "";
-  return `热支路 ${ringLabel} · ${spurConditionLabel(spur.condition)}${shortfall}`;
+/**
+ * 右列系统概览的一行。
+ *
+ * `detail` 是可选的次级说明行，承载转速 / 轴承、送风分环流量、累计未送达等
+ * 单靠一个读数说不清的量；`highlight` 供告警定位时闪烁对应的居住环。
+ */
+interface SystemRow {
+  name: string;
+  value: string;
+  /** 0–100 的表征占比，仅用于条形长度，不是权威量纲。 */
+  load: number;
+  detail?: string;
+  highlight?: boolean;
 }
 
 function offlineZones(): ZoneTelemetry[] {
@@ -332,249 +305,221 @@ export function ShipView({
       .slice(0, 8);
   }, [zones]);
 
-  const networks: Array<[string, string, number]> = state
+  const networks: SystemRow[] = state
     ? [
-        [
-          "聚变发电",
-          electrical?.observed.totalReactorOutputKw != null
-            ? `${(electrical.observed.totalReactorOutputKw / 1_000).toFixed(0)} MW`
-            : "建立中",
-          electrical?.observed.totalReactorOutputKw != null
-            ? Math.min(
-                100,
-                (electrical.observed.totalReactorOutputKw / 1_350_000) * 100,
-              )
-            : 0,
-        ],
-        [
-          "A 母线供给",
-          busAServedPowerKw != null
-            ? `${(busAServedPowerKw / 1_000).toFixed(0)} MW`
-            : "建立中",
-          busAServedPowerKw != null
-            ? Math.min(100, (busAServedPowerKw / 675_000) * 100)
-            : 0,
-        ],
-        [
-          "B 母线供给",
-          busBServedPowerKw != null
-            ? `${(busBServedPowerKw / 1_000).toFixed(0)} MW`
-            : "建立中",
-          busBServedPowerKw != null
-            ? Math.min(100, (busBServedPowerKw / 675_000) * 100)
-            : 0,
-        ],
-        [
-          "冷却散热",
-          cooling?.observed.totalRadiatedPowerW != null
-            ? `${(cooling.observed.totalRadiatedPowerW / 1_000_000).toFixed(1)} MW`
-            : "建立中",
-          cooling?.observed.totalRadiatedPowerW != null
-            ? Math.min(
-                100,
-                (cooling.observed.totalRadiatedPowerW / 800_000_000) * 100,
-              )
-            : 0,
-        ],
-        [
-          "冷却母线",
-          cooling?.observed.averageCoolantTemperatureK != null
-            ? `${cooling.observed.averageCoolantTemperatureK.toFixed(1)} K`
-            : "建立中",
-          cooling?.observed.averageCoolantTemperatureK != null
-            ? Math.min(
-                100,
-                ((cooling.observed.averageCoolantTemperatureK - 280) / 120) *
+        {
+          name: "聚变发电",
+          value:
+            electrical?.observed.totalReactorOutputKw != null
+              ? `${(electrical.observed.totalReactorOutputKw / 1_000).toFixed(0)} MW`
+              : "建立中",
+          load:
+            electrical?.observed.totalReactorOutputKw != null
+              ? Math.min(
                   100,
-              )
-            : 0,
-        ],
-        [
-          "水回收 A",
-          waterRecovery?.observed?.potableKgByRing?.a != null
-            ? `${(waterRecovery.observed.potableKgByRing.a / 1_000).toFixed(0)} t`
-            : "建立中",
-          waterRecovery?.observed?.potableKgByRing?.a != null
-            ? Math.min(
-                100,
-                (waterRecovery.observed.potableKgByRing.a / 2_000_000) * 100,
-              )
-            : 0,
-        ],
-        [
-          "水回收 B",
-          waterRecovery?.observed?.potableKgByRing?.b != null
-            ? `${(waterRecovery.observed.potableKgByRing.b / 1_000).toFixed(0)} t`
-            : "建立中",
-          waterRecovery?.observed?.potableKgByRing?.b != null
-            ? Math.min(
-                100,
-                (waterRecovery.observed.potableKgByRing.b / 2_000_000) * 100,
-              )
-            : 0,
-        ],
-        [
-          "水支路 A",
-          spurA
-            ? `${spurConditionLabel(spurA.condition)}${
-                spurA.lastDeliveryShortfallKg > 0
-                  ? ` · 短欠 ${spurA.lastDeliveryShortfallKg.toFixed(1)} kg`
-                  : ""
-              }`
-            : "建立中",
-          spurA
-            ? Math.min(100, spurA.effectiveDeliveryFraction * 100)
-            : 0,
-        ],
-        [
-          "水支路 B",
-          spurB
-            ? `${spurConditionLabel(spurB.condition)}${
-                spurB.lastDeliveryShortfallKg > 0
-                  ? ` · 短欠 ${spurB.lastDeliveryShortfallKg.toFixed(1)} kg`
-                  : ""
-              }`
-            : "建立中",
-          spurB
-            ? Math.min(100, spurB.effectiveDeliveryFraction * 100)
-            : 0,
-        ],
-        [
-          "热支路 A",
-          coolingSpurA
+                  (electrical.observed.totalReactorOutputKw / 1_350_000) * 100,
+                )
+              : 0,
+        },
+        {
+          name: "A 母线供给",
+          value:
+            busAServedPowerKw != null
+              ? `${(busAServedPowerKw / 1_000).toFixed(0)} MW`
+              : "建立中",
+          load:
+            busAServedPowerKw != null
+              ? Math.min(100, (busAServedPowerKw / 675_000) * 100)
+              : 0,
+        },
+        {
+          name: "B 母线供给",
+          value:
+            busBServedPowerKw != null
+              ? `${(busBServedPowerKw / 1_000).toFixed(0)} MW`
+              : "建立中",
+          load:
+            busBServedPowerKw != null
+              ? Math.min(100, (busBServedPowerKw / 675_000) * 100)
+              : 0,
+        },
+        {
+          name: "冷却散热",
+          value:
+            cooling?.observed.totalRadiatedPowerW != null
+              ? `${(cooling.observed.totalRadiatedPowerW / 1_000_000).toFixed(1)} MW`
+              : "建立中",
+          load:
+            cooling?.observed.totalRadiatedPowerW != null
+              ? Math.min(
+                  100,
+                  (cooling.observed.totalRadiatedPowerW / 800_000_000) * 100,
+                )
+              : 0,
+          detail:
+            undeliveredHabitatCoolingJ > 0
+              ? `居住热累计未送达 ${(undeliveredHabitatCoolingJ / 1_000_000).toFixed(1)} MJ`
+              : undefined,
+        },
+        {
+          name: "冷却母线",
+          value:
+            cooling?.observed.averageCoolantTemperatureK != null
+              ? `${cooling.observed.averageCoolantTemperatureK.toFixed(1)} K`
+              : "建立中",
+          load:
+            cooling?.observed.averageCoolantTemperatureK != null
+              ? Math.min(
+                  100,
+                  ((cooling.observed.averageCoolantTemperatureK - 280) / 120) *
+                    100,
+                )
+              : 0,
+        },
+        {
+          name: "热支路 A",
+          value: coolingSpurA
             ? `${spurConditionLabel(coolingSpurA.condition)}${
                 coolingSpurA.lastDeliveryShortfallJ > 0
                   ? ` · 短欠 ${(coolingSpurA.lastDeliveryShortfallJ / 1_000).toFixed(1)} kJ`
                   : ""
               }`
             : "建立中",
-          coolingSpurA
+          load: coolingSpurA
             ? Math.min(100, coolingSpurA.effectiveDeliveryFraction * 100)
             : 0,
-        ],
-        [
-          "热支路 B",
-          coolingSpurB
+        },
+        {
+          name: "热支路 B",
+          value: coolingSpurB
             ? `${spurConditionLabel(coolingSpurB.condition)}${
                 coolingSpurB.lastDeliveryShortfallJ > 0
                   ? ` · 短欠 ${(coolingSpurB.lastDeliveryShortfallJ / 1_000).toFixed(1)} kJ`
                   : ""
               }`
             : "建立中",
-          coolingSpurB
+          load: coolingSpurB
             ? Math.min(100, coolingSpurB.effectiveDeliveryFraction * 100)
             : 0,
-        ],
-        [
-          "居住环 A",
-          ringA?.artificialGravityG != null
-            ? `${ringA.artificialGravityG.toFixed(3)} g`
+        },
+        {
+          name: "水回收 A",
+          value:
+            waterRecovery?.observed?.potableKgByRing?.a != null
+              ? `${(waterRecovery.observed.potableKgByRing.a / 1_000).toFixed(0)} t`
+              : "建立中",
+          load:
+            waterRecovery?.observed?.potableKgByRing?.a != null
+              ? Math.min(
+                  100,
+                  (waterRecovery.observed.potableKgByRing.a / 2_000_000) * 100,
+                )
+              : 0,
+          detail:
+            undeliveredPotableKg > 0
+              ? `全舰饮用水累计未送达 ${undeliveredPotableKg.toFixed(0)} kg`
+              : undefined,
+        },
+        {
+          name: "水回收 B",
+          value:
+            waterRecovery?.observed?.potableKgByRing?.b != null
+              ? `${(waterRecovery.observed.potableKgByRing.b / 1_000).toFixed(0)} t`
+              : "建立中",
+          load:
+            waterRecovery?.observed?.potableKgByRing?.b != null
+              ? Math.min(
+                  100,
+                  (waterRecovery.observed.potableKgByRing.b / 2_000_000) * 100,
+                )
+              : 0,
+        },
+        {
+          name: "水支路 A",
+          value: spurA
+            ? `${spurConditionLabel(spurA.condition)}${
+                spurA.lastDeliveryShortfallKg > 0
+                  ? ` · 短欠 ${spurA.lastDeliveryShortfallKg.toFixed(1)} kg`
+                  : ""
+              }`
             : "建立中",
-          ringA?.artificialGravityG != null
-            ? Math.min(100, Math.max(0, ringA.artificialGravityG * 100))
-            : 0,
-        ],
-        [
-          "居住环 B",
-          ringB?.artificialGravityG != null
-            ? `${ringB.artificialGravityG.toFixed(3)} g`
+          load: spurA ? Math.min(100, spurA.effectiveDeliveryFraction * 100) : 0,
+        },
+        {
+          name: "水支路 B",
+          value: spurB
+            ? `${spurConditionLabel(spurB.condition)}${
+                spurB.lastDeliveryShortfallKg > 0
+                  ? ` · 短欠 ${spurB.lastDeliveryShortfallKg.toFixed(1)} kg`
+                  : ""
+              }`
             : "建立中",
-          ringB?.artificialGravityG != null
-            ? Math.min(100, Math.max(0, ringB.artificialGravityG * 100))
-            : 0,
-        ],
+          load: spurB ? Math.min(100, spurB.effectiveDeliveryFraction * 100) : 0,
+        },
+        {
+          name: "空气处理",
+          value: airHandlerSummary,
+          load:
+            airHandlers.length > 0
+              ? Math.min(
+                  100,
+                  (airHandlers.reduce(
+                    (total, handler) => total + handler.commandedFlowFraction,
+                    0,
+                  ) /
+                    airHandlers.length) *
+                    100,
+                )
+              : 0,
+          detail:
+            airHandlerA || airHandlerB
+              ? `A 流 ${((airHandlerA?.commandedFlowFraction ?? 0) * 100).toFixed(0)}% · B 流 ${((airHandlerB?.commandedFlowFraction ?? 0) * 100).toFixed(0)}%`
+              : compartments
+                ? `舱压均 ${formatPa(compartments.observedPressureAveragePa)}`
+                : "等待舱室总线",
+        },
+        {
+          name: "居住环 A",
+          value:
+            ringA?.artificialGravityG != null
+              ? `${ringA.artificialGravityG.toFixed(3)} g`
+              : "建立中",
+          load:
+            ringA?.artificialGravityG != null
+              ? Math.min(100, Math.max(0, ringA.artificialGravityG * 100))
+              : 0,
+          detail:
+            ringA?.relativeRpm != null
+              ? `${ringA.relativeRpm >= 0 ? "+" : ""}${ringA.relativeRpm.toFixed(3)} rpm · ${bearingHint(ringA.vibrationMmPerS)}`
+              : bearingHint(ringA?.vibrationMmPerS),
+          highlight: highlightedRingId === "A" && focusPulse,
+        },
+        {
+          name: "居住环 B",
+          value:
+            ringB?.artificialGravityG != null
+              ? `${ringB.artificialGravityG.toFixed(3)} g`
+              : "建立中",
+          load:
+            ringB?.artificialGravityG != null
+              ? Math.min(100, Math.max(0, ringB.artificialGravityG * 100))
+              : 0,
+          detail:
+            ringB?.relativeRpm != null
+              ? `${ringB.relativeRpm >= 0 ? "+" : ""}${ringB.relativeRpm.toFixed(3)} rpm · ${bearingHint(ringB.vibrationMmPerS)}`
+              : bearingHint(ringB?.vibrationMmPerS),
+          highlight: highlightedRingId === "B" && focusPulse,
+        },
       ]
     : [];
 
-  const topologyNodes = [
-    {
-      key: "ring-a",
-      className: `topology-node topology-node-1 topology-node-live${
-        highlightedRingId === "A" && focusPulse ? " topology-node-focus" : ""
-      }`,
-      title: "居住环 A",
-      value:
-        ringA?.artificialGravityG != null
-          ? `${ringA.artificialGravityG.toFixed(3)} g`
-          : "—",
-      detail:
-        ringA?.relativeRpm != null
-          ? `${ringA.relativeRpm >= 0 ? "+" : ""}${ringA.relativeRpm.toFixed(3)} rpm · ${bearingHint(ringA.vibrationMmPerS)}`
-          : bearingHint(ringA?.vibrationMmPerS),
-    },
-    {
-      key: "ring-b",
-      className: `topology-node topology-node-2 topology-node-live${
-        highlightedRingId === "B" && focusPulse ? " topology-node-focus" : ""
-      }`,
-      title: "居住环 B",
-      value:
-        ringB?.artificialGravityG != null
-          ? `${ringB.artificialGravityG.toFixed(3)} g`
-          : "—",
-      detail:
-        ringB?.relativeRpm != null
-          ? `${ringB.relativeRpm >= 0 ? "+" : ""}${ringB.relativeRpm.toFixed(3)} rpm · ${bearingHint(ringB.vibrationMmPerS)}`
-          : bearingHint(ringB?.vibrationMmPerS),
-    },
-    {
-      key: "air",
-      className: "topology-node topology-node-3 topology-node-live",
-      title: "空气处理",
-      value: airHandlerSummary,
-      detail:
-        airHandlerA || airHandlerB
-          ? `A 流 ${(
-              (airHandlerA?.commandedFlowFraction ?? 0) * 100
-            ).toFixed(0)}% · B 流 ${(
-              (airHandlerB?.commandedFlowFraction ?? 0) * 100
-            ).toFixed(0)}%`
-          : compartments
-            ? `舱压均 ${formatPa(compartments.observedPressureAveragePa)}`
-            : "等待舱室总线",
-    },
-    {
-      key: "water",
-      className: "topology-node topology-node-4 topology-node-live",
-      title: "水回收 A/B",
-      value:
-        waterRecovery?.observed?.potableKgByRing?.a != null &&
-        waterRecovery?.observed?.potableKgByRing?.b != null
-          ? `${(waterRecovery.observed.potableKgByRing.a / 1_000).toFixed(0)} / ${(waterRecovery.observed.potableKgByRing.b / 1_000).toFixed(0)} t`
-          : "—",
-      detail: waterRecovery
-        ? `${spurStatusLine(spurA, "a")} · ${spurStatusLine(spurB, "b")}${
-            undeliveredPotableKg > 0
-              ? ` · 累计未送达 ${undeliveredPotableKg.toFixed(0)} kg`
-              : ""
-          }`
-        : "可饮水观测库存",
-    },
-    {
-      key: "cooling",
-      className: "topology-node topology-node-5 topology-node-live",
-      title: "冷却 / 热送达",
-      value:
-        cooling?.observed.totalRadiatedPowerW != null
-          ? `${(cooling.observed.totalRadiatedPowerW / 1_000_000).toFixed(1)} MW`
-          : "—",
-      detail: cooling
-        ? `${coolingSpurStatusLine(coolingSpurA, "a")} · ${coolingSpurStatusLine(coolingSpurB, "b")}${
-            undeliveredHabitatCoolingJ > 0
-              ? ` · 累计未送达 ${(undeliveredHabitatCoolingJ / 1_000_000).toFixed(1)} MJ`
-              : ""
-          }`
-        : "居住热送达支路",
-    },
-  ];
-
   return (
     <section className="view-grid detail-view" aria-label="舰体系统">
-      <div className="panel topology-panel">
+      <div className="panel hull-panel">
         <div className="panel-heading">
           <div>
-            <span className="eyebrow">HULL THREAT</span>
-            <h2>舰体破口与压力区</h2>
+            <span className="eyebrow">HULL SECTION</span>
+            <h2>舰体剖视与破口</h2>
           </div>
           <StatusPill
             tone={
@@ -596,24 +541,13 @@ export function ShipView({
                     : "48 区正常"}
           </StatusPill>
         </div>
-        <div className="topology-grid">
-          <div className="topology-core">
-            <span>聚变发电</span>
-            <strong>
-              {electrical?.observed.totalReactorOutputKw != null
-                ? `${(electrical.observed.totalReactorOutputKw / 1_000).toFixed(0)} MW`
-                : "—"}
-            </strong>
-          </div>
-          {topologyNodes.map((node) => (
-            <div className={node.className} key={node.key}>
-              <span>{node.title}</span>
-              <strong>{node.value}</strong>
-              <small>{node.detail}</small>
-            </div>
-          ))}
-        </div>
-        <p className="panel-note topology-note">
+        <HullSection
+          zones={zones}
+          selectedZoneId={selectedZoneId}
+          onSelectZone={setSelectedZoneId}
+          focusPulse={focusPulse}
+        />
+        <p className="panel-note">
           工程脊柱与休眠舱群不在本 48 区大气网内；休眠为环级供电负载。
         </p>
       </div>
@@ -625,13 +559,17 @@ export function ShipView({
           </div>
         </div>
         <div className="network-list">
-          {networks.map(([name, value, load]) => (
-            <div className="network-row" key={name}>
-              <span>{name}</span>
+          {networks.map((row) => (
+            <div
+              className={`network-row${row.highlight ? " network-row-focus" : ""}`}
+              key={row.name}
+            >
+              <span>{row.name}</span>
               <div className="meter">
-                <i style={{ width: `${load}%` }} />
+                <i style={{ width: `${row.load}%` }} />
               </div>
-              <strong>{value}</strong>
+              <strong>{row.value}</strong>
+              {row.detail && <small>{row.detail}</small>}
             </div>
           ))}
         </div>
@@ -650,33 +588,47 @@ export function ShipView({
             <h2>48 个环段压力区（按功能区带命名）</h2>
           </div>
         </div>
-        {roleLegend.length > 0 && (
-          <div className="sector-role-legend" aria-label="区带角色图例">
-            {roleLegend.map(([role, count]) => (
-              <span key={role}>
-                {role}
-                <i>{count}</i>
-              </span>
-            ))}
-          </div>
-        )}
-        <HullSection
-          zones={zones}
-          selectedZoneId={selectedZoneId}
-          onSelectZone={setSelectedZoneId}
-          focusPulse={focusPulse}
-        />
+        <div className="sector-body">
+          {roleLegend.length > 0 && (
+            <div className="sector-role-legend" aria-label="区带角色图例">
+              {roleLegend.map(([role, count]) => (
+                <span key={role}>
+                  {role}
+                  <i>{count}</i>
+                </span>
+              ))}
+            </div>
+          )}
+          <HullZonePicker
+            zones={zones}
+            selectedZoneId={selectedZoneId}
+            onSelectZone={setSelectedZoneId}
+          />
+        </div>
+        <p className="panel-note">
+          {compartments
+            ? compartments.fidelityLimited
+              ? `局部瞬态求解已接管：时间倍率由 ${compartments.requestedTimeScale.toLocaleString("zh-CN")}× 自动限至 ${compartments.effectiveTimeScale.toLocaleString("zh-CN")}×；外逸气体 ${compartments.totalVentedGasKg.toFixed(2)} kg。`
+              : `传感压力 ${
+                  compartments.observedPressureMinPa === null
+                    ? "等待首批延迟读数"
+                    : `${(compartments.observedPressureMinPa / 1_000).toFixed(2)}–${((compartments.observedPressureMaxPa ?? 0) / 1_000).toFixed(2)} kPa`
+                }；当前采用 ${compartments.fidelityMode === "equilibrium-fast" ? "平衡态快速求解" : "瞬态细分求解"}。`
+            : "正在连接 48 区压力遥测总线。"}
+        </p>
+      </div>
+      <div
+        className={`panel inspector-panel${focusPulse ? " zone-inspector-focus" : ""}`}
+      >
         {selectedZone && (
-          <aside
-            className={`zone-inspector${focusPulse ? " zone-inspector-focus" : ""}`}
-            aria-live="polite"
-          >            <div className="zone-inspector-head">
+          <>
+            <div className="panel-heading compact">
               <div>
                 <span className="eyebrow">ZONE INSPECTOR</span>
-                <h3>
+                <h2>
                   {zoneLabel(selectedZone)}
                   <small>{selectedZone.zoneId}</small>
-                </h3>
+                </h2>
               </div>
               <StatusPill
                 tone={
@@ -692,6 +644,7 @@ export function ShipView({
                   : conditionLabel(selectedZone.condition)}
               </StatusPill>
             </div>
+            <div className="zone-inspector" aria-live="polite">
             <dl className="zone-inspector-meta">
               <div>
                 <dt>环</dt>
@@ -740,19 +693,9 @@ export function ShipView({
             <p className="zone-inspector-causal">
               {causalSentence(selectedZone)}
             </p>
-          </aside>
+            </div>
+          </>
         )}
-        <p className="panel-note">
-          {compartments
-            ? compartments.fidelityLimited
-              ? `局部瞬态求解已接管：时间倍率由 ${compartments.requestedTimeScale.toLocaleString("zh-CN")}× 自动限至 ${compartments.effectiveTimeScale.toLocaleString("zh-CN")}×；外逸气体 ${compartments.totalVentedGasKg.toFixed(2)} kg。`
-              : `传感压力 ${
-                  compartments.observedPressureMinPa === null
-                    ? "等待首批延迟读数"
-                    : `${(compartments.observedPressureMinPa / 1_000).toFixed(2)}–${((compartments.observedPressureMaxPa ?? 0) / 1_000).toFixed(2)} kPa`
-                }；当前采用 ${compartments.fidelityMode === "equilibrium-fast" ? "平衡态快速求解" : "瞬态细分求解"}。`
-            : "正在连接 48 区压力遥测总线。"}
-        </p>
       </div>
     </section>
   );

@@ -64,9 +64,11 @@ function formatRelativeAgo(
 function RumorBoard({
   passengerSociety,
   simulationSeconds,
+  missionStarted,
 }: {
   passengerSociety: PassengerSocietySnapshot;
   simulationSeconds: number;
+  missionStarted: boolean;
 }) {
   const rumors = passengerSociety.rumors
     .slice()
@@ -88,7 +90,11 @@ function RumorBoard({
       {rumors.length === 0 ? (
         <div className="rumor-empty panel-note">
           <p>尚无流传中的乘客传言。</p>
-          <p>等待签发 · 关键乘客分享见闻后，未经证实的传言将显示在此。</p>
+          <p>
+            {missionStarted
+              ? "关键乘客向同区带同伴分享见闻后，未经证实的传言会出现在这里，并在 72 小时内衰减。"
+              : "等待签发 · 关键乘客分享见闻后，未经证实的传言将显示在此。"}
+          </p>
         </div>
       ) : (
         <div className="rumor-list">
@@ -221,6 +227,7 @@ export function PeopleView({
           <RumorBoard
             passengerSociety={passengerSociety}
             simulationSeconds={simulationSeconds}
+            missionStarted={false}
           />
           <div className="passenger-list">
             <div className="passenger-empty-note panel-note">
@@ -308,6 +315,7 @@ export function PeopleView({
         <RumorBoard
           passengerSociety={passengerSociety}
           simulationSeconds={simulationSeconds}
+          missionStarted
         />
         <div className="passenger-list">
           {displayedPassengers.length === 0 ? (

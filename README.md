@@ -25,8 +25,8 @@
 ## 现在可以做什么
 
 - 在授权台选起点、终点，签发最高指令；航路按星表欧氏距离估算最少跃迁段数。
-- 从前向主视窗、任务相位、跃迁进度与舰桥日志掌握航程（装饰 HUD 已标明）。
 - 在舰务查看区带用途、破口、水/热支路状态；未联机不显示虚构 MW/g。
+- 从前向主视窗、任务相位、跃迁进度与舰桥日志掌握航程。
 - 观察电力、热、大气、水、导航、旋转环、休眠与生存资源共同演化；制氧只入舰载储备，舱区补给须另下命令。
 - 舰长在决策截止点取得授权观测包（传感 / 指令态 / 舰务账本分栏标注，含壳体联锁）；失败不推进日程。
 - 读舰长自己写的航行志：它每个周期记下判断、在等什么、担心什么，下个周期它自己会看见——包括看见自己上次判断错了。
@@ -62,8 +62,7 @@ API Key: <你的密钥>
 npm run dev:deepseek
 ```
 
-可选：`node scripts/start-deepseek.mjs --port=3000 --model=deepseek-v4-pro --thinking=disabled`  
-PowerShell 备选：`npm run dev:deepseek:ps1`
+可选：`node scripts/start-deepseek.mjs --port=3000 --model=deepseek-v4-pro --thinking=disabled`
 
 ### 生产构建
 
@@ -115,7 +114,7 @@ flowchart LR
 | IndexedDB 手动单槽 + LS 迁移 | 自动/轮换存档、checksum 全链 |
 | 破口事故剧本、长航程守恒烟雾测试 | 系统化视觉回归、付费云模型烟雾 |
 
-版本矩阵、验证结果与细节以[当前实现状态](docs/PROJECT_STATUS.md)为准；本轮鲁棒性与文档对齐见[2026-07-26 接手记录](docs/HANDOFF_2026-07-26.md)。目标需求见[产品规格](docs/PRODUCT_SPEC.md)，技术路线见[引擎架构](docs/ENGINE_ARCHITECTURE.md)。
+版本矩阵、验证结果与细节以[当前实现状态](docs/PROJECT_STATUS.md)为准。目标需求见[产品规格](docs/PRODUCT_SPEC.md)，技术路线见[引擎架构](docs/ENGINE_ARCHITECTURE.md)。
 
 ## 项目结构
 
@@ -127,7 +126,7 @@ lib/astro/    日心星表与航距
 lib/persist/  IndexedDB 手动存档
 scripts/      启动、环境与文档检查
 tests/        仿真、LLM、存档与页面测试
-docs/         规格、架构、状态与接手记录
+docs/         规格、架构与当前状态（历史备忘在 docs/archive/）
 ```
 
 `dist/`、`.vinext/`、`node_modules/` 等为可再生本地产物。`.env.local`、`config/llm.local.json`、`deepseek-credentials.txt` 为私有文件，勿提交。
@@ -161,8 +160,8 @@ npm run check        # 文档 + 类型 + Lint + 构建 + 测试
 | [引擎架构](docs/ENGINE_ARCHITECTURE.md) | Worker、物理域、LLM、存档 |
 | [舰长操作手册](docs/CAPTAIN_HANDBOOK.md) | 舰长观测识字、航程/生保/咨询政策与反模式 |
 | [当前实现状态](docs/PROJECT_STATUS.md) | 能力、格式版本、未完成项 |
-| [接手 07-26](docs/HANDOFF_2026-07-26.md) | 鲁棒性修补、版本事实与下一刀 |
 | [本地开发手册](docs/LOCAL_DEVELOPMENT.md) | 配置、密钥与门禁 |
+| [历史接手归档](docs/archive/handoff/README.md) | 阶段性关机备忘（非当前态） |
 
 ## 开发原则
 

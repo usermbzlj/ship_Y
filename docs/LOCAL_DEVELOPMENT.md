@@ -20,7 +20,7 @@ npm run dev
 npm run dev:deepseek
 ```
 
-Windows PowerShell 备选入口为 `npm run dev:deepseek:ps1`。
+Windows 上也走同一 Node 入口；不再维护单独的 PowerShell 启动脚本。
 
 ## 配置与密钥
 

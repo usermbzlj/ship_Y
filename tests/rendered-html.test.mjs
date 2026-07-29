@@ -46,6 +46,28 @@ test("server-renders the Far Horizon mission shell", async () => {
   assert.doesNotMatch(html, /当前清醒/);
 });
 
+test("idle-list empty states distinguish pre-launch from launched-but-idle", async () => {
+  const [aiView, peopleView, missionControl] = await Promise.all([
+    readFile(new URL("../app/ui/views/ai-view.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/ui/views/people-view.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/mission-control.tsx", import.meta.url), "utf8"),
+  ]);
+
+  // 「等待签发」只在任务尚未签发时成立。AI 观察页的航行志 / 部门异议 / 观察哨三处空态
+  // 原先无条件渲染这句：任务跑起来、舰长已经在写航行志时，界面仍宣称在等签发，
+  // 而「部门异议」更会一边列出各部门立场统计一边说等签发，自相矛盾。
+  assert.match(aiView, /missionStarted: boolean/);
+  assert.match(missionControl, /missionStarted=\{missionStarted\}/);
+  assert.equal((aiView.match(/\{missionStarted \? \(/g) ?? []).length, 3);
+  // 三处「等待签发」必须与三处任务状态分支一一对应，不能有落在分支外的。
+  assert.equal((aiView.match(/等待签发/g) ?? []).length, 3);
+
+  // 乘员页传言板同理；它的两个调用点分别落在离线分支与在线分支。
+  assert.match(peopleView, /missionStarted: boolean/);
+  assert.match(peopleView, /missionStarted=\{false\}/);
+  assert.match(peopleView, /未经证实的传言会出现在这里/);
+});
+
 test("production source contains a real worker-backed simulator, not starter UI", async () => {
   const [
     page,

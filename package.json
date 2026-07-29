@@ -8,7 +8,6 @@
   "scripts": {
     "dev": "vinext dev",
     "dev:deepseek": "node scripts/start-deepseek.mjs",
-    "dev:deepseek:ps1": "pwsh -NoProfile -File scripts/start-deepseek.ps1",
     "check:env": "node scripts/check-env.mjs",
     "check:docs": "node scripts/check-docs.mjs",
     "build": "vinext build",
