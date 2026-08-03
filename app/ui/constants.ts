@@ -242,8 +242,10 @@ export const SHIP_DESIGN_RING_RADIUS_M = 224;
 // ─── 其他常量 ─────────────────────────────────────────────────
 
 export const MAX_CAPTAIN_WORLD_COMMANDS_PER_CYCLE = 8;
-export const AUTHORIZED_CONTROLLER_RECORD_DELAY_SECONDS = 60;
-export const AUTHORIZED_MANIFEST_RECORD_DELAY_SECONDS = 300;
+export {
+  AUTHORIZED_CONTROLLER_RECORD_DELAY_SECONDS,
+  AUTHORIZED_MANIFEST_RECORD_DELAY_SECONDS,
+} from "@/lib/sim/captain-authorized-observation";
 export const AUTHORIZED_RECORD_HISTORY_LIMIT = 1_024;
 
 // ─── Re-export device IDs for tool definitions ────────────────

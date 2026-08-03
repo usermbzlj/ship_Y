@@ -8,9 +8,11 @@
  *   approximation, capped per fixed substep for numerical stability;
  * - symmetric exchange represents unresolved turbulence/diffusion through an
  *   open connection;
- * - gas sensible energy uses one constant heat capacity. Wall heat capacity,
- *   humidity condensation and compressible choking belong to the later thermal
- *   and fluid-network models.
+ * - gas sensible energy uses one constant heat capacity. Wall heat capacity
+ *   and compressible choking belong to the later thermal and fluid-network
+ *   models. Recoverable humidity condensation is a reduced-order AHU process
+ *   (`condenseRecoverableWaterVapor`); liquid mass leaves this domain for the
+ *   water-recovery network via the worker coupling step.
  *
  * Despite those simplifications, every internal parcel is removed from one
  * zone and added to another species-by-species. Breach discharge enters an
@@ -292,6 +294,14 @@ const WATER_VAPOR_PRODUCTION_KG_PER_PERSON_SECOND = 1.2e-5;
 const SENSIBLE_HEAT_W_PER_PERSON = 80;
 const AIR_HANDLER_RATED_CARBON_DIOXIDE_CAPTURE_KG_PER_SECOND = 0.09;
 const AIR_HANDLER_CARBON_DIOXIDE_SETPOINT_PA = 80;
+/** Comfort-band dehumidifier setpoint (fraction of saturation vapor pressure). */
+const AIR_HANDLER_CONDENSATE_RELATIVE_HUMIDITY_SETPOINT = 0.55;
+/**
+ * Per-AHU condensate collection capacity at full actualFlowFraction.
+ * Sized above dual-ring metabolic vapor (~2.6e-3 kg/s ship-wide) so steady
+ * AHU service can hold humidity near the setpoint.
+ */
+const AIR_HANDLER_RATED_CONDENSATE_COLLECTION_KG_PER_SECOND = 0.01;
 const DEGRADED_AIR_HANDLER_FLOW_MULTIPLIER = 0.5;
 
 const SENSOR_QUANTITIES: readonly SensorQuantity[] = [
@@ -969,6 +979,26 @@ function actualAirHandlerFlowFraction(
     handler.commandedFlowFraction *
     handler.electricalServiceFraction *
     airHandlerConditionMultiplier(handler.condition)
+  );
+}
+
+/** Magnus / Tetens saturation vapor pressure over liquid water (Pa, SI). */
+function saturationVaporPressurePa(temperatureK: number): number {
+  const celsius = temperatureK - 273.15;
+  return (
+    610.94 *
+    Math.exp((17.625 * celsius) / (celsius + 243.04))
+  );
+}
+
+function waterVaporMassAtPartialPressureKg(
+  partialPressurePa: number,
+  volumeCubicMeters: number,
+  temperatureK: number,
+): number {
+  return (
+    (Math.max(0, partialPressurePa) * volumeCubicMeters) /
+    (GAS_CONSTANT_J_PER_KG_K.waterVapor * temperatureK)
   );
 }
 
@@ -1989,6 +2019,75 @@ export class CompartmentAtmosphereNetwork {
     if (removedMassKg === 0) return 0;
     this.setTotalGasMass(gas, currentMassKg - removedMassKg);
     return removedMassKg;
+  }
+
+  /**
+   * Reduced-order AHU dehumidifier: remove water vapor above the comfort RH
+   * setpoint from each handler's served ring, scaled by `actualFlowFraction`
+   * (AHU-off / zero airflow → no active condensation). Liquid mass leaves this
+   * domain; the worker must credit `WaterRecoveryNetwork.collectCondensate`.
+   */
+  condenseRecoverableWaterVapor(deltaSeconds: number): {
+    a: number;
+    b: number;
+  } {
+    assertNonNegative(deltaSeconds, "deltaSeconds");
+    const condensedByRing = { a: 0, b: 0 };
+    if (deltaSeconds <= 0) return condensedByRing;
+
+    let anyRemoved = false;
+    for (const handler of this.stateValue.airHandlers) {
+      if (handler.actualFlowFraction <= 0) continue;
+      const servedZones = handler.servedZoneIds.map((zoneId) =>
+        findById(this.stateValue.zones, zoneId, "zone"),
+      );
+      const removableByZone = servedZones.map((zone) => {
+        const setpointPartialPressurePa =
+          AIR_HANDLER_CONDENSATE_RELATIVE_HUMIDITY_SETPOINT *
+          saturationVaporPressurePa(zone.temperatureK);
+        const massAtSetpointKg = waterVaporMassAtPartialPressureKg(
+          setpointPartialPressurePa,
+          zone.volumeCubicMeters,
+          zone.temperatureK,
+        );
+        return Math.max(0, zone.gasesKg.waterVapor - massAtSetpointKg);
+      });
+      const availableVaporKg = removableByZone.reduce(
+        (total, removableKg) => total + removableKg,
+        0,
+      );
+      const capacityKg =
+        AIR_HANDLER_RATED_CONDENSATE_COLLECTION_KG_PER_SECOND *
+        handler.actualFlowFraction *
+        deltaSeconds;
+      const condensedKg = Math.min(availableVaporKg, capacityKg);
+      if (condensedKg <= 0) continue;
+
+      let assignedKg = 0;
+      servedZones.forEach((zone, index) => {
+        const isLast = index === servedZones.length - 1;
+        const removedKg = isLast
+          ? condensedKg - assignedKg
+          : condensedKg * (removableByZone[index] / availableVaporKg);
+        zone.gasesKg.waterVapor -= removedKg;
+        if (
+          zone.gasesKg.waterVapor < 0 &&
+          zone.gasesKg.waterVapor > -1e-12
+        ) {
+          zone.gasesKg.waterVapor = 0;
+        }
+        assignedKg += removedKg;
+      });
+      const ringKey = handler.ring === "A" ? "a" : "b";
+      condensedByRing[ringKey] += condensedKg;
+      anyRemoved = true;
+    }
+
+    if (anyRemoved) {
+      this.stateValue.revision += 1;
+      validateCompartmentSnapshot(this.stateValue);
+    }
+    return condensedByRing;
   }
 
   configureConnection(

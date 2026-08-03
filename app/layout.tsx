@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { IBM_Plex_Mono, Noto_Sans_SC, Oxanium } from "next/font/google";
 import { headers } from "next/headers";
+import { ClientObservability } from "@/app/ui/components/client-observability";
 import "./globals.css";
 
 const oxanium = Oxanium({
@@ -81,7 +82,10 @@ export default function RootLayout({
       lang="zh-CN"
       className={`${oxanium.variable} ${notoSansSc.variable} ${ibmPlexMono.variable}`}
     >
-      <body>{children}</body>
+      <body>
+        <ClientObservability />
+        {children}
+      </body>
     </html>
   );
 }

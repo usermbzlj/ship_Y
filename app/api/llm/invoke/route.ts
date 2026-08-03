@@ -1,18 +1,16 @@
 import {
   assertTrustedLocalRequest,
+  handleLlmRoute,
   invokePublicLlm,
   jsonResponse,
   readStrictJsonBody,
-  routeErrorResponse,
 } from "../_server";
 
 export async function POST(request: Request): Promise<Response> {
-  try {
+  return handleLlmRoute(request, "llm.invoke", async ({ requestId }) => {
     assertTrustedLocalRequest(request);
     const input = await readStrictJsonBody(request);
-    const result = await invokePublicLlm(input, request.signal);
+    const result = await invokePublicLlm(input, request.signal, { requestId });
     return jsonResponse({ result });
-  } catch (error) {
-    return routeErrorResponse(error);
-  }
+  });
 }

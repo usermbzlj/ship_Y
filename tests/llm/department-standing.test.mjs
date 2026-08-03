@@ -10,7 +10,10 @@ import {
   DEPARTMENT_STANDING_SNAPSHOT_VERSION,
   FILE_DISSENT_TOOL_INPUT_SCHEMA,
   FILE_DISSENT_TOOL_NAME,
+  autoResolveOpenDepartmentDissents,
+  buildDissentWorldEvidence,
   createDepartmentStandingSnapshot,
+  inferDissentClaimKind,
   openDissentsForCaptain,
   parseFileDissentToolCall,
   recordDepartmentConsultation,
@@ -332,8 +335,27 @@ test("parseFileDissentToolCall validates, defaults severity, and truncates", () 
   });
   assert.deepEqual(defaulted, {
     ok: true,
-    draft: { severity: "formal", summary: "保留冷却冗余" },
+    draft: {
+      severity: "formal",
+      summary: "保留冷却冗余",
+      claimKind: null,
+    },
   });
+
+  const withClaim = parseFileDissentToolCall({
+    summary: "必须先封口再跃迁",
+    claimKind: "hull_sealed",
+  });
+  assert.deepEqual(withClaim, {
+    ok: true,
+    draft: {
+      severity: "formal",
+      summary: "必须先封口再跃迁",
+      claimKind: "hull_sealed",
+    },
+  });
+  assert.equal(inferDissentClaimKind("舱压过低需复压"), "pressure_recovered");
+  assert.equal(inferDissentClaimKind("电网荷电不足"), "power_nominal");
 
   const longSummary = "异".repeat(DEPARTMENT_DISSENT_MAX_SUMMARY_CHARACTERS + 20);
   const truncated = parseFileDissentToolCall({
@@ -424,7 +446,7 @@ test("validateDepartmentStandingSnapshot is strict and deep-clones", () => {
   assert.equal(
     validateDepartmentStandingSnapshot({
       ...snapshot,
-      snapshotVersion: 2,
+      snapshotVersion: 3,
     }),
     null,
   );
@@ -450,9 +472,86 @@ test("validateDepartmentStandingSnapshot is strict and deep-clones", () => {
     summary: "跃迁窗口过窄",
     captainDecisionOrdinal: null,
   }).snapshot;
+  assert.equal(withDissent.dissents[0].claimKind, "jump_completed");
   const badDissent = structuredClone(withDissent);
   badDissent.dissents[0].summary = "";
   assert.equal(validateDepartmentStandingSnapshot(badDissent), null);
+});
+
+test("v1 standing snapshots migrate to v2 with inferred claimKind", () => {
+  const modern = createDepartmentStandingSnapshot();
+  const filed = recordDepartmentDissent(modern, {
+    departmentId: "engineering",
+    simulationSeconds: 40,
+    severity: "formal",
+    summary: "破口未封禁止跃迁",
+    captainDecisionOrdinal: 1,
+    claimKind: "hull_sealed",
+  }).snapshot;
+  const legacy = {
+    snapshotVersion: 1,
+    nextOrdinal: filed.nextOrdinal,
+    standings: structuredClone(filed.standings),
+    dissents: filed.dissents.map((record) => {
+      const { claimKind: _claimKind, ...rest } = record;
+      return rest;
+    }),
+  };
+  const migrated = validateDepartmentStandingSnapshot(legacy);
+  assert.ok(migrated);
+  assert.equal(migrated.snapshotVersion, 2);
+  assert.equal(migrated.dissents[0].claimKind, "hull_sealed");
+});
+
+test("autoResolveOpenDepartmentDissents moves counters off zero", () => {
+  let snapshot = createDepartmentStandingSnapshot();
+  const hull = recordDepartmentDissent(snapshot, {
+    departmentId: "engineering",
+    simulationSeconds: 100,
+    severity: "grave",
+    summary: "必须先封口",
+    captainDecisionOrdinal: 2,
+    claimKind: "hull_sealed",
+  });
+  snapshot = hull.snapshot;
+  const power = recordDepartmentDissent(snapshot, {
+    departmentId: "engineering",
+    simulationSeconds: 110,
+    severity: "formal",
+    summary: "电力未恢复勿跃迁",
+    captainDecisionOrdinal: 2,
+    claimKind: "power_nominal",
+  });
+  snapshot = power.snapshot;
+
+  snapshot = autoResolveOpenDepartmentDissents(
+    snapshot,
+    buildDissentWorldEvidence({
+      hullIntegrity: 1,
+      activeBreachCount: 0,
+      lowestZonePressureKpa: 101,
+      batteryStateOfChargeFraction: 0.1,
+      receipts: [{ toolName: "execute_jump", status: "accepted" }],
+    }),
+  );
+
+  const engineering = snapshot.standings.find(
+    (entry) => entry.departmentId === "engineering",
+  );
+  assert.equal(
+    snapshot.dissents.find((record) => record.recordId === hull.record.recordId)
+      ?.resolution,
+    "vindicated",
+  );
+  assert.equal(
+    snapshot.dissents.find(
+      (record) => record.recordId === power.record.recordId,
+    )?.resolution,
+    "overridden",
+  );
+  assert.ok((engineering?.vindicatedCount ?? 0) > 0);
+  assert.ok((engineering?.overriddenCount ?? 0) > 0);
+  assert.equal(openDissentsForCaptain(snapshot).length, 0);
 });
 
 test("relative time formatting never goes negative", () => {

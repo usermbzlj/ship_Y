@@ -73,6 +73,8 @@ test("production source contains a real worker-backed simulator, not starter UI"
     page,
     layout,
     missionControl,
+    captainDecisionTrigger,
+    godInterventions,
     simulationWorker,
     simulationInterventions,
     packageJson,
@@ -82,6 +84,14 @@ test("production source contains a real worker-backed simulator, not starter UI"
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/mission-control.tsx", import.meta.url), "utf8"),
+    readFile(
+      new URL("../lib/llm/captain-decision-trigger.ts", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../app/mission-control/use-god-interventions.ts", import.meta.url),
+      "utf8",
+    ),
     readFile(new URL("../lib/sim/worker.ts", import.meta.url), "utf8"),
     readFile(new URL("../lib/sim/interventions.ts", import.meta.url), "utf8"),
     readFile(new URL("../package.json", import.meta.url), "utf8"),
@@ -114,14 +124,11 @@ test("production source contains a real worker-backed simulator, not starter UI"
   assert.match(missionControl, /仿真已暂停 · 等待 AI 舰长研判/);
   assert.match(missionControl, /保真度锁定 · 有效推进倍率已受限/);
   assert.match(missionControl, /hullThreat/);
-  assert.match(missionControl, /projectCaptainHullThreatObservation/);
+  assert.match(missionControl, /buildFullAuthorizedObservation/);
   assert.match(missionControl, /truthConditions/);
-  assert.match(missionControl, /hull-threat:/);
-  assert.match(missionControl, /case "passenger-emergency"/);
-  assert.match(
-    missionControl,
-    /default:\s*\r?\n\s*showToast\(`不支持的因果事件类型/,
-  );
+  assert.match(captainDecisionTrigger, /hull-threat:/);
+  assert.match(simulationInterventions, /passenger-emergency/);
+  assert.match(godInterventions, /不支持的因果事件类型/);
   assert.match(
     missionControl,
     /此外层存档格式为 LocalSave v18，已不再支持/,
@@ -129,6 +136,8 @@ test("production source contains a real worker-backed simulator, not starter UI"
   assert.doesNotMatch(missionControl, /snapshot v16/);
   assert.match(missionControl, /knownAlertIds\.current\.clear\(\)/);
   assert.match(missionControl, /setCaptainDecisionLog\(\[\]\)/);
+  assert.match(missionControl, /autoResolveOpenDepartmentDissents/);
+  assert.match(missionControl, /onResolveDepartmentDissent/);
 
   const [alertBanner, aiConstants] = await Promise.all([
     readFile(

@@ -2,6 +2,11 @@ import { spawn } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  forwardTerminationSignals,
+  installLocalLogCapture,
+  pipeChildOutput,
+} from "./local-log.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(__dirname, "..");
@@ -128,6 +133,7 @@ function configureAgents(configuration, { baseUrl, apiKey, model, thinking }) {
 
 function main() {
   const options = parseArgs(process.argv);
+  const capture = installLocalLogCapture({ root: projectRoot, mode: "deepseek" });
 
   const credentialPath = options.credential
     ? resolve(options.credential)
@@ -155,19 +161,37 @@ function main() {
     `Credential remains process-local; starting http://${options.host}:${options.port}`,
   );
 
-  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+  const cli = join(projectRoot, "node_modules", "vinext", "dist", "cli.js");
   const child = spawn(
-    npm,
-    ["run", "dev", "--", "--host", options.host, "--port", String(options.port)],
+    process.execPath,
+    [cli, "dev", "--host", options.host, "--port", String(options.port)],
     {
       cwd: projectRoot,
-      stdio: "inherit",
+      stdio: ["inherit", "pipe", "pipe"],
       env: process.env,
     },
   );
 
-  child.on("close", (code) => {
-    process.exit(code ?? 0);
+  pipeChildOutput(child);
+  forwardTerminationSignals(child);
+
+  child.on("error", (error) => {
+    console.error(
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "error",
+        scope: "local-runtime",
+        event: "deepseek.spawn.failed",
+        details: { error: { name: error.name, message: error.message } },
+      }),
+    );
+    capture.close();
+    process.exitCode = 1;
+  });
+
+  child.on("close", (code, signal) => {
+    capture.close();
+    process.exitCode = code ?? (signal ? 1 : 0);
   });
 }
 

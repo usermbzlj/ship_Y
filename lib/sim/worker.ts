@@ -9,6 +9,7 @@ import {
   resolveZoneIdForCabin,
   zoneCatalogEntry,
   zoneIdsForRole,
+  type ZoneId,
 } from "./compartments.ts";
 import {
   hibernationPowerBankForPodId,
@@ -66,7 +67,6 @@ import {
 import type {
   AirHandlerId,
   CompartmentStepResult,
-  ZoneId,
   ZoneRole,
 } from "./compartments";
 import type {
@@ -115,6 +115,7 @@ import type {
   CoolingTelemetry,
   ElectricalTelemetry,
   FinalJourneyReport,
+  LlmOrchestrationState,
   NavigationTelemetry,
   PassengerEnvironmentalExposureState,
   RuntimeSimulationSnapshot,
@@ -124,6 +125,37 @@ import type {
   SimulationWorkerEvent,
   SimulationWorkerState,
 } from "./protocol";
+import {
+  createCaptainJournalSnapshot,
+  validateCaptainJournalSnapshot,
+  type CaptainJournalSnapshot,
+} from "../llm/captain-journal.ts";
+import {
+  createCaptainWatchSnapshot,
+  validateCaptainWatchSnapshot,
+  type CaptainWatchSnapshot,
+} from "../llm/captain-watch.ts";
+import {
+  createDepartmentStandingSnapshot,
+  validateDepartmentStandingSnapshot,
+  type DepartmentStandingSnapshot,
+} from "../llm/department-standing.ts";
+import {
+  createDepartmentInboxSnapshot,
+  validateDepartmentInboxSnapshot,
+  type DepartmentInboxSnapshot,
+} from "../llm/department-inbox.ts";
+import {
+  computeGrievanceBacklogStressDeltas,
+} from "../llm/grievance-backlog.ts";
+import {
+  createPassengerSocietySnapshot,
+  PASSENGER_RUMOR_MORALE_STRESS_CAP,
+  resolveAdjacentZoneIds,
+  tickPassengerSociety,
+  validatePassengerSocietySnapshot,
+  type PassengerSocietySnapshot,
+} from "../llm/passenger-society.ts";
 import {
   assertProjectionAtMost,
   assertProjectionClose,
@@ -168,6 +200,9 @@ import {
   executeShipCommand as executeRegisteredShipCommand,
   type CommandHandlerContext,
 } from "./command-handlers/index.ts";
+import { createLogger } from "../observability/logger.ts";
+
+const workerLog = createLogger("simulation-worker");
 
 let engine = new SimulationEngine({
   seed: "far-horizon-preview",
@@ -395,6 +430,23 @@ let lastReachedBlockingBoundary: {
   atSimulationSeconds: number;
 } | null = null;
 let lastProceduralEvents: ProceduralWorldEvent[] = [];
+const LLM_ORCHESTRATION_ACCEPTED_CALL_ID_LIMIT = 32;
+let llmOrchestration: LlmOrchestrationState = {
+  pending: null,
+  acceptedCallIds: [],
+};
+let nextCaptainRoutineAtSimulationSeconds: number | null = null;
+let captainJournalSnapshot: CaptainJournalSnapshot =
+  createCaptainJournalSnapshot();
+let captainWatchSnapshot: CaptainWatchSnapshot =
+  createCaptainWatchSnapshot();
+let departmentStandingSnapshot: DepartmentStandingSnapshot =
+  createDepartmentStandingSnapshot();
+let passengerSocietySnapshot: PassengerSocietySnapshot =
+  createPassengerSocietySnapshot();
+let departmentInboxSnapshot: DepartmentInboxSnapshot =
+  createDepartmentInboxSnapshot();
+let llmEffectSequence = 0;
 const ELECTRICAL_COUPLING_INTERVAL_SECONDS = 60;
 const CABIN_SENSIBLE_HEAT_W_PER_AWAKE_PERSON = 80;
 const CABIN_HEAT_PUMP_LIFE_SUPPORT_POWER_SHARE = 0.05;
@@ -558,6 +610,9 @@ function currentState(): SimulationWorkerState {
     effectiveTimeScale,
     currentZoneForPerson,
     maintenanceConditions: currentMaintenanceConditions(),
+    llmOrchestration: llmOrchestrationSummary(),
+    passengerSociety: structuredClone(passengerSocietySnapshot),
+    departmentInbox: structuredClone(departmentInboxSnapshot),
   });
 }
 
@@ -2065,6 +2120,342 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function emptyLlmOrchestration(): LlmOrchestrationState {
+  return { pending: null, acceptedCallIds: [] };
+}
+
+function resetLlmOrchestrationSidecars(): void {
+  llmOrchestration = emptyLlmOrchestration();
+  nextCaptainRoutineAtSimulationSeconds = null;
+  captainJournalSnapshot = createCaptainJournalSnapshot();
+  captainWatchSnapshot = createCaptainWatchSnapshot();
+  departmentStandingSnapshot = createDepartmentStandingSnapshot();
+  passengerSocietySnapshot = createPassengerSocietySnapshot();
+  departmentInboxSnapshot = createDepartmentInboxSnapshot();
+  llmEffectSequence = 0;
+}
+
+function makeCaptainEffectCallId(
+  frozenAtSimulationSeconds: number,
+  triggerKey: string,
+): string {
+  llmEffectSequence += 1;
+  // Deterministic within a runtime: simulation time + sequence + trigger key.
+  // Avoid Date.now(); sequence resets on initialize/restore.
+  const keyPart = triggerKey.replace(/[^a-zA-Z0-9:_-]/g, "_").slice(0, 64);
+  return `captain-effect:${frozenAtSimulationSeconds}:${llmEffectSequence}:${keyPart}`;
+}
+
+function pushAcceptedCallId(callId: string): void {
+  const next = [...llmOrchestration.acceptedCallIds, callId];
+  llmOrchestration = {
+    ...llmOrchestration,
+    acceptedCallIds: next.slice(-LLM_ORCHESTRATION_ACCEPTED_CALL_ID_LIMIT),
+  };
+}
+
+function llmOrchestrationSummary(): SimulationWorkerState["llmOrchestration"] {
+  return {
+    pending: llmOrchestration.pending
+      ? {
+          kind: llmOrchestration.pending.kind,
+          phase: llmOrchestration.pending.phase,
+          callId: llmOrchestration.pending.callId,
+          triggerKey: llmOrchestration.pending.triggerKey,
+          observationRevision: llmOrchestration.pending.observationRevision,
+          frozenAtSimulationSeconds:
+            llmOrchestration.pending.frozenAtSimulationSeconds,
+        }
+      : null,
+  };
+}
+
+function openCaptainBlockingEffect(options: {
+  requestId: string;
+  triggerKey: string;
+  pauseToken: string;
+  emitRequest?: boolean;
+}): void {
+  if (llmOrchestration.pending !== null) {
+    return;
+  }
+  const frozenAtSimulationSeconds = engine.elapsedSeconds;
+  const observationRevision = engine.getState().revision;
+  const callId = makeCaptainEffectCallId(
+    frozenAtSimulationSeconds,
+    options.triggerKey,
+  );
+  // Consuming a routine boundary clears the Worker-owned deadline until finish.
+  if (options.triggerKey.startsWith("captain-routine:")) {
+    nextCaptainRoutineAtSimulationSeconds = null;
+  }
+  llmOrchestration = {
+    ...llmOrchestration,
+    pending: {
+      kind: "captain-blocking",
+      phase: "awaiting-http",
+      callId,
+      triggerKey: options.triggerKey,
+      observationRevision,
+      frozenAtSimulationSeconds,
+    },
+  };
+  timeDirector.acquirePauseToken(options.pauseToken);
+  if (options.emitRequest !== false) {
+    post({
+      type: "llm-effect-request",
+      requestId: options.requestId,
+      payload: {
+        callId,
+        kind: "captain-blocking",
+        triggerKey: options.triggerKey,
+        observationRevision,
+        frozenAtSimulationSeconds,
+        agentId: "captain",
+      },
+    });
+  }
+}
+
+function clearPendingAndReleaseLlmWaiting(): void {
+  llmOrchestration = {
+    ...llmOrchestration,
+    pending: null,
+  };
+  timeDirector.releasePauseToken("llm-waiting");
+}
+
+function applyLlmEffectAccept(
+  command: Extract<SimulationWorkerCommand, { type: "llm-effect-accept" }>,
+): void {
+  const pending = llmOrchestration.pending;
+  if (
+    pending === null ||
+    pending.callId !== command.callId ||
+    pending.observationRevision !== command.observationRevision
+  ) {
+    throw new Error("llm-effect-accept rejected: stale or unknown call");
+  }
+  if (llmOrchestration.acceptedCallIds.includes(command.callId)) {
+    post({
+      type: "ready",
+      requestId: command.requestId,
+      payload: currentState(),
+    });
+    return;
+  }
+  pushAcceptedCallId(command.callId);
+  const hasToolCalls =
+    Array.isArray(command.result.toolCalls) &&
+    command.result.toolCalls.length > 0;
+  llmOrchestration = {
+    ...llmOrchestration,
+    pending: {
+      ...pending,
+      phase: hasToolCalls ? "applying-tools" : "done",
+    },
+  };
+  post({
+    type: "ready",
+    requestId: command.requestId,
+    payload: currentState(),
+  });
+}
+
+function applyLlmEffectFail(
+  command: Extract<SimulationWorkerCommand, { type: "llm-effect-fail" }>,
+): void {
+  const pending = llmOrchestration.pending;
+  if (
+    pending === null ||
+    pending.callId !== command.callId ||
+    pending.observationRevision !== command.observationRevision
+  ) {
+    throw new Error("llm-effect-fail rejected: stale or unknown call");
+  }
+  // Fail clears pending and releases pause; routine deadline is not advanced here.
+  void command.retryable;
+  void command.reason;
+  clearPendingAndReleaseLlmWaiting();
+  post({
+    type: "ready",
+    requestId: command.requestId,
+    payload: currentState(),
+  });
+}
+
+function applyLlmEffectFinish(
+  command: Extract<SimulationWorkerCommand, { type: "llm-effect-finish" }>,
+): void {
+  const pending = llmOrchestration.pending;
+  if (pending === null || pending.callId !== command.callId) {
+    throw new Error("llm-effect-finish rejected: unknown call");
+  }
+  if (command.captainJournal !== undefined) {
+    captainJournalSnapshot =
+      validateCaptainJournalSnapshot(command.captainJournal) ??
+      captainJournalSnapshot;
+  }
+  if (command.captainWatch !== undefined) {
+    captainWatchSnapshot =
+      validateCaptainWatchSnapshot(command.captainWatch) ??
+      captainWatchSnapshot;
+  }
+  if (command.departmentStanding !== undefined) {
+    departmentStandingSnapshot =
+      validateDepartmentStandingSnapshot(command.departmentStanding) ??
+      departmentStandingSnapshot;
+  }
+  if (command.passengerSociety !== undefined) {
+    const incoming = validatePassengerSocietySnapshot(command.passengerSociety);
+    if (incoming) {
+      passengerSocietySnapshot = {
+        ...incoming,
+        lastSpreadSimSeconds: Math.max(
+          passengerSocietySnapshot.lastSpreadSimSeconds,
+          incoming.lastSpreadSimSeconds,
+        ),
+        lastMoraleSimSeconds: Math.max(
+          passengerSocietySnapshot.lastMoraleSimSeconds,
+          incoming.lastMoraleSimSeconds,
+        ),
+      };
+    }
+  }
+  if (command.departmentInbox !== undefined) {
+    departmentInboxSnapshot =
+      validateDepartmentInboxSnapshot(command.departmentInbox) ??
+      departmentInboxSnapshot;
+  }
+  if (command.advancesRoutineSchedule) {
+    if (
+      "nextCaptainRoutineAtSimulationSeconds" in command &&
+      command.nextCaptainRoutineAtSimulationSeconds !== undefined
+    ) {
+      nextCaptainRoutineAtSimulationSeconds =
+        command.nextCaptainRoutineAtSimulationSeconds;
+    }
+  }
+  clearPendingAndReleaseLlmWaiting();
+  post({
+    type: "ready",
+    requestId: command.requestId,
+    payload: currentState(),
+  });
+}
+
+function applyZoneStressDeltas(
+  deltas: ReadonlyArray<{ zoneId: string; stressDelta: number }>,
+): void {
+  for (const entry of deltas) {
+    if (
+      typeof entry.zoneId !== "string" ||
+      entry.zoneId.length < 1 ||
+      typeof entry.stressDelta !== "number" ||
+      !Number.isFinite(entry.stressDelta) ||
+      entry.stressDelta <= 0
+    ) {
+      continue;
+    }
+    const stress = Math.min(
+      PASSENGER_RUMOR_MORALE_STRESS_CAP,
+      entry.stressDelta,
+    );
+    const ids = awakePassengersInZone(entry.zoneId as ZoneId).map(
+      (person) => person.id,
+    );
+    if (ids.length === 0) {
+      continue;
+    }
+    applyContinuousRosterDeltas(ids, { stress });
+  }
+}
+
+function applySetRuntimeSidecars(
+  command: Extract<SimulationWorkerCommand, { type: "set-runtime-sidecars" }>,
+): void {
+  if (command.captainJournal !== undefined) {
+    captainJournalSnapshot =
+      validateCaptainJournalSnapshot(command.captainJournal) ??
+      captainJournalSnapshot;
+  }
+  if (command.captainWatch !== undefined) {
+    captainWatchSnapshot =
+      validateCaptainWatchSnapshot(command.captainWatch) ??
+      captainWatchSnapshot;
+  }
+  if (command.departmentStanding !== undefined) {
+    departmentStandingSnapshot =
+      validateDepartmentStandingSnapshot(command.departmentStanding) ??
+      departmentStandingSnapshot;
+  }
+  if (command.passengerSociety !== undefined) {
+    const incoming = validatePassengerSocietySnapshot(command.passengerSociety);
+    if (incoming) {
+      passengerSocietySnapshot = {
+        ...incoming,
+        lastSpreadSimSeconds: Math.max(
+          passengerSocietySnapshot.lastSpreadSimSeconds,
+          incoming.lastSpreadSimSeconds,
+        ),
+        lastMoraleSimSeconds: Math.max(
+          passengerSocietySnapshot.lastMoraleSimSeconds,
+          incoming.lastMoraleSimSeconds,
+        ),
+      };
+    }
+  }
+  if (command.departmentInbox !== undefined) {
+    departmentInboxSnapshot =
+      validateDepartmentInboxSnapshot(command.departmentInbox) ??
+      departmentInboxSnapshot;
+  }
+  if (command.zoneStressDeltas !== undefined) {
+    applyZoneStressDeltas(command.zoneStressDeltas);
+  }
+  post({
+    type: "ready",
+    requestId: command.requestId,
+    payload: currentState(),
+  });
+}
+
+function tickPassengerSocietyInWorker(): void {
+  const connections = compartments.listConnections().map((connection) => ({
+    zoneAId: connection.zoneAId,
+    zoneBId: connection.zoneBId,
+  }));
+  const moraleBefore = passengerSocietySnapshot.lastMoraleSimSeconds;
+  const result = tickPassengerSociety(passengerSocietySnapshot, {
+    simulationSeconds: engine.elapsedSeconds,
+    adjacentZones: (zoneId) =>
+      resolveAdjacentZoneIds(zoneId, connections),
+  });
+  passengerSocietySnapshot = result.snapshot;
+  applyZoneStressDeltas(result.zoneStressDeltas);
+  // Share society morale cadence: aged open grievances nudge zone stress.
+  if (passengerSocietySnapshot.lastMoraleSimSeconds > moraleBefore) {
+    const backlogDeltas = computeGrievanceBacklogStressDeltas(
+      captainOperations.snapshot().grievances,
+      {
+        simulationSeconds: engine.elapsedSeconds,
+        resolvePassengerZone: (passengerId) => {
+          try {
+            const person = passengers.getPassenger(passengerId);
+            if (person.lifeState === "deceased") {
+              return null;
+            }
+            return currentZoneForPerson(person);
+          } catch {
+            return null;
+          }
+        },
+      },
+    );
+    applyZoneStressDeltas(backlogDeltas);
+  }
+}
+
 function initialize(
   command: Extract<SimulationWorkerCommand, { type: "initialize" }>,
 ): void {
@@ -2136,6 +2527,7 @@ function initialize(
   timeDirector = new SimulationTimeDirector(command.mission.timeScale);
   timeDirector.acquirePauseToken("ui");
   lastReachedBlockingBoundary = null;
+  resetLlmOrchestrationSidecars();
   proceduralWorld = new ProceduralWorldScheduler(command.mission.seed);
   lastProceduralEvents = [];
   synchronizeCompartmentOccupants();
@@ -2166,7 +2558,10 @@ function restore(
   if (
     (command.snapshot.snapshotVersion !== 16 &&
       command.snapshot.snapshotVersion !== 17 &&
-      command.snapshot.snapshotVersion !== 18) ||
+      command.snapshot.snapshotVersion !== 18 &&
+      command.snapshot.snapshotVersion !== 19 &&
+      command.snapshot.snapshotVersion !== 20 &&
+      command.snapshot.snapshotVersion !== 21) ||
     !command.snapshot.highestDirective.trim() ||
     command.snapshot.engine.powerAuthority !== "external-network" ||
     command.snapshot.engine.atmosphereAuthority !== "external-network" ||
@@ -2374,16 +2769,123 @@ function restore(
   highestDirective = command.snapshot.highestDirective;
   // Reconcile registry with live breaches (v16/v17 saves lack hullConsequence).
   applyHullConsequenceCoupling();
+  if (command.snapshot.snapshotVersion >= 19) {
+    llmOrchestration = command.snapshot.llmOrchestration
+      ? {
+          pending: command.snapshot.llmOrchestration.pending
+            ? { ...command.snapshot.llmOrchestration.pending }
+            : null,
+          acceptedCallIds: [
+            ...(command.snapshot.llmOrchestration.acceptedCallIds ?? []),
+          ].slice(-LLM_ORCHESTRATION_ACCEPTED_CALL_ID_LIMIT),
+        }
+      : emptyLlmOrchestration();
+    nextCaptainRoutineAtSimulationSeconds =
+      command.snapshot.nextCaptainRoutineAtSimulationSeconds ?? null;
+    captainJournalSnapshot =
+      validateCaptainJournalSnapshot(command.snapshot.captainJournal) ??
+      createCaptainJournalSnapshot();
+    captainWatchSnapshot =
+      validateCaptainWatchSnapshot(command.snapshot.captainWatch) ??
+      createCaptainWatchSnapshot();
+    departmentStandingSnapshot =
+      validateDepartmentStandingSnapshot(
+        command.snapshot.departmentStanding,
+      ) ?? createDepartmentStandingSnapshot();
+    passengerSocietySnapshot =
+      command.snapshot.snapshotVersion >= 20
+        ? validatePassengerSocietySnapshot(
+            command.snapshot.passengerSociety,
+          ) ?? createPassengerSocietySnapshot()
+        : createPassengerSocietySnapshot();
+    departmentInboxSnapshot =
+      command.snapshot.snapshotVersion >= 21
+        ? validateDepartmentInboxSnapshot(
+            command.snapshot.departmentInbox,
+          ) ?? createDepartmentInboxSnapshot()
+        : createDepartmentInboxSnapshot();
+    llmEffectSequence = 0;
+  } else {
+    resetLlmOrchestrationSidecars();
+  }
+  const restoredPending = llmOrchestration.pending;
+  // Mid-tool-apply restores cannot resume the React world-command queue
+  // (queue state is not persisted). Safe-fail: clear pending, leave the
+  // world unfrozen, and notify UI — never re-acquire llm-waiting alone.
+  if (restoredPending !== null && restoredPending.phase === "applying-tools") {
+    workerLog.warn("llm.effect.aborted", {
+      reason: "restored-during-tool-apply",
+      callId: restoredPending.callId,
+      triggerKey: restoredPending.triggerKey,
+      observationRevision: restoredPending.observationRevision,
+      frozenAtSimulationSeconds:
+        restoredPending.frozenAtSimulationSeconds,
+    });
+    llmOrchestration = {
+      ...llmOrchestration,
+      pending: null,
+    };
+    timeDirector.releasePauseToken("llm-waiting");
+    // Mirror fail semantics for routine boundaries: keep the due deadline
+    // so the cycle can retry after unpause (Worker cleared it on open).
+    if (restoredPending.triggerKey.startsWith("captain-routine:")) {
+      nextCaptainRoutineAtSimulationSeconds =
+        restoredPending.frozenAtSimulationSeconds;
+    }
+    post({
+      type: "ready",
+      requestId: command.requestId,
+      payload: currentState(),
+    });
+    post({
+      type: "llm-effect-aborted",
+      requestId: `${command.requestId}:llm-effect-aborted`,
+      payload: {
+        callId: restoredPending.callId,
+        kind: "captain-blocking",
+        triggerKey: restoredPending.triggerKey,
+        observationRevision: restoredPending.observationRevision,
+        frozenAtSimulationSeconds:
+          restoredPending.frozenAtSimulationSeconds,
+        reason: "restored-during-tool-apply",
+      },
+    });
+    return;
+  }
+  if (
+    restoredPending !== null &&
+    restoredPending.phase === "awaiting-http"
+  ) {
+    timeDirector.acquirePauseToken("llm-waiting");
+  }
   post({
     type: "ready",
     requestId: command.requestId,
     payload: currentState(),
   });
+  if (
+    restoredPending !== null &&
+    restoredPending.phase === "awaiting-http"
+  ) {
+    post({
+      type: "llm-effect-request",
+      requestId: `${command.requestId}:llm-effect-replay`,
+      payload: {
+        callId: restoredPending.callId,
+        kind: "captain-blocking",
+        triggerKey: restoredPending.triggerKey,
+        observationRevision: restoredPending.observationRevision,
+        frozenAtSimulationSeconds:
+          restoredPending.frozenAtSimulationSeconds,
+        agentId: "captain",
+      },
+    });
+  }
 }
 
 function runtimeSnapshot(): RuntimeSimulationSnapshot {
   return {
-    snapshotVersion: 18,
+    snapshotVersion: 21,
     highestDirective,
     engine: engine.snapshot(),
     passengers: passengers.snapshot(),
@@ -2403,6 +2905,18 @@ function runtimeSnapshot(): RuntimeSimulationSnapshot {
     proceduralWorld: proceduralWorld.snapshot(),
     survival: snapshotSurvival(survivalLedger, survivalZoneDoses),
     hullConsequence: hullConsequence.snapshot(),
+    llmOrchestration: {
+      pending: llmOrchestration.pending
+        ? { ...llmOrchestration.pending }
+        : null,
+      acceptedCallIds: [...llmOrchestration.acceptedCallIds],
+    },
+    nextCaptainRoutineAtSimulationSeconds,
+    captainJournal: structuredClone(captainJournalSnapshot),
+    captainWatch: structuredClone(captainWatchSnapshot),
+    departmentStanding: structuredClone(departmentStandingSnapshot),
+    passengerSociety: structuredClone(passengerSocietySnapshot),
+    departmentInbox: structuredClone(departmentInboxSnapshot),
   };
 }
 
@@ -2930,6 +3444,12 @@ function advanceCoupledPhysicalDomains(
           waterOccupants,
         ),
       );
+      const condensateByRing = compartments.condenseRecoverableWaterVapor(
+        (toMicroseconds - fromMicroseconds) / 1_000_000,
+      );
+      if (condensateByRing.a > 0 || condensateByRing.b > 0) {
+        water.collectCondensate(condensateByRing);
+      }
       water.step((toMicroseconds - fromMicroseconds) / 1_000_000);
     },
   });
@@ -3435,6 +3955,10 @@ function applyTimeControl(
     timeDirector.acquirePauseToken(token);
   }
   for (const token of command.releasePauseTokens ?? []) {
+    // Worker owns llm-waiting while an LLM effect is pending.
+    if (token === "llm-waiting" && llmOrchestration.pending !== null) {
+      continue;
+    }
     timeDirector.releasePauseToken(token);
   }
   post({
@@ -3472,11 +3996,38 @@ function advanceSimulationStep(
         id: boundary.id,
         atSimulationSeconds: boundary.atSimulationSeconds,
       };
+      if (boundary.pauseToken === "llm-waiting") {
+        openCaptainBlockingEffect({
+          requestId: command.requestId,
+          triggerKey: boundary.id,
+          pauseToken: boundary.pauseToken,
+          emitRequest: false,
+        });
+      }
       post({
         type: "stepped",
         requestId: command.requestId,
         payload: currentState(),
       });
+      if (
+        boundary.pauseToken === "llm-waiting" &&
+        llmOrchestration.pending?.phase === "awaiting-http"
+      ) {
+        post({
+          type: "llm-effect-request",
+          requestId: command.requestId,
+          payload: {
+            callId: llmOrchestration.pending.callId,
+            kind: "captain-blocking",
+            triggerKey: llmOrchestration.pending.triggerKey,
+            observationRevision:
+              llmOrchestration.pending.observationRevision,
+            frozenAtSimulationSeconds:
+              llmOrchestration.pending.frozenAtSimulationSeconds,
+            agentId: "captain",
+          },
+        });
+      }
       return;
     }
   }
@@ -3570,12 +4121,41 @@ function advanceSimulationStep(
       id: boundary.id,
       atSimulationSeconds: boundary.atSimulationSeconds,
     };
+    if (boundary.pauseToken === "llm-waiting") {
+      openCaptainBlockingEffect({
+        requestId: command.requestId,
+        triggerKey: boundary.id,
+        pauseToken: boundary.pauseToken,
+        emitRequest: false,
+      });
+    }
   }
+  tickPassengerSocietyInWorker();
   post({
     type: "stepped",
     requestId: command.requestId,
     payload: currentState(),
   });
+  if (
+    reachedBoundary &&
+    boundary.pauseToken === "llm-waiting" &&
+    llmOrchestration.pending?.phase === "awaiting-http"
+  ) {
+    post({
+      type: "llm-effect-request",
+      requestId: command.requestId,
+      payload: {
+        callId: llmOrchestration.pending.callId,
+        kind: "captain-blocking",
+        triggerKey: llmOrchestration.pending.triggerKey,
+        observationRevision:
+          llmOrchestration.pending.observationRevision,
+        frozenAtSimulationSeconds:
+          llmOrchestration.pending.frozenAtSimulationSeconds,
+        agentId: "captain",
+      },
+    });
+  }
 }
 
 function applyCompartmentInterventionEffects(
@@ -3799,6 +4379,12 @@ function createFinalReport(): FinalJourneyReport {
 
 globalThis.onmessage = (message: MessageEvent<SimulationWorkerCommand>) => {
   const command = message.data;
+  if (command.type !== "step" && command.type !== "set-time-control") {
+    workerLog.debug("simulation.command.received", {
+      requestId: command.requestId,
+      commandType: command.type,
+    });
+  }
   try {
     switch (command.type) {
       case "initialize":
@@ -3852,8 +4438,25 @@ globalThis.onmessage = (message: MessageEvent<SimulationWorkerCommand>) => {
           payload: currentState(),
         });
         return;
+      case "llm-effect-accept":
+        applyLlmEffectAccept(command);
+        return;
+      case "llm-effect-fail":
+        applyLlmEffectFail(command);
+        return;
+      case "llm-effect-finish":
+        applyLlmEffectFinish(command);
+        return;
+      case "set-runtime-sidecars":
+        applySetRuntimeSidecars(command);
+        return;
     }
   } catch (error) {
+    workerLog.error("simulation.command.failed", {
+      requestId: command.requestId,
+      commandType: command.type,
+      error,
+    });
     post({
       type: "error",
       requestId: command.requestId,

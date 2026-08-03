@@ -24,6 +24,7 @@ import type {
 import type { CaptainJournalSnapshot } from "@/lib/llm/captain-journal";
 import type { CaptainWatchSnapshot } from "@/lib/llm/captain-watch";
 import type { DepartmentStandingSnapshot } from "@/lib/llm/department-standing";
+import type { DepartmentInboxSnapshot } from "@/lib/llm/department-inbox";
 import type { PassengerSocietySnapshot } from "@/lib/llm/passenger-society";
 
 // ─── 视图与状态 ───────────────────────────────────────────────
@@ -189,7 +190,7 @@ export type RuntimeSimulationSnapshot =
   import("@/lib/sim/protocol").RuntimeSimulationSnapshot;
 
 export interface LocalSave {
-  version: 22;
+  version: 24;
   activeView: ViewId;
   missionStarted: boolean;
   paused: boolean;
@@ -205,7 +206,12 @@ export interface LocalSave {
   captainWatch: CaptainWatchSnapshot;
   departmentStanding: DepartmentStandingSnapshot;
   passengerSociety: PassengerSocietySnapshot;
+  departmentInbox: DepartmentInboxSnapshot;
   runtimeSnapshot: RuntimeSimulationSnapshot | null;
+  /** SHA-256 hex of canonical JSON excluding this field; sealed on write. */
+  checksum?: string;
+  /** IndexedDB slot id when persisted (`manual` / `auto-0`…). */
+  slotId?: string;
 }
 
 // ─── 上帝模式 ─────────────────────────────────────────────────

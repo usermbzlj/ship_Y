@@ -27,6 +27,10 @@ import {
   type LlmMessage,
 } from "@/lib/llm";
 import { KEY_PASSENGER_SELF_INSTRUCTION } from "@/lib/llm/prompts";
+import { createLogger } from "@/lib/observability/logger";
+import { requestIdFromHeaders } from "@/lib/observability/request-id";
+
+const log = createLogger("llm-server");
 
 class HttpRequestValidationError extends Error {
   readonly status: number;
@@ -466,6 +470,23 @@ function ensureLlmRuntimesLoaded(): void {
     {
       fetch: (input, init) => globalThis.fetch(input, init),
       readEnvironment: (name) => process.env[name],
+      onAvailabilityChange: (event) => {
+        const details = {
+          agentId: event.agentId,
+          callId: event.callId,
+          status: event.status,
+          attempt: event.attempt,
+          ...(event.retryInMs === undefined
+            ? {}
+            : { retryInMs: event.retryInMs }),
+          ...(event.error === undefined ? {} : { errorSummary: event.error }),
+        };
+        if (event.status === "retrying") {
+          log.warn("llm.provider.retrying", details);
+        } else {
+          log.info("llm.provider.available", details);
+        }
+      },
     },
   );
 
@@ -496,6 +517,11 @@ function ensureLlmRuntimesLoaded(): void {
   }
 
   cachedSource = source;
+  log.info("llm.runtime.loaded", {
+    configurationSource: configuredJson ? "environment" : "bundled-example",
+    fixedAgentCount: cachedRuntime.status().fixedAgentCount,
+    godAssistantConfigured: cachedGodAssistRuntime !== undefined,
+  });
 }
 
 function normalizeGodAssistInvocation(
@@ -679,8 +705,12 @@ export function normalizePublicLlmInvocation(
 export async function invokePublicLlm(
   input: unknown,
   signal?: AbortSignal,
+  context: { requestId?: string } = {},
 ) {
   const normalized = normalizePublicLlmInvocation(input);
+  const invocationLog = context.requestId
+    ? log.child({ requestId: context.requestId })
+    : log;
   if (
     activePublicInvocations >=
     PUBLIC_INVOCATION_CONCURRENCY_LIMIT
@@ -705,7 +735,14 @@ export async function invokePublicLlm(
   if (normalized.kind === "passenger-self") {
     activePassengerInvocations += 1;
   }
+  const startedAt = performance.now();
+  invocationLog.info("llm.invocation.started", {
+    kind: normalized.kind,
+    activePublicInvocations,
+    activePassengerInvocations,
+  });
   try {
+    let result;
     if (normalized.kind === "god-assist") {
       const godRequest = normalized as NormalizedGodAssistInvocation;
       const runtime = getGodAssistRuntime();
@@ -726,7 +763,7 @@ export async function invokePublicLlm(
             godRequest.previousRejection,
         });
       }
-      const result = await runtime.invoke({
+      const godResult = await runtime.invoke({
         messages: [...contextMessages, ...godRequest.messages],
         metadata: {
           intent: "god-assist",
@@ -734,24 +771,108 @@ export async function invokePublicLlm(
         },
         signal,
       });
-      return {
-        text: result.text,
-        toolCalls: result.toolCalls,
-        usage: result.usage,
-        plan: result.plan,
+      result = {
+        text: godResult.text,
+        toolCalls: godResult.toolCalls,
+        usage: godResult.usage,
+        plan: godResult.plan,
         agentId: "god-assistant",
       };
+    } else {
+      result = await getLlmServerRuntime().invoke(
+        normalized.invocation,
+        signal,
+      );
     }
-    return await getLlmServerRuntime().invoke(
-      normalized.invocation,
-      signal,
-    );
+    invocationLog.info("llm.invocation.completed", {
+      kind: normalized.kind,
+      durationMs: Math.round((performance.now() - startedAt) * 10) / 10,
+      ...(typeof result === "object" && result !== null && "callId" in result
+        ? { callId: String(result.callId) }
+        : {}),
+      ...(typeof result === "object" && result !== null && "attempts" in result
+        ? { attempts: result.attempts }
+        : {}),
+      ...(typeof result === "object" && result !== null && "usage" in result
+        ? { usage: result.usage }
+        : {}),
+    });
+    return result;
+  } catch (error) {
+    const details = {
+      kind: normalized.kind,
+      durationMs: Math.round((performance.now() - startedAt) * 10) / 10,
+      error,
+    };
+    if (error instanceof LlmRequestAbortedError) {
+      invocationLog.debug("llm.invocation.aborted", details);
+    } else {
+      invocationLog.error("llm.invocation.failed", details);
+    }
+    throw error;
   } finally {
     activePublicInvocations -= 1;
     if (normalized.kind === "passenger-self") {
       activePassengerInvocations -= 1;
     }
   }
+}
+
+export type LlmRouteContext = {
+  requestId: string;
+};
+
+export async function handleLlmRoute(
+  request: Request,
+  route: string,
+  handler: (context: LlmRouteContext) => Response | Promise<Response>,
+): Promise<Response> {
+  const requestId = requestIdFromHeaders(request.headers);
+  const requestLog = log.child({ requestId, route });
+  const startedAt = performance.now();
+  requestLog.debug("http.server.started", {
+    method: request.method,
+    path: new URL(request.url).pathname,
+  });
+
+  let response: Response;
+  let caughtError: unknown;
+  try {
+    response = await handler({ requestId });
+  } catch (error) {
+    caughtError = error;
+    response = routeErrorResponse(error);
+  }
+
+  const headers = new Headers(response.headers);
+  headers.set("x-request-id", requestId);
+  const correlatedResponse = new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+  const details = {
+    method: request.method,
+    path: new URL(request.url).pathname,
+    status: correlatedResponse.status,
+    durationMs: Math.round((performance.now() - startedAt) * 10) / 10,
+    ...(caughtError === undefined ? {} : { error: caughtError }),
+  };
+  if (correlatedResponse.status >= 500) {
+    // Handler paths (e.g. llm.invocation.failed) already logged the cause.
+    if (caughtError !== undefined) {
+      requestLog.debug("http.server.completed", details);
+    } else {
+      requestLog.error("http.server.completed", details);
+    }
+  } else if (correlatedResponse.status >= 400) {
+    requestLog.warn("http.server.completed", details);
+  } else if (request.method === "GET") {
+    requestLog.debug("http.server.completed", details);
+  } else {
+    requestLog.info("http.server.completed", details);
+  }
+  return correlatedResponse;
 }
 
 export async function readStrictJsonBody(request: Request): Promise<unknown> {

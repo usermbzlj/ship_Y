@@ -1,27 +1,54 @@
 /**
- * Manual local save via IndexedDB (single slot).
- * Keeps `farhorizon-save` localStorage key for one-time migration.
+ * Local save via IndexedDB: manual slot + rotating auto slots.
+ * Keeps `farhorizon-save` localStorage key for one-time migration / fallback.
  *
  * Avoids importing `LocalSave` from `app/ui/types` (lib → app); callers
  * pass the full save object. Persistence only requires `version`.
  */
 
+import { withLocalSaveChecksum } from "./local-save-checksum.ts";
+
 export const LOCAL_SAVE_STORAGE_KEY = "farhorizon-save";
 export const IDB_DB_NAME = "farhorizon";
 export const IDB_STORE = "saves";
 export const IDB_MANUAL_SLOT = "manual";
+export const IDB_AUTO_SLOTS = ["auto-0", "auto-1", "auto-2"] as const;
+export const IDB_AUTO_RING_META = "auto-ring";
+
+export type AutoSaveSlotId = (typeof IDB_AUTO_SLOTS)[number];
+export type SaveSlotId = typeof IDB_MANUAL_SLOT | AutoSaveSlotId;
 
 const IDB_VERSION = 1;
 
 /** Structural minimum; full shape lives in `app/ui/types` as `LocalSave`. */
 export type LocalSavePayload = {
   version: number;
+  checksum?: string;
+  slotId?: string;
+  simulationSeconds?: number;
+  missionStarted?: boolean;
 };
 
-export type ManualSaveRecord<T extends LocalSavePayload = LocalSavePayload> = {
-  id: typeof IDB_MANUAL_SLOT;
+export type SaveRecord<T extends LocalSavePayload = LocalSavePayload> = {
+  id: string;
   save: T;
   updatedAtEpochMs: number;
+};
+
+/** @deprecated Prefer SaveRecord; kept for existing call-site clarity. */
+export type ManualSaveRecord<T extends LocalSavePayload = LocalSavePayload> =
+  SaveRecord<T> & { id: typeof IDB_MANUAL_SLOT };
+
+export type AutoRingMetaRecord = {
+  id: typeof IDB_AUTO_RING_META;
+  nextIndex: number;
+};
+
+export type SaveSlotListing = {
+  id: string;
+  updatedAtEpochMs: number;
+  simulationSeconds: number | null;
+  missionStarted: boolean | null;
 };
 
 export type IdbFactory = IDBFactory;
@@ -126,7 +153,29 @@ function withStore<T>(
   });
 }
 
-export async function putManualSave<T extends LocalSavePayload>(
+function isSaveSlotId(id: string): id is SaveSlotId {
+  return id === IDB_MANUAL_SLOT || (IDB_AUTO_SLOTS as readonly string[]).includes(id);
+}
+
+function toListing(record: SaveRecord): SaveSlotListing {
+  const sim = record.save.simulationSeconds;
+  return {
+    id: record.id,
+    updatedAtEpochMs: record.updatedAtEpochMs,
+    simulationSeconds:
+      typeof sim === "number" && Number.isFinite(sim) ? sim : null,
+    missionStarted:
+      typeof record.save.missionStarted === "boolean"
+        ? record.save.missionStarted
+        : null,
+  };
+}
+
+/**
+ * Seal checksum (+ optional slotId) and write one IndexedDB save slot.
+ */
+export async function putSave<T extends LocalSavePayload>(
+  slot: SaveSlotId,
   save: T,
   adapters?: LocalSavePersistAdapters,
 ): Promise<void> {
@@ -136,14 +185,160 @@ export async function putManualSave<T extends LocalSavePayload>(
       "IndexedDB is unavailable (SSR or unsupported environment).",
     );
   }
-  const record: ManualSaveRecord<T> = {
-    id: IDB_MANUAL_SLOT,
-    save,
+  const sealed = await withLocalSaveChecksum({
+    ...save,
+    slotId: slot,
+  } as T & { slotId: string });
+  const record: SaveRecord<typeof sealed> = {
+    id: slot,
+    save: sealed,
     updatedAtEpochMs: resolveNow(adapters),
   };
   await withStore(factory, "readwrite", async (store) => {
     await idbRequest(store.put(record));
   });
+}
+
+export async function getSave<T extends LocalSavePayload = LocalSavePayload>(
+  slot: SaveSlotId,
+  adapters?: LocalSavePersistAdapters,
+): Promise<T | null> {
+  const factory = resolveIdbFactory(adapters);
+  if (!factory) {
+    return null;
+  }
+  try {
+    const record = await withStore(factory, "readonly", async (store) => {
+      return idbRequest<SaveRecord<T> | undefined>(store.get(slot));
+    });
+    if (record?.save != null) {
+      return record.save;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/**
+ * List occupied save slots (manual + auto-*). Excludes ring meta.
+ */
+export async function listSlots(
+  adapters?: LocalSavePersistAdapters,
+): Promise<SaveSlotListing[]> {
+  const factory = resolveIdbFactory(adapters);
+  if (!factory) {
+    return [];
+  }
+  try {
+    const records = await withStore(factory, "readonly", async (store) => {
+      return idbRequest<unknown[]>(store.getAll());
+    });
+    const listings: SaveSlotListing[] = [];
+    for (const entry of records) {
+      if (
+        entry == null ||
+        typeof entry !== "object" ||
+        !("id" in entry) ||
+        typeof (entry as SaveRecord).id !== "string"
+      ) {
+        continue;
+      }
+      const record = entry as SaveRecord;
+      if (!isSaveSlotId(record.id) || record.save == null) {
+        continue;
+      }
+      listings.push(toListing(record));
+    }
+    listings.sort((a, b) => b.updatedAtEpochMs - a.updatedAtEpochMs);
+    return listings;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Write into the next auto-* ring slot (auto-0 → auto-1 → auto-2 → …).
+ */
+export async function putRotatedAutoSave<T extends LocalSavePayload>(
+  save: T,
+  adapters?: LocalSavePersistAdapters,
+): Promise<AutoSaveSlotId> {
+  const factory = resolveIdbFactory(adapters);
+  if (!factory) {
+    throw new Error(
+      "IndexedDB is unavailable (SSR or unsupported environment).",
+    );
+  }
+
+  // Read ring cursor first; seal checksum outside the write txn so the
+  // transaction cannot auto-commit while awaiting Web Crypto / hashing.
+  const index = await withStore(factory, "readonly", async (store) => {
+    const meta = await idbRequest<AutoRingMetaRecord | undefined>(
+      store.get(IDB_AUTO_RING_META),
+    );
+    if (
+      meta &&
+      typeof meta.nextIndex === "number" &&
+      Number.isInteger(meta.nextIndex) &&
+      meta.nextIndex >= 0
+    ) {
+      return meta.nextIndex % IDB_AUTO_SLOTS.length;
+    }
+    return 0;
+  });
+  const slot = IDB_AUTO_SLOTS[index]!;
+  const sealed = await withLocalSaveChecksum({
+    ...save,
+    slotId: slot,
+  } as T & { slotId: string });
+  const record: SaveRecord<typeof sealed> = {
+    id: slot,
+    save: sealed,
+    updatedAtEpochMs: resolveNow(adapters),
+  };
+  const ring: AutoRingMetaRecord = {
+    id: IDB_AUTO_RING_META,
+    nextIndex: (index + 1) % IDB_AUTO_SLOTS.length,
+  };
+  await withStore(factory, "readwrite", async (store) => {
+    await idbRequest(store.put(record));
+    await idbRequest(store.put(ring));
+  });
+  return slot;
+}
+
+/** Latest auto-* slot by updatedAtEpochMs, or null. */
+export async function getLatestAutoSave<
+  T extends LocalSavePayload = LocalSavePayload,
+>(adapters?: LocalSavePersistAdapters): Promise<{
+  slotId: AutoSaveSlotId;
+  save: T;
+  updatedAtEpochMs: number;
+} | null> {
+  const listings = await listSlots(adapters);
+  const latest = listings.find((entry) =>
+    (IDB_AUTO_SLOTS as readonly string[]).includes(entry.id),
+  );
+  if (!latest) {
+    return null;
+  }
+  const save = await getSave<T>(latest.id as AutoSaveSlotId, adapters);
+  if (!save) {
+    return null;
+  }
+  return {
+    slotId: latest.id as AutoSaveSlotId,
+    save,
+    updatedAtEpochMs: latest.updatedAtEpochMs,
+  };
+}
+
+export async function putManualSave<T extends LocalSavePayload>(
+  save: T,
+  adapters?: LocalSavePersistAdapters,
+): Promise<void> {
+  await putSave(IDB_MANUAL_SLOT, save, adapters);
 }
 
 function readLocalStorageSave<T extends LocalSavePayload>(
@@ -172,23 +367,12 @@ function readLocalStorageSave<T extends LocalSavePayload>(
   }
 }
 
-export async function getManualSave<T extends LocalSavePayload = LocalSavePayload>(
-  adapters?: LocalSavePersistAdapters,
-): Promise<T | null> {
-  const factory = resolveIdbFactory(adapters);
-  if (factory) {
-    try {
-      const record = await withStore(factory, "readonly", async (store) => {
-        return idbRequest<ManualSaveRecord<T> | undefined>(
-          store.get(IDB_MANUAL_SLOT),
-        );
-      });
-      if (record?.save != null) {
-        return record.save;
-      }
-    } catch {
-      // Fall through to localStorage fallback.
-    }
+export async function getManualSave<
+  T extends LocalSavePayload = LocalSavePayload,
+>(adapters?: LocalSavePersistAdapters): Promise<T | null> {
+  const fromIdb = await getSave<T>(IDB_MANUAL_SLOT, adapters);
+  if (fromIdb != null) {
+    return fromIdb;
   }
   return readLocalStorageSave<T>(adapters);
 }
@@ -196,22 +380,7 @@ export async function getManualSave<T extends LocalSavePayload = LocalSavePayloa
 export async function hasManualSave(
   adapters?: LocalSavePersistAdapters,
 ): Promise<boolean> {
-  const factory = resolveIdbFactory(adapters);
-  if (factory) {
-    try {
-      const record = await withStore(factory, "readonly", async (store) => {
-        return idbRequest<ManualSaveRecord | undefined>(
-          store.get(IDB_MANUAL_SLOT),
-        );
-      });
-      if (record != null && record.save != null) {
-        return true;
-      }
-    } catch {
-      // Fall through to localStorage fallback.
-    }
-  }
-  return readLocalStorageSave(adapters) != null;
+  return (await getManualSave(adapters)) != null;
 }
 
 /**
@@ -230,9 +399,7 @@ export async function migrateLocalStorageSaveOnce(
 
   try {
     const record = await withStore(factory, "readonly", async (store) => {
-      return idbRequest<ManualSaveRecord | undefined>(
-        store.get(IDB_MANUAL_SLOT),
-      );
+      return idbRequest<SaveRecord | undefined>(store.get(IDB_MANUAL_SLOT));
     });
     if (record != null && record.save != null) {
       return "skipped";
@@ -275,6 +442,7 @@ export async function migrateLocalStorageSaveOnce(
  * Write to localStorage when IndexedDB put fails (optional fallback).
  * Clears the IDB manual slot (best-effort) so later get/has prefer this
  * fresher LS copy instead of a stale IDB record.
+ * Seals checksum before writing.
  */
 export async function putManualSaveToLocalStorageFallback<
   T extends LocalSavePayload,
@@ -283,7 +451,11 @@ export async function putManualSaveToLocalStorageFallback<
   if (!storage) {
     throw new Error("localStorage is unavailable.");
   }
-  storage.setItem(LOCAL_SAVE_STORAGE_KEY, JSON.stringify(save));
+  const sealed = await withLocalSaveChecksum({
+    ...save,
+    slotId: IDB_MANUAL_SLOT,
+  } as T & { slotId: string });
+  storage.setItem(LOCAL_SAVE_STORAGE_KEY, JSON.stringify(sealed));
 
   const factory = resolveIdbFactory(adapters);
   if (!factory) {
@@ -307,8 +479,5 @@ export function isQuotaExceededError(error: unknown): boolean {
   if (name === "QuotaExceededError" || name === "NS_ERROR_DOM_QUOTA_REACHED") {
     return true;
   }
-  return (
-    "code" in error &&
-    (error.code === 22 || error.code === 1014)
-  );
+  return "code" in error && (error.code === 22 || error.code === 1014);
 }

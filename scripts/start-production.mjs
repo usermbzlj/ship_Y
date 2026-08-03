@@ -4,8 +4,10 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "../node_modules/vinext/dist/cli-args.js";
 import { loadDotenv } from "../node_modules/vinext/dist/config/dotenv.js";
 import { StaticFileCache } from "../node_modules/vinext/dist/server/static-file-cache.js";
+import { installLocalLogCapture } from "./local-log.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+installLocalLogCapture({ root, mode: "production" });
 const args = parseArgs(process.argv.slice(2));
 
 loadDotenv({ root, mode: "production" });
@@ -26,7 +28,9 @@ if (path.sep === "\\") {
 }
 
 const port = args.port ?? Number.parseInt(process.env.PORT ?? "3000", 10);
-const host = args.hostname ?? "0.0.0.0";
+// Default to loopback so the production UI origin matches LLM mutation trust
+// (assertTrustedLocalRequest). Opt into LAN with --hostname=0.0.0.0 / HOST=.
+const host = args.hostname ?? process.env.HOST ?? "127.0.0.1";
 if (!Number.isInteger(port) || port < 0 || port > 65_535) {
   throw new Error(`Invalid production port: ${String(port)}`);
 }

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
+process.env.LOG_LEVEL = "silent";
+
 const secretNames = [
   "SHIP_CAPTAIN_LLM_API_KEY",
   "SHIP_NAVIGATION_LLM_API_KEY",
@@ -174,8 +176,14 @@ function passengerPollRequest(overrides = {}) {
 }
 
 test("GET /api/llm/status exposes all 40 fixed slots without prompts or secret names", async () => {
-  const response = await request("/api/llm/status");
+  const response = await request("/api/llm/status", {
+    headers: { "x-request-id": "route-test-request-0001" },
+  });
   assert.equal(response.status, 200);
+  assert.equal(
+    response.headers.get("x-request-id"),
+    "route-test-request-0001",
+  );
   const body = await response.json();
 
   assert.equal(body.llm.ready, false);
@@ -210,10 +218,14 @@ test("POST /api/llm/invoke validates HTTP and invocation input before any provid
 
   const wrongType = await request("/api/llm/invoke", {
     method: "POST",
-    headers: { "content-type": "text/plain" },
+    headers: {
+      "content-type": "text/plain",
+      "x-request-id": "invalid id with spaces",
+    },
     body: "{}",
   });
   assert.equal(wrongType.status, 415);
+  assert.match(wrongType.headers.get("x-request-id"), /^req-/);
 
   const creationAttempt = await request("/api/llm/invoke", {
     method: "POST",

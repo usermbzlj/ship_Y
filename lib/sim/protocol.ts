@@ -108,6 +108,25 @@ import type {
   HeatExchangerId,
   RadiatorId,
 } from "./cooling";
+import type { CaptainJournalSnapshot } from "../llm/captain-journal";
+import type { CaptainWatchSnapshot } from "../llm/captain-watch";
+import type { DepartmentInboxSnapshot } from "../llm/department-inbox";
+import type { DepartmentStandingSnapshot } from "../llm/department-standing";
+import type { PassengerSocietySnapshot } from "../llm/passenger-society";
+
+export type LlmOrchestrationPending = {
+  kind: "captain-blocking";
+  phase: "awaiting-http" | "applying-tools" | "done";
+  callId: string;
+  triggerKey: string;
+  observationRevision: number;
+  frozenAtSimulationSeconds: number;
+};
+
+export type LlmOrchestrationState = {
+  pending: null | LlmOrchestrationPending;
+  acceptedCallIds: string[]; // ring max 32
+};
 
 export interface MissionInitialization {
   origin: string;
@@ -561,6 +580,47 @@ export type SimulationWorkerCommand =
   | {
       type: "inspect";
       requestId: string;
+    }
+  | {
+      type: "llm-effect-accept";
+      requestId: string;
+      callId: string;
+      observationRevision: number;
+      result: {
+        toolCalls?: unknown[];
+        [key: string]: unknown;
+      };
+    }
+  | {
+      type: "llm-effect-fail";
+      requestId: string;
+      callId: string;
+      observationRevision: number;
+      reason: string;
+      retryable: boolean;
+    }
+  | {
+      type: "llm-effect-finish";
+      requestId: string;
+      callId: string;
+      advancesRoutineSchedule: boolean;
+      nextCaptainRoutineAtSimulationSeconds?: number | null;
+      captainJournal?: CaptainJournalSnapshot;
+      captainWatch?: CaptainWatchSnapshot;
+      departmentStanding?: DepartmentStandingSnapshot;
+      passengerSociety?: PassengerSocietySnapshot;
+      departmentInbox?: DepartmentInboxSnapshot;
+    }
+  | {
+      type: "set-runtime-sidecars";
+      requestId: string;
+      captainJournal?: CaptainJournalSnapshot;
+      captainWatch?: CaptainWatchSnapshot;
+      departmentStanding?: DepartmentStandingSnapshot;
+      passengerSociety?: PassengerSocietySnapshot;
+      departmentInbox?: DepartmentInboxSnapshot;
+      /** Bounded awake-passenger stress nudges from rumor morale (0..cap). */
+      zoneStressDeltas?: Array<{ zoneId: string; stressDelta: number }>;
     };
 
 export interface SimulationWorkerTimeControlTelemetry {
@@ -621,6 +681,22 @@ export interface SimulationWorkerState {
   proceduralEvents: ProceduralWorldEvent[];
   survival: SimulationWorkerSurvivalTelemetry;
   hullConsequence: HullConsequenceTelemetry;
+  /** UI waiting-tone summary; null pending means no Worker-owned LLM freeze. */
+  llmOrchestration?: {
+    pending: null | Pick<
+      LlmOrchestrationPending,
+      | "kind"
+      | "phase"
+      | "callId"
+      | "triggerKey"
+      | "observationRevision"
+      | "frozenAtSimulationSeconds"
+    >;
+  };
+  /** Runtime-owned passenger society mirror (v20+); UI may also keep a React copy. */
+  passengerSociety?: PassengerSocietySnapshot;
+  /** Captain→department inbox mirror (v21+); UI may also keep a React copy. */
+  departmentInbox?: DepartmentInboxSnapshot;
 }
 
 export interface MaintenanceTelemetry {
@@ -728,7 +804,7 @@ export interface PassengerEnvironmentalExposureState {
 }
 
 export interface RuntimeSimulationSnapshot {
-  snapshotVersion: 16 | 17 | 18;
+  snapshotVersion: 16 | 17 | 18 | 19 | 20 | 21;
   highestDirective: string;
   engine: SimulationSnapshot;
   passengers: PassengerSimulationSnapshot;
@@ -748,6 +824,16 @@ export interface RuntimeSimulationSnapshot {
   survival: SurvivalSnapshot;
   /** Present on snapshotVersion >= 18; older saves restore as empty registry. */
   hullConsequence?: HullConsequenceSnapshot;
+  /** Present on snapshotVersion >= 19; older saves restore empty defaults. */
+  llmOrchestration?: LlmOrchestrationState;
+  nextCaptainRoutineAtSimulationSeconds?: number | null;
+  captainJournal?: CaptainJournalSnapshot;
+  captainWatch?: CaptainWatchSnapshot;
+  departmentStanding?: DepartmentStandingSnapshot;
+  /** Present on snapshotVersion >= 20; older saves restore empty society. */
+  passengerSociety?: PassengerSocietySnapshot;
+  /** Present on snapshotVersion >= 21; older saves restore empty inbox. */
+  departmentInbox?: DepartmentInboxSnapshot;
 }
 
 export interface RotationSensorTelemetry {
@@ -1076,4 +1162,28 @@ export type SimulationWorkerEvent =
       type: "error";
       requestId: string;
       message: string;
+    }
+  | {
+      type: "llm-effect-request";
+      requestId: string;
+      payload: {
+        callId: string;
+        kind: "captain-blocking";
+        triggerKey: string;
+        observationRevision: number;
+        frozenAtSimulationSeconds: number;
+        agentId: "captain";
+      };
+    }
+  | {
+      type: "llm-effect-aborted";
+      requestId: string;
+      payload: {
+        callId: string;
+        kind: "captain-blocking";
+        triggerKey: string;
+        observationRevision: number;
+        frozenAtSimulationSeconds: number;
+        reason: "restored-during-tool-apply";
+      };
     };

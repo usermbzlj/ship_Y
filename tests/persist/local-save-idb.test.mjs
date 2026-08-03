@@ -2,17 +2,24 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  IDB_AUTO_SLOTS,
   IDB_DB_NAME,
   IDB_MANUAL_SLOT,
   IDB_STORE,
   LOCAL_SAVE_STORAGE_KEY,
+  getLatestAutoSave,
   getManualSave,
+  getSave,
   hasManualSave,
   isQuotaExceededError,
+  listSlots,
   migrateLocalStorageSaveOnce,
   putManualSave,
   putManualSaveToLocalStorageFallback,
+  putRotatedAutoSave,
+  putSave,
 } from "../../lib/persist/local-save-idb.ts";
+import { verifyLocalSaveChecksum } from "../../lib/persist/local-save-checksum.ts";
 import {
   createMemoryIdbFactory,
   createMemoryLocalStorage,
@@ -20,6 +27,16 @@ import {
 } from "./idb-memory.mjs";
 
 const sampleSave = sampleLocalSave;
+
+function keyFields(save) {
+  return {
+    version: save.version,
+    origin: save.origin,
+    destination: save.destination,
+    directive: save.directive,
+    simulationSeconds: save.simulationSeconds,
+  };
+}
 
 test("put/get/has manual save via injectable idb", async () => {
   const idbFactory = createMemoryIdbFactory();
@@ -35,7 +52,9 @@ test("put/get/has manual save via injectable idb", async () => {
   await putManualSave(sampleSave, adapters);
   assert.equal(await hasManualSave(adapters), true);
   const loaded = await getManualSave(adapters);
-  assert.deepEqual(loaded, sampleSave);
+  assert.deepEqual(keyFields(loaded), keyFields(sampleSave));
+  assert.equal(loaded.slotId, IDB_MANUAL_SLOT);
+  assert.equal(await verifyLocalSaveChecksum(loaded), true);
 });
 
 test("SSR / missing indexedDB: get/has null-safe, put throws", async () => {
@@ -56,7 +75,7 @@ test("migrateLocalStorageSaveOnce migrates then is idempotent", async () => {
 
   assert.equal(await migrateLocalStorageSaveOnce(adapters), "migrated");
   assert.equal(localStorage.getItem(LOCAL_SAVE_STORAGE_KEY), null);
-  assert.deepEqual(await getManualSave(adapters), sampleSave);
+  assert.deepEqual(keyFields(await getManualSave(adapters)), keyFields(sampleSave));
 
   assert.equal(await migrateLocalStorageSaveOnce(adapters), "skipped");
   // Re-seed LS; IDB already has slot → still skipped, LS untouched
@@ -103,17 +122,16 @@ test("migrate skips when IDB unavailable", async () => {
 test("localStorage fallback helpers and get/has when IDB empty", async () => {
   const localStorage = createMemoryLocalStorage();
   await putManualSaveToLocalStorageFallback(sampleSave, { localStorage });
-  assert.equal(
-    localStorage.getItem(LOCAL_SAVE_STORAGE_KEY),
-    JSON.stringify(sampleSave),
-  );
+  const stored = JSON.parse(localStorage.getItem(LOCAL_SAVE_STORAGE_KEY));
+  assert.deepEqual(keyFields(stored), keyFields(sampleSave));
+  assert.equal(await verifyLocalSaveChecksum(stored), true);
 
   const adapters = {
     idbFactory: createMemoryIdbFactory(),
     localStorage,
   };
   assert.equal(await hasManualSave(adapters), true);
-  assert.deepEqual(await getManualSave(adapters), sampleSave);
+  assert.deepEqual(keyFields(await getManualSave(adapters)), keyFields(sampleSave));
 });
 
 test("LS fallback after IDB put failure clears stale IDB so get returns newer LS", async () => {
@@ -127,7 +145,10 @@ test("LS fallback after IDB put failure clears stale IDB so get returns newer LS
     localStorage,
     now: () => 1_000,
   });
-  assert.deepEqual(await getManualSave({ idbFactory, localStorage }), older);
+  assert.deepEqual(
+    keyFields(await getManualSave({ idbFactory, localStorage })),
+    keyFields(older),
+  );
 
   await putManualSaveToLocalStorageFallback(newer, {
     idbFactory,
@@ -135,7 +156,10 @@ test("LS fallback after IDB put failure clears stale IDB so get returns newer LS
     now: () => 2_000,
   });
 
-  assert.deepEqual(await getManualSave({ idbFactory, localStorage }), newer);
+  assert.deepEqual(
+    keyFields(await getManualSave({ idbFactory, localStorage })),
+    keyFields(newer),
+  );
   assert.equal(await hasManualSave({ idbFactory, localStorage }), true);
   // Slot cleared → migrate can recover LS into IDB on a later load
   assert.equal(
@@ -147,7 +171,54 @@ test("LS fallback after IDB put failure clears stale IDB so get returns newer LS
     "migrated",
   );
   assert.equal(localStorage.getItem(LOCAL_SAVE_STORAGE_KEY), null);
-  assert.deepEqual(await getManualSave({ idbFactory, localStorage }), newer);
+  assert.deepEqual(
+    keyFields(await getManualSave({ idbFactory, localStorage })),
+    keyFields(newer),
+  );
+});
+
+test("putSave/getSave/listSlots and auto ring rotation", async () => {
+  const adapters = {
+    idbFactory: createMemoryIdbFactory(),
+    localStorage: null,
+    now: () => 5_000,
+  };
+
+  await putSave(IDB_MANUAL_SLOT, sampleSave, adapters);
+  const slot0 = await putRotatedAutoSave(
+    { ...sampleSave, simulationSeconds: 100 },
+    { ...adapters, now: () => 6_000 },
+  );
+  const slot1 = await putRotatedAutoSave(
+    { ...sampleSave, simulationSeconds: 200 },
+    { ...adapters, now: () => 7_000 },
+  );
+  const slot2 = await putRotatedAutoSave(
+    { ...sampleSave, simulationSeconds: 300 },
+    { ...adapters, now: () => 8_000 },
+  );
+  const slot3 = await putRotatedAutoSave(
+    { ...sampleSave, simulationSeconds: 400 },
+    { ...adapters, now: () => 9_000 },
+  );
+
+  assert.deepEqual(
+    [slot0, slot1, slot2, slot3],
+    ["auto-0", "auto-1", "auto-2", "auto-0"],
+  );
+
+  const listings = await listSlots(adapters);
+  assert.equal(listings.length, 4);
+  assert.ok(listings.every((entry) => entry.id === IDB_MANUAL_SLOT || IDB_AUTO_SLOTS.includes(entry.id)));
+
+  const latest = await getLatestAutoSave(adapters);
+  assert.ok(latest);
+  assert.equal(latest.slotId, "auto-0");
+  assert.equal(latest.save.simulationSeconds, 400);
+  assert.equal(await verifyLocalSaveChecksum(latest.save), true);
+
+  const overwritten = await getSave("auto-0", adapters);
+  assert.equal(overwritten.simulationSeconds, 400);
 });
 
 test("isQuotaExceededError recognizes quota names", () => {
@@ -165,4 +236,5 @@ test("exported constants stay stable for migration", () => {
   assert.equal(IDB_DB_NAME, "farhorizon");
   assert.equal(IDB_STORE, "saves");
   assert.equal(IDB_MANUAL_SLOT, "manual");
+  assert.deepEqual([...IDB_AUTO_SLOTS], ["auto-0", "auto-1", "auto-2"]);
 });

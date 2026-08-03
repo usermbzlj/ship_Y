@@ -8,16 +8,23 @@ import {
   PASSENGER_RUMOR_DECAY_SECONDS,
   PASSENGER_RUMOR_MAX_CHARACTERS,
   PASSENGER_RUMOR_MAX_RECORDS,
+  PASSENGER_RUMOR_MORALE_STRESS_CAP,
+  PASSENGER_RUMOR_SPREAD_INTERVAL_SECONDS,
   PASSENGER_SOCIETY_SNAPSHOT_VERSION,
   SHARE_RUMOR_TOOL_INPUT_SCHEMA,
+  computeRumorMoraleStressDeltas,
   createPassengerSocietySnapshot,
+  detectHostileRumorTags,
   markRumorsHeard,
   parseFileGrievanceToolCall,
   parseShareRumorToolCall,
   pruneStaleRumors,
   recordPassengerRumor,
   renderPassengerSocietyPromptBlock,
+  ringAdjacentZoneIds,
   selectOverheardRumors,
+  spreadRumorsToAdjacentZones,
+  tickPassengerSociety,
   validatePassengerSocietySnapshot,
 } from "../../lib/llm/passenger-society.ts";
 
@@ -424,4 +431,98 @@ test("tool schema 冻结且拒绝额外字段", () => {
     String(SHARE_RUMOR_TOOL_INPUT_SCHEMA.properties.text.description),
     /可能被别人当真/,
   );
+});
+
+test("validate 将 v1 快照迁移为 v2", () => {
+  const v1 = {
+    snapshotVersion: 1,
+    nextOrdinal: 2,
+    rumors: [
+      {
+        rumorId: "rumor-1",
+        ordinal: 1,
+        originPassengerId: "p-1",
+        originDisplayName: "甲",
+        createdAtSimulationSeconds: 10,
+        zoneId: "A-01",
+        text: "听说缺粮了要饿死",
+        hearCount: 2,
+      },
+    ],
+  };
+  const migrated = validatePassengerSocietySnapshot(v1);
+  assert.ok(migrated);
+  assert.equal(migrated.snapshotVersion, PASSENGER_SOCIETY_SNAPSHOT_VERSION);
+  assert.equal(migrated.lastSpreadSimSeconds, 0);
+  assert.equal(migrated.lastMoraleSimSeconds, 0);
+  assert.equal(migrated.rumors[0].spreadGeneration, 0);
+  assert.equal(migrated.rumors[0].lastZoneHopSimSeconds, 10);
+  assert.deepEqual(migrated.rumors[0].tags, ["hostile"]);
+});
+
+test("邻区扩散：足够节拍后传言可出现在相邻区带", () => {
+  let snapshot = createPassengerSocietySnapshot();
+  snapshot = record(snapshot, {
+    zoneId: "A-01",
+    text: "冷却好像出问题了",
+    simulationSeconds: 0,
+  }).snapshot;
+
+  const neighbors = new Set(ringAdjacentZoneIds("A-01"));
+  let hopped = false;
+  for (let tick = 1; tick <= 2_000; tick += 1) {
+    const simulationSeconds = tick * PASSENGER_RUMOR_SPREAD_INTERVAL_SECONDS;
+    snapshot = spreadRumorsToAdjacentZones(snapshot, {
+      simulationSeconds,
+      adjacentZones: ringAdjacentZoneIds,
+    });
+    if (snapshot.rumors.some((rumor) => neighbors.has(rumor.zoneId))) {
+      hopped = true;
+      break;
+    }
+  }
+  assert.equal(hopped, true);
+  const copies = snapshot.rumors.filter((rumor) => neighbors.has(rumor.zoneId));
+  assert.ok(copies.length >= 1);
+  assert.ok(copies.every((rumor) => rumor.spreadGeneration === 1));
+  assert.ok(copies.every((rumor) => rumor.hearCount === 0));
+});
+
+test("士气压力增量有界且确定性", () => {
+  let snapshot = createPassengerSocietySnapshot();
+  const recorded = record(snapshot, {
+    zoneId: "A-07",
+    text: "有人要叛变了，大家恐慌",
+    simulationSeconds: 0,
+  });
+  assert.deepEqual(detectHostileRumorTags(recorded.rumor.text), ["hostile"]);
+  snapshot = recorded.snapshot;
+  for (let index = 0; index < 40; index += 1) {
+    snapshot = markRumorsHeard(snapshot, [recorded.rumor.rumorId]);
+  }
+
+  const first = computeRumorMoraleStressDeltas(snapshot, {
+    simulationSeconds: PASSENGER_RUMOR_SPREAD_INTERVAL_SECONDS,
+  });
+  const firstAgain = computeRumorMoraleStressDeltas(snapshot, {
+    simulationSeconds: PASSENGER_RUMOR_SPREAD_INTERVAL_SECONDS,
+  });
+  assert.deepEqual(first.zoneStressDeltas, firstAgain.zoneStressDeltas);
+  assert.equal(first.zoneStressDeltas.length, 1);
+  assert.equal(first.zoneStressDeltas[0].zoneId, "A-07");
+  assert.ok(first.zoneStressDeltas[0].stressDelta > 0);
+  assert.ok(
+    first.zoneStressDeltas[0].stressDelta <= PASSENGER_RUMOR_MORALE_STRESS_CAP,
+  );
+
+  const second = computeRumorMoraleStressDeltas(first.snapshot, {
+    simulationSeconds: PASSENGER_RUMOR_SPREAD_INTERVAL_SECONDS,
+  });
+  assert.equal(second.zoneStressDeltas.length, 0);
+
+  const tick = tickPassengerSociety(createPassengerSocietySnapshot(), {
+    simulationSeconds: PASSENGER_RUMOR_SPREAD_INTERVAL_SECONDS,
+    adjacentZones: ringAdjacentZoneIds,
+  });
+  assert.deepEqual(tick.zoneStressDeltas, []);
 });

@@ -642,6 +642,55 @@ test("aggregate coupling helpers preserve distribution and exact global totals",
   );
 });
 
+test("AHU condensate removes vapor above RH setpoint and scales with airflow", () => {
+  const humidSnapshot = withoutOccupants(
+    new CompartmentAtmosphereNetwork({ seed: "ahu-condensate" }),
+  ).snapshot();
+  for (const zone of humidSnapshot.zones) {
+    zone.gasesKg.waterVapor *= 2.5;
+  }
+  const vaporTotal = (network) =>
+    network
+      .listZones()
+      .reduce((total, zone) => total + zone.gasesKg.waterVapor, 0);
+
+  const nominal = CompartmentAtmosphereNetwork.restore(humidSnapshot);
+  const vaporBefore = vaporTotal(nominal);
+  const condensed = nominal.condenseRecoverableWaterVapor(10);
+  const vaporRemoved = vaporBefore - vaporTotal(nominal);
+  assert.ok(condensed.a > 0, "A-ring condensate");
+  assert.ok(condensed.b > 0, "B-ring condensate");
+  assertClose(
+    condensed.a + condensed.b,
+    vaporRemoved,
+    1e-9,
+    "condensate mass leaves atmosphere",
+  );
+  assertClose(condensed.a + condensed.b, 0.2, 1e-10, "full-flow capacity");
+
+  const halfFlow = CompartmentAtmosphereNetwork.restore(humidSnapshot);
+  halfFlow.configureAirHandler("air-handler-a", {
+    commandedFlowFraction: 0.5,
+  });
+  halfFlow.configureAirHandler("air-handler-b", {
+    commandedFlowFraction: 0.5,
+  });
+  const half = halfFlow.condenseRecoverableWaterVapor(10);
+  assertClose(half.a + half.b, 0.1, 1e-10, "half-flow capacity");
+
+  const stopped = CompartmentAtmosphereNetwork.restore(humidSnapshot);
+  stopped.configureAirHandler("air-handler-a", {
+    commandedFlowFraction: 0,
+  });
+  stopped.configureAirHandler("air-handler-b", {
+    condition: "stuck-off",
+  });
+  const idle = stopped.condenseRecoverableWaterVapor(10);
+  assert.equal(idle.a, 0);
+  assert.equal(idle.b, 0);
+  assertClose(vaporTotal(stopped), vaporBefore, 1e-12, "AHU-off holds vapor");
+});
+
 test("breaches use accelerated venting without reducing time scale while other transients force fine fidelity", () => {
   const pressureSnapshot = withoutOccupants(
     new CompartmentAtmosphereNetwork({ seed: "pressure-fallback" }),

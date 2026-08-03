@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CompartmentAtmosphereNetwork,
+} from "../../lib/sim/compartments.ts";
+import {
   WATER_RECOVERY_SNAPSHOT_VERSION,
   WaterRecoveryNetwork,
 } from "../../lib/sim/water.ts";
@@ -130,6 +133,60 @@ test("metabolic transfer and condensate return are explicit cross-domain flows",
       3,
     1e-9,
     "net inventory transfer",
+  );
+});
+
+test("compartment vapor condensation closes into wastewater condensate ledger", () => {
+  const atmosphereSnapshot = new CompartmentAtmosphereNetwork({
+    seed: "vapor-to-wastewater",
+  }).snapshot();
+  for (const zone of atmosphereSnapshot.zones) {
+    zone.awakeOccupants = 0;
+    zone.gasesKg.waterVapor *= 2.5;
+  }
+  const atmosphere = CompartmentAtmosphereNetwork.restore(atmosphereSnapshot);
+  const water = new WaterRecoveryNetwork();
+  const vaporBefore = atmosphere
+    .listZones()
+    .reduce((total, zone) => total + zone.gasesKg.waterVapor, 0);
+  const waterBefore = water.getSummary();
+
+  const condensed = atmosphere.condenseRecoverableWaterVapor(30);
+  water.collectCondensate(condensed);
+
+  const vaporAfter = atmosphere
+    .listZones()
+    .reduce((total, zone) => total + zone.gasesKg.waterVapor, 0);
+  const waterAfter = water.getSummary();
+  const condensedTotal = condensed.a + condensed.b;
+
+  assert.ok(condensedTotal > 0, "humid zones yield condensate");
+  assertClose(
+    vaporBefore - vaporAfter,
+    condensedTotal,
+    1e-9,
+    "atmosphere vapor debit",
+  );
+  assertClose(
+    waterAfter.wastewaterKg - waterBefore.wastewaterKg,
+    condensedTotal,
+    1e-9,
+    "wastewater credit",
+  );
+  assert.equal(water.snapshot().ledger.condensateInflowKg, condensedTotal);
+  assertClose(waterAfter.massClosureErrorKg, 0, 1e-9, "water mass closure");
+  assertClose(
+    waterAfter.potableKg +
+      waterAfter.wastewaterKg +
+      waterAfter.reserveIceKg +
+      waterAfter.brineWasteKg,
+    waterBefore.potableKg +
+      waterBefore.wastewaterKg +
+      waterBefore.reserveIceKg +
+      waterBefore.brineWasteKg +
+      condensedTotal,
+    1e-9,
+    "inventory gains only recovered condensate",
   );
 });
 

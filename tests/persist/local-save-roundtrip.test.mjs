@@ -35,6 +35,8 @@ test("putManualSave → getManualSave deep-equals key LocalSave fields", async (
   assert.ok(loaded);
   assert.deepEqual(keyFields(loaded), keyFields(sampleLocalSave));
   assert.equal(loaded.version, 21);
+  assert.equal(typeof loaded.checksum, "string");
+  assert.equal(loaded.slotId, "manual");
 });
 
 test("migrateLocalStorageSaveOnce: LS JSON → empty IDB → IDB load, LS cleared", async () => {

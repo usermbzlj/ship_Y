@@ -21,6 +21,14 @@ import type {
   DissentResolution,
   DissentSeverity,
 } from "@/lib/llm/department-standing";
+import {
+  DEPARTMENT_INBOX_UI_LINES,
+  recentMessagesForDepartment,
+  totalUnreadCount,
+  unreadCountForDepartment,
+  type DepartmentInboxSnapshot,
+} from "@/lib/llm/department-inbox";
+import { SHIP_DEPARTMENT_IDS } from "@/lib/sim/captain-operations";
 import type { CaptainWatchCondition } from "@/lib/llm/captain-watch";
 import type { DecisionTheaterState } from "@/lib/llm/decision-theater";
 import { WATCH_METRICS } from "@/lib/llm/captain-watch";
@@ -533,7 +541,23 @@ function JournalEntryCard({ entry }: { entry: CaptainJournalEntry }) {
   );
 }
 
-function DissentRecordCard({ record }: { record: DepartmentDissentRecord }) {
+function DissentRecordCard({
+  record,
+  onResolve,
+}: {
+  record: DepartmentDissentRecord;
+  onResolve?: (recordId: string, resolution: DissentResolution) => void;
+}) {
+  const claimLabel =
+    record.claimKind === "hull_sealed"
+      ? "主张·封口"
+      : record.claimKind === "pressure_recovered"
+        ? "主张·复压"
+        : record.claimKind === "jump_completed"
+          ? "主张·跃迁"
+          : record.claimKind === "power_nominal"
+            ? "主张·电力"
+            : null;
   return (
     <article
       className={`dissent-record severity-${record.severity} resolution-${record.resolution}`}
@@ -546,11 +570,39 @@ function DissentRecordCard({ record }: { record: DepartmentDissentRecord }) {
         <span className={`dissent-resolution resolution-${record.resolution}`}>
           {dissentResolutionLabel(record.resolution)}
         </span>
+        {claimLabel ? (
+          <span className="dissent-claim">{claimLabel}</span>
+        ) : null}
         <span className="dissent-time">
           {formatDuration(record.simulationSeconds)}
         </span>
       </div>
       <p className="dissent-summary">{record.summary}</p>
+      {record.resolution === "open" && onResolve ? (
+        <div className="dissent-resolve-actions" role="group" aria-label="裁决异议">
+          <button
+            type="button"
+            className="dissent-resolve-btn"
+            onClick={() => onResolve(record.recordId, "overridden")}
+          >
+            驳回
+          </button>
+          <button
+            type="button"
+            className="dissent-resolve-btn"
+            onClick={() => onResolve(record.recordId, "vindicated")}
+          >
+            证明正确
+          </button>
+          <button
+            type="button"
+            className="dissent-resolve-btn"
+            onClick={() => onResolve(record.recordId, "moot")}
+          >
+            失效
+          </button>
+        </div>
+      ) : null}
     </article>
   );
 }
@@ -610,6 +662,8 @@ export function AiView({
   decisionTheater,
   captainJournal,
   departmentStanding,
+  departmentInbox,
+  onResolveDepartmentDissent,
   captainWatch,
   missionStarted,
 }: {
@@ -620,6 +674,11 @@ export function AiView({
   decisionTheater: DecisionTheaterState;
   captainJournal: CaptainJournalSnapshot;
   departmentStanding: DepartmentStandingSnapshot;
+  departmentInbox: DepartmentInboxSnapshot;
+  onResolveDepartmentDissent?: (
+    recordId: string,
+    resolution: DissentResolution,
+  ) => void;
   captainWatch: CaptainWatchSnapshot;
   /** 空态文案要据此区分「还没签发」和「已签发但舰长确实还没产出」。 */
   missionStarted: boolean;
@@ -647,6 +706,7 @@ export function AiView({
   const activeStandings = departmentStanding.standings.filter(
     standingHasActivity,
   );
+  const inboxUnreadTotal = totalUnreadCount(departmentInbox);
   const armedWatches = captainWatch.conditions.filter(
     (condition) => condition.armed,
   );
@@ -970,9 +1030,64 @@ export function AiView({
             </div>
           ) : (
             dissentRecords.map((record) => (
-              <DissentRecordCard key={record.recordId} record={record} />
+              <DissentRecordCard
+                key={record.recordId}
+                record={record}
+                onResolve={onResolveDepartmentDissent}
+              />
             ))
           )}
+        </div>
+      </div>
+
+      <div className="panel department-inbox-panel">
+        <div className="panel-heading compact">
+          <div>
+            <span className="eyebrow">DEPARTMENT INBOX</span>
+            <h2>部门收件箱</h2>
+          </div>
+          <span className="live-mark">未读 {inboxUnreadTotal}</span>
+        </div>
+        <div className="department-inbox-stream">
+          {SHIP_DEPARTMENT_IDS.map((departmentId) => {
+            const lines = recentMessagesForDepartment(
+              departmentInbox,
+              departmentId,
+              DEPARTMENT_INBOX_UI_LINES,
+            );
+            const unread = unreadCountForDepartment(
+              departmentInbox,
+              departmentId,
+            );
+            return (
+              <div key={departmentId} className="department-inbox-row">
+                <div className="department-inbox-row-head">
+                  <strong>{departmentRoleLabel(departmentId)}</strong>
+                  <span>
+                    {unread > 0 ? `未读 ${unread}` : lines.length > 0 ? "已读" : "空"}
+                  </span>
+                </div>
+                {lines.length === 0 ? (
+                  <p className="department-inbox-empty">
+                    {missionStarted
+                      ? "尚无舰长简报。舰长调用 consult_departments 后才会写入。"
+                      : "等待签发 · 咨询部门后才会出现舰长简报。"}
+                  </p>
+                ) : (
+                  <ul>
+                    {lines.map((message) => (
+                      <li key={message.messageId}>
+                        <span className={message.read ? "inbox-read" : "inbox-unread"}>
+                          {message.read ? "已读" : "未读"}
+                        </span>
+                        {message.body}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
 

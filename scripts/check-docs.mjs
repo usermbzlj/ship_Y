@@ -76,6 +76,12 @@ const runtimeVersionMatch = readFileSync(
 ).match(/snapshotVersion:\s*(?:\d+\s*\|\s*)*(\d+);/u);
 const runtimeVersion = runtimeVersionMatch?.[1] ?? null;
 
+const localSaveVersionMatch = readFileSync(
+  resolve(root, "app/ui/types.ts"),
+  "utf8",
+).match(/version:\s*(\d+);/u);
+const localSaveVersion = localSaveVersionMatch?.[1] ?? null;
+
 for (const [path, pattern, label] of versionChecks) {
   const match = readFileSync(path, "utf8").match(pattern);
   if (!match) {
@@ -85,15 +91,26 @@ for (const [path, pattern, label] of versionChecks) {
   }
 }
 
+const currentStateDocs = [
+  resolve(root, "docs/PROJECT_STATUS.md"),
+  resolve(root, "docs/PRODUCT_SPEC.md"),
+  resolve(root, "docs/ENGINE_ARCHITECTURE.md"),
+  resolve(root, "README.md"),
+];
+
+const migrationWindowRe = /读取|归一|可读取|迁移|仍接受|读取旧|从 `v\d+` 升/u;
+
+function isMigrationWindow(text, matchIndex, matchLength) {
+  const window = text.slice(
+    Math.max(0, matchIndex - 40),
+    Math.min(text.length, matchIndex + matchLength + 40),
+  );
+  return migrationWindowRe.test(window);
+}
+
 // Current-state docs must not claim an older Worker runtime as "current".
 // Archived handoffs under docs/archive/handoff/ may still describe older runtime versions.
 if (runtimeVersion) {
-  const currentStateDocs = [
-    resolve(root, "docs/PROJECT_STATUS.md"),
-    resolve(root, "docs/PRODUCT_SPEC.md"),
-    resolve(root, "docs/ENGINE_ARCHITECTURE.md"),
-    resolve(root, "README.md"),
-  ];
   for (const docPath of currentStateDocs) {
     if (!existsSync(docPath)) continue;
     const text = markdownByPath.get(docPath) ?? readFileSync(docPath, "utf8");
@@ -104,13 +121,31 @@ if (runtimeVersion) {
       const claimed = match[1] ?? match[2] ?? match[3];
       if (claimed && claimed !== runtimeVersion) {
         // Allow adjacent migration lists like v16/v17 when documenting compatibility.
-        const window = text.slice(
-          Math.max(0, match.index - 40),
-          Math.min(text.length, (match.index ?? 0) + match[0].length + 40),
-        );
-        if (/可读取|仍接受|迁移|读取旧|从 `v\d+` 升/u.test(window)) continue;
+        if (isMigrationWindow(text, match.index ?? 0, match[0].length)) continue;
         failures.push(
           `${rel}: 当前态文档声称运行时 v${claimed}，代码为 v${runtimeVersion}`,
+        );
+      }
+    }
+  }
+}
+
+// Current-state docs must not claim a wrong LocalSave envelope as "current".
+// Archive docs and migration windows (读取/归一/可读取/迁移) are skipped.
+if (localSaveVersion) {
+  for (const docPath of currentStateDocs) {
+    if (!existsSync(docPath)) continue;
+    const text = markdownByPath.get(docPath) ?? readFileSync(docPath, "utf8");
+    const rel = relativeToRoot(docPath);
+    for (const match of text.matchAll(
+      /本地存档封装\s*`v(\d+)`|外层\s+LocalSave\s*`v(\d+)`|LocalSave\s*`v(\d+)`|本地存档封装\s*`version:\s*(\d+)`|`version:\s*(\d+)`/gu,
+    )) {
+      const claimed =
+        match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[5];
+      if (claimed && claimed !== localSaveVersion) {
+        if (isMigrationWindow(text, match.index ?? 0, match[0].length)) continue;
+        failures.push(
+          `${rel}: 当前态文档声称 LocalSave v${claimed}，代码为 v${localSaveVersion}`,
         );
       }
     }

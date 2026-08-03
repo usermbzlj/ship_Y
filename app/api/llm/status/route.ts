@@ -1,13 +1,11 @@
 import {
   getLlmServerRuntime,
+  handleLlmRoute,
   jsonResponse,
-  routeErrorResponse,
 } from "../_server";
 
-export function GET(): Response {
-  try {
+export function GET(request: Request): Promise<Response> {
+  return handleLlmRoute(request, "llm.status", () => {
     return jsonResponse({ llm: getLlmServerRuntime().status() });
-  } catch (error) {
-    return routeErrorResponse(error);
-  }
+  });
 }

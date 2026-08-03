@@ -19,8 +19,8 @@
 | 角色 | 舰长有跨周期航行志与自设观察哨；部门有持久立场与正式异议；关键乘客有关系圈、群体情绪、传言与申诉权 |
 | 界面 | 舰桥 / 舰务 / 乘员 / AI 观察 / 人工干预；告警可定位到区检查器；航行志与异议可读 |
 | 时间 | `1×` … `1D/s` 七档；时钟线性插值；舰长截止点精确切片 |
-| 存档 | IndexedDB 单槽手动存读（旧 `localStorage` 启动时一次性迁入；失败可回退 LS） |
-| 格式 | 外层 LocalSave `v22`；Worker 运行时 `v18`；关键乘客轮询 `v2`；水 `v3`；冷却 `v6`；维修 `v3`；舰长运营 `v3` |
+| 存档 | IndexedDB 手动槽 + 轮换自动槽（checksum；旧 `localStorage` 启动时一次性迁入；手动失败可回退 LS） |
+| 格式 | 外层 LocalSave `v24`；Worker 运行时 `v21`；关键乘客轮询 `v2`；水 `v3`；冷却 `v6`；维修 `v3`；舰长运营 `v3` |
 
 ## 现在可以做什么
 
@@ -49,6 +49,12 @@ npm run dev
 
 开发地址通常是 [http://localhost:3000](http://localhost:3000)。
 
+每次本地启动都会同时写入 `logs/latest.log` 和一个带时间戳的会话日志。应用侧结构化 JSON 会脱敏密钥、凭据、Prompt 与请求正文并关联浏览器/API/LLM；`logs/*.log` 仍是子进程原始 tee，可能含 vinext / 堆栈明文。快速查看最近 200 行：
+
+```powershell
+npm run logs:latest
+```
+
 ### DeepSeek
 
 在项目根目录创建已被 Git 忽略的 `deepseek-credentials.txt`：
@@ -71,7 +77,9 @@ npm run build
 npm run start
 ```
 
-不依赖数据库、账号系统或外部消息队列。密钥与其它模型配置见[本地开发手册](docs/LOCAL_DEVELOPMENT.md)。
+`npm start` 默认绑定 `127.0.0.1`（与 LLM 写路由回环信任一致）。局域网可用 `--hostname=0.0.0.0`，但 UI 仍须经 localhost 打开才能 invoke。细节见[本地开发手册](docs/LOCAL_DEVELOPMENT.md)。
+
+不依赖数据库、账号系统或外部消息队列。密钥与其它模型配置见同一手册。
 
 ## 一次航程如何运行
 
@@ -95,7 +103,7 @@ flowchart LR
     UI -->|"严格 JSON"| API["本地 LLM API 代理"]
     API -->|"服务端密钥"| CLOUD["云端模型"]
     CLOUD --> API --> UI
-    UI -->|"安全点快照"| SAVE["IndexedDB 单槽"]
+    UI -->|"安全点快照"| SAVE["IndexedDB 手动+自动槽"]
 ```
 
 - **React**：界面、LLM 协调、存档 I/O；不拥有物理真值。
@@ -107,12 +115,12 @@ flowchart LR
 
 | 已落地 | 尚未完成 |
 |---|---|
-| 十域确定性 Worker、ZoneRole 区带、水/热可故障支路 | 通用设备级管网、全舰结构、火灾烟雾 |
+| 十域确定性 Worker、ZoneRole 区带、水/热可故障支路、AHU 冷凝回收 | 通用设备级管网、全舰结构、火灾烟雾 |
 | 日心星表欧氏航距与最少跃迁段 | 完整星历、轨道机动、安全港 |
-| 舰长鲁棒调度、混合观测通道、软失败命令队列 | 通用收件箱、外部响应重放 |
-| 舰长记忆与自设注意力、部门异议记录、乘客申诉闭环与传言 | 部门自发通信、普通乘客自主行为、异议自动判定 |
-| IndexedDB 手动单槽 + LS 迁移 | 自动/轮换存档、checksum 全链 |
-| 破口事故剧本、长航程守恒烟雾测试 | 系统化视觉回归、付费云模型烟雾 |
+| 舰长鲁棒调度（`llmOrchestration`）、混合观测、软失败命令队列 | 工具队列落盘、HTTP 正文恢复 |
+| 舰长记忆与观察哨、部门异议、乘客社会/申诉积压、舰长→部门收件箱 | 部门自发消息总线、普通乘客自主行为 |
+| IndexedDB 手动槽 + 轮换自动槽、checksum、LS 迁移 | 导入导出包、更完整旧格式迁移链 |
+| 破口事故剧本、长航程守恒烟雾、可观测性底座 | 系统化视觉回归、付费云模型烟雾 |
 
 版本矩阵、验证结果与细节以[当前实现状态](docs/PROJECT_STATUS.md)为准。目标需求见[产品规格](docs/PRODUCT_SPEC.md)，技术路线见[引擎架构](docs/ENGINE_ARCHITECTURE.md)。
 
@@ -123,7 +131,8 @@ app/          舰桥 UI、路由、本地 LLM API
 lib/sim/      确定性核心与权威物理域
 lib/llm/      固定拓扑、网关、Prompt、轮询
 lib/astro/    日心星表与航距
-lib/persist/  IndexedDB 手动存档
+lib/persist/  IndexedDB 手动槽 + 轮换自动槽、checksum
+lib/observability/  结构化日志、脱敏与请求关联
 scripts/      启动、环境与文档检查
 tests/        仿真、LLM、存档与页面测试
 docs/         规格、架构与当前状态（历史备忘在 docs/archive/）
@@ -138,14 +147,19 @@ npm run check:env    # 环境与 LLM 就绪（不打印密钥）
 npm run check:docs   # 文档链接与版本摘要
 npm run typecheck
 npm run lint
-npm run test:unit    # Node 单元测试（可能数分钟）
+npm run test         # 同 test:fast
+npm run test:fast    # 日常快速回归（排除 4 个超重长航程文件）
+npm run test:unit    # 同 test:fast（别名）
+npm run test:heavy   # 4 个超重 Worker / 长航程文件，串行运行
+npm run test:full    # 生产构建 + 全部 Node 测试（含超重）
 npm run build
-npm run check        # 文档 + 类型 + Lint + 构建 + 测试
+npm run check        # 文档 + 类型 + Lint + 构建 + test:fast
+npm run check:release # check + test:heavy（发布前）
 ```
 
 ## 数据与安全
 
-- 存档在当前浏览器的 IndexedDB（单槽 `manual`）；项目不会主动上传，也尚未加密。
+- 存档在当前浏览器的 IndexedDB（手动槽 `manual` + 轮换 `auto-0..2`）；项目不会主动上传，也尚未加密。
 - API 密钥只经服务端环境变量解析；写路由限同源回环，并限制体量与超时。
 - 模型只获得授权观测与指令，不会自动读取完整世界真值。
 - 云端计费与合规由你选择的供应商决定；持续调用可能产生费用。

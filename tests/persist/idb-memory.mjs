@@ -7,7 +7,7 @@ import {
   IDB_STORE,
 } from "../../lib/persist/local-save-idb.ts";
 
-/** Minimal LocalSave-shaped payload (v21); get/put only require `version`. */
+/** Minimal LocalSave-shaped legacy fixture (shape only; get/put only require `version`). */
 export const sampleLocalSave = {
   version: 21,
   activeView: "bridge",
@@ -97,6 +97,29 @@ export function createMemoryIdbFactory() {
                         ? structuredClone(storeMap.get(key))
                         : undefined;
                       completeRequest(req, value);
+                      queueMicrotask(() => {
+                        tx.oncomplete?.();
+                      });
+                    });
+                    return req;
+                  },
+                  getAll() {
+                    const req = createRequest();
+                    queueMicrotask(() => {
+                      const values = [...storeMap.values()].map((value) =>
+                        structuredClone(value),
+                      );
+                      completeRequest(req, values);
+                      queueMicrotask(() => {
+                        tx.oncomplete?.();
+                      });
+                    });
+                    return req;
+                  },
+                  getAllKeys() {
+                    const req = createRequest();
+                    queueMicrotask(() => {
+                      completeRequest(req, [...storeMap.keys()]);
                       queueMicrotask(() => {
                         tx.oncomplete?.();
                       });

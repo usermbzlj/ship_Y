@@ -100,6 +100,9 @@ export interface WorkerStateProjectionInput {
     cabinId: string;
   }) => ZoneId;
   maintenanceConditions: MaintenanceConditionRecord;
+  llmOrchestration?: SimulationWorkerState["llmOrchestration"];
+  passengerSociety?: SimulationWorkerState["passengerSociety"];
+  departmentInbox?: SimulationWorkerState["departmentInbox"];
 };
 
 export const SENSOR_QUANTITIES = [
@@ -833,6 +836,9 @@ export function projectWorkerState(
     effectiveTimeScale,
     currentZoneForPerson,
     maintenanceConditions,
+    llmOrchestration,
+    passengerSociety,
+    departmentInbox,
   } = input;
   const compartmentState = compartmentTelemetry({
     compartments,
@@ -1038,5 +1044,14 @@ export function projectWorkerState(
       engine.elapsedMicroseconds,
       compartments.listBreaches(),
     ),
+    ...(llmOrchestration !== undefined
+      ? { llmOrchestration }
+      : {}),
+    ...(passengerSociety !== undefined
+      ? { passengerSociety }
+      : {}),
+    ...(departmentInbox !== undefined
+      ? { departmentInbox }
+      : {}),
   };
 }

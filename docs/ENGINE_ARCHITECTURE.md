@@ -1,6 +1,6 @@
 # 《远穹》本地 TypeScript 引擎架构
 
-> 文档状态：目标架构 v1.8（已同步运行时快照 **v18** / 本地存档 v21 / `hullConsequence` / ZoneRole / 观察诚实性 / IndexedDB 手动单槽 / 精确舰长截止点 / 异步乘客轮询 / 线性显示时间 / 舰桥 UX 3.0）  
+> 文档状态：目标架构 v1.8（已同步运行时快照 **v21** / 本地存档 v24 / `llmOrchestration` / `passengerSociety` / `departmentInbox` / 申诉积压 / AHU 冷凝 / `hullConsequence` / ZoneRole / 观察诚实性 / IndexedDB 手动+轮换自动槽 / checksum / 可观测性底座 / 精确舰长截止点 / 异步乘客轮询 / 线性显示时间 / 舰桥 UX 3.0）  
 > 产品名：**远穹**（「远航」为旧称/主题别名）  
 > 对应产品规格：[PRODUCT_SPEC.md](./PRODUCT_SPEC.md)  
 > 当前实现摘要：[PROJECT_STATUS.md](./PROJECT_STATUS.md)  
@@ -30,7 +30,7 @@
 
 | 区域 | 当前实现 | 已验证能力 |
 |---|---|---|
-| 游戏界面 | `app/mission-control.tsx`、`app/ui/views/*`、`app/ui/components/time-control-bar.tsx`、`app/ui/components/mission-clock.tsx`、`app/ui/use-audio.ts`、`app/globals.css` | 舰桥授权台（`mission-launch-card`，位于 `launch-layer`）：任务开始前侧栏导航禁用、舰桥日志为空；签发后五主视图（舰桥 / 舰务 / 乘员 / AI 观察 / 人工干预），舰桥含全宽前向主视窗（WebGL 天球）、任务相位、剩余航程、跃迁进度与右舷居住环转速台（仅保留观测 `relativeRpm` 驱动的 A/B 对转双环）；舰务为四格版面（WebGL 舰体剖视主视觉 + 实时负载 + 48 区选择器 + 区带检查器，`ZoneRole` 中文标签），未启动时离线卡诚实空态不虚构 MW/g；七档倍率 `1` / `60` / `1800` / `3600` / `7200` / `21600` / `86400`（UI 标签 `1×`–`1D/s`），快捷键 `1`–`7` 与 `Space` 暂停；`MissionClock` 在权威状态之间按有效倍率线性插值并在下一个舰长截止点封顶；状态条四态：`live` / `waiting` / `blocked` / `paused`；舰桥日志最多保留 `500` 条，窄屏（`≤1100px`）折叠为 `event-rail` 抽屉；上帝干预内联确认条、读档覆盖确认对话框；乘员页对 `32` 个关键槽位在遥测入库前显示诚实空态；主音量静音、可关闭持久 toast、可展开最高指令条；授权台含 LLM 缺密钥指引与本机存档探测（IndexedDB 单槽，启动时迁移旧 `localStorage` 键 `farhorizon-save`）；暂停、倍率、手动存取与抵达报告 |
+| 游戏界面 | `app/mission-control.tsx`、`app/ui/views/*`、`app/ui/components/time-control-bar.tsx`、`app/ui/components/mission-clock.tsx`、`app/ui/use-audio.ts`、`app/globals.css` | 舰桥授权台（`mission-launch-card`，位于 `launch-layer`）：任务开始前侧栏导航禁用、舰桥日志为空；签发后五主视图（舰桥 / 舰务 / 乘员 / AI 观察 / 人工干预），舰桥含全宽前向主视窗（WebGL 天球）、任务相位、剩余航程、跃迁进度与右舷居住环转速台（仅保留观测 `relativeRpm` 驱动的 A/B 对转双环）；舰务为四格版面（WebGL 舰体剖视主视觉 + 实时负载 + 48 区选择器 + 区带检查器，`ZoneRole` 中文标签），未启动时离线卡诚实空态不虚构 MW/g；七档倍率 `1` / `60` / `1800` / `3600` / `7200` / `21600` / `86400`（UI 标签 `1×`–`1D/s`），快捷键 `1`–`7` 与 `Space` 暂停；`MissionClock` 在权威状态之间按有效倍率线性插值并在下一个舰长截止点封顶；状态条四态：`live` / `waiting` / `blocked` / `paused`；舰桥日志最多保留 `500` 条，窄屏（`≤1100px`）折叠为 `event-rail` 抽屉；上帝干预内联确认条、读档覆盖确认对话框（手动 + 最近自动）；乘员页对 `32` 个关键槽位在遥测入库前显示诚实空态；主音量静音、可关闭持久 toast、可展开最高指令条；授权台含 LLM 缺密钥指引与本机存档探测（IndexedDB 手动/自动槽，启动时迁移旧 `localStorage` 键 `farhorizon-save`）；暂停、倍率、手动存取、自动轮换存档与抵达报告 |
 | 时间导演 | `lib/sim/director.ts`、`lib/sim/worker.ts`、`app/mission-control.tsx` | Worker 权威 `SimulationTimeDirector`：具名 pause tokens（`ui` / `llm-waiting` / `save-barrier` / `mission-ended` 等）、请求倍率与有效倍率；每次心跳独立推进，保真降速或墙钟遗漏只计入统计，不形成未来补时；Worker 可接收阻塞边界，把步进精确切到截止点并在发布状态前原子取得暂停令牌 |
 | 程序化事件 | `lib/sim/procedural-world.ts`、`lib/sim/worker.ts` | Worker 内 `ProceduralWorldScheduler`（任务种子、状态写入运行时快照）；`7` 类事件；`micrometeoroid`、冷却泵卡死（`equipment-wear` 文案仅绑定冷却泵）、`sensor-drift`（降级真实舱区大气传感器）、`stellar-flare`（外部辐照约 `+160 W/m²`）、`power-fluctuation`（电气传感器降级 + 电池降级/反应堆降额或跳闸）、`hibernation-complication`（跳开 `hibernation-a/b` 馈线断路器）经 `actor: "environment:procedural"` 注入物理因果；仅 `passenger-social` 保持叙事（文案带「【叙事记录·无即时物理注入】」前缀） |
 | Worker 运行时 | `lib/sim/worker.ts`、`lib/sim/protocol.ts` | Worker 是物理世界单一写入者；支持初始化、推进、干预、舰船命令、检查、快照、恢复和最终报告。`worker.ts` 只保留编排层：消息协议、时间导演、跨域耦合步进、快照/检查点事务与命令总线准入 |
@@ -39,7 +39,7 @@
 | 聚合系统 | `lib/sim/index.ts` | 环境、休眠、跃迁充能和航程的降阶更新；电力、大气、热与水使用 `external-network`，正式 Worker 的人口使用 `external-roster`，只接收对应物理域或个体名册的权威投影 |
 | 48 舱大气网络 | `lib/sim/compartments.ts` | 固定 `48` 压力区节点；`ZoneRole` 目录元数据（living/public/medical/galley/agriculture/cargo/industrial/access，含中文标签）不改变物理节点数；舱位→区带按布局角色映射（非哈希）；舱门/风管/隔离阀、双向流动、代谢、破口外排、显式外部汇和自适应精度；平衡压力组件的破口按质量比例做指数泄压并登记外排质量/热量，因此无需自动降速；气体组分守恒 |
 | 壳体威胁后果 | `lib/sim/hull-consequence.ts`、`lib/sim/jump-interlock.ts`、`lib/sim/worker.ts` | 轻量权威（非结构 FEM）：跟踪未修破口年龄，派生 `hullIntegrity`、活动破口跃迁联锁、按环推力降额，以及约 30 min / 2 h / 6 h 同环级联（AHU → 冷却泵 → 轴承+休眠馈线）；封口后级联故障仍须检修；破口联锁与热投影经 `jump-interlock` 统一裁决 |
-| A/B 水回收网络 | `lib/sim/water.ts`、`lib/sim/worker.ts` | 双环净水/废水/储备冰/浓盐水库存（基线总净水约 `1.8e6 kg`），两台馈线耦合的主处理与浓盐水二级回收机（额定约 `900 kg/day`/环），每环可故障配水支路、生活用水和呼吸跨域质量账、延迟仪表、设备指令/故障及严格快照恢复 |
+| A/B 水回收网络 | `lib/sim/water.ts`、`lib/sim/worker.ts`、`lib/sim/compartments.ts` | 双环净水/废水/储备冰/浓盐水库存（基线总净水约 `1.8e6 kg`），两台馈线耦合的主处理与浓盐水二级回收机（额定约 `900 kg/day`/环），每环可故障配水支路、生活用水和呼吸跨域质量账；舱区水汽超 AHU 舒适湿度设定时 `condenseRecoverableWaterVapor` → `collectCondensate` 入账环污水罐与 `ledger.condensateInflowKg`（AHU 停机则不主动冷凝）；延迟仪表、设备指令/故障及严格快照恢复 |
 | 冷却热网 | `lib/sim/cooling.ts`、`lib/sim/worker.ts` | 双冷却回路、热节点、泵、换热器和散热器；推进、旋转驱动、跃迁、电气损耗、代谢、舰务负载与干预分源入账，已服务负载按 ID 动态产生废热；舱室热泵按 `Qhot = Qcold + W` 闭合；每环一条可故障居住热送达支路缩放该环舱热泵冷却 |
 | 电力网络 | `lib/sim/electrical.ts`、`lib/sim/worker.ts` | `6` 个聚变模块、A/B 母线、断路器、分级负载和双电池；反应堆爬坡、母线孤岛、切负载、充放电效率及能量闭合；A/B 各 `60 MW` 推进控制负载约束火炬列车点火，两路 `7.5 MW` 居住环驱动负载向旋转求解器交付实际服务能量 |
 | 六自由度导航 | `lib/sim/navigation.ts` | 刚体平动/转动、姿态四元数、质量与惯性、`18` 个有安装点的聚变火炬推进器；推进剂与基线 `24 t` 聚变燃料双库存，源能/理想喷流/留舰热/直排能和线/角动量账本；接收旋转环内部反作用角冲量并在转动方程中计入环转子角动量，跃迁后本地惯性帧 epoch 重基准 |
@@ -52,11 +52,12 @@
 | 舰船命令 | `lib/sim/command-bus.ts`、`lib/sim/protocol.ts`、`lib/sim/worker.ts`、`app/mission-control.tsx` | 固定 actor/权限、幂等键、发行时刻、期望 revision、审计和跨九领域失败回滚；跃迁、休眠、隔离、推进、电力、冷却、空气处理、水回收、居住环控制与维修排程命令进入真实执行器；舰长每轮最多 `8` 条世界工具，按模型顺序串行执行并形成结构化设备回执 |
 | 上帝干预 | `lib/sim/index.ts`、`lib/sim/worker.ts` | UI 请求进入 Worker；标量覆写原子校验并记录成功/拒绝与外部守恒声明；破口、泵故障、聚变堆跳闸、居住环轴承劣化和外部动量注入作用于对应权威物理域 |
 | 自适应倍率 | `lib/sim/worker.ts`、`lib/sim/compartments.ts` | 稳态大气使用守恒快速路径；活动破口使用守恒的指数泄压近似与加速耦合，保持玩家请求倍率；无破口的显著压力梯度、连接异常或传感器故障仍可进入细步保真路径 |
-| 完整本地存档 | `app/mission-control.tsx`、`lib/persist/local-save-idb.ts`、`lib/sim/worker.ts`、`lib/llm/key-passenger-polling.ts` | 本地存档封装 `v21` 内含运行时快照 `v18`、关键乘客轮询快照 `v2` 与下一个舰长决策截止点；IndexedDB 单槽（失败可回退 LS 并清 IDB 槽）；保存屏障先挂 `save-barrier` 暂停令牌、等待在途物理事务完成，再获取同一 Worker 安全点；`v19` / `v20` 读取时按当前时刻与舰长周期补出截止点 |
-| 固定 LLM 基础 | `lib/llm/index.ts`、`lib/llm/fixed-topology.ts`、`lib/llm/key-passenger-polling.ts`、`lib/sim/passengers.ts`、`config/llm.example.json` | 唯一合法拓扑为 `8` 个部门 actor 加 `32` 个名册对齐的关键乘客槽位；生产路径调用舰长、按需部门顾问和清醒且到期的关键乘客，运行时不能创建、克隆、删除或临时提升代理 |
+| 完整本地存档 | `app/mission-control.tsx`、`app/mission-control/use-autosave.ts`、`lib/persist/local-save-idb.ts`、`lib/sim/worker.ts`、`lib/llm/key-passenger-polling.ts` | 本地存档封装 `v24` 内含运行时快照 `v21`（含 `llmOrchestration`、例行截止点、舰长 sidecar 与 `passengerSociety` / `departmentInbox`）、关键乘客轮询快照 `v2`；IndexedDB 手动槽 `manual` + 轮换 `auto-0..2`（写入密封 checksum；手动失败可回退 LS 并清 IDB 手动槽）；任务开始/抵达轻量自动存档 + 约 `45` 模拟分钟周期轮换（避开 `llm-waiting` / 存档屏障）；保存屏障先挂 `save-barrier` 暂停令牌、等待在途物理事务完成，再获取同一 Worker 安全点；外层 `v19`–`v23` 读取时归一到 `v24`，Runtime sidecar 优先于外层副本；读档时 `awaiting-http` 重放 `llm-effect-request`，`applying-tools` safe-fail |
+| 可观测性 | `lib/observability/*`、`app/ui/components/client-observability.tsx`、`scripts/local-log.mjs` | 浏览器 / API / LLM 网关 / Worker 共用结构化日志；同源 API 携带并回传 `x-request-id`；模型调用记类型、重试、耗时与用量但不记 Prompt/正文；密钥与世界上下文按字段脱敏；三种启动入口 tee 到 `logs/latest.log` |
+| 固定 LLM 基础 | `lib/llm/index.ts`、`lib/llm/fixed-topology.ts`、`lib/llm/key-passenger-polling.ts`、`lib/llm/department-standing.ts`、`lib/llm/passenger-society.ts`、`lib/llm/department-inbox.ts`、`lib/llm/grievance-backlog.ts`、`lib/sim/passengers.ts`、`config/llm.example.json` | 唯一合法拓扑为 `8` 个部门 actor 加 `32` 个名册对齐的关键乘客槽位；部门立场 `v2`、乘客社会 `v2`、舰长→部门收件箱 `v1`（随 Runtime `v21`）；开放申诉超时约 `8 h` 后注入 `<grievance_backlog>` 并有界压力轻推；生产路径调用舰长、按需部门顾问和清醒且到期的关键乘客，运行时不能创建、克隆、删除或临时提升代理 |
 | 云 API 网关 | `lib/llm/index.ts`、`lib/llm/reasoning-split.ts`、`app/api/llm` | 服务端密钥引用、自定义 JSON 请求体与 Thinking 字段、JSON/SSE/NDJSON 映射、有上限重试（默认 `maxAttempts: 6`）、取消和用量；密钥端点 HTTPS/无密钥回环 HTTP 策略、URL 凭据与普通敏感头前置拒绝、每次尝试超时和响应总字节上限、三种响应的有界读取。解析层用 `splitInlineReasoning` 把模型写进正文的内联思维链（`<think>` / `<thinking>`，含只有开标签的截断形态）从 `text` 剥离到 `reasoning`：部分供应商开启 thinking 后不走独立字段，未剥离的正文会同时污染舰内日志、下一轮 prompt（部门简报／会议记录／同僚立场）与随存档持久化的部门立场，因此清洗放在唯一出口的网关层而不是各显示点 |
 | 玩家侧上帝助手 | `lib/llm/god-assist.ts`、`app/ui/components/god-assist-panel.tsx`、`app/api/llm/_server.ts` | `playerAssistants.godAssistant` 独立于固定 `40` 节点拓扑；`POST /api/llm/invoke` + `intent: "god-assist"` 编译 NL 为因果/原力计划，玩家预览确认后执行；物理拒收时自动向 LLM 修订一次 |
-| 多 LLM 舰长闭环 | `app/mission-control.tsx`、`app/api/llm`、`lib/sim/worker.ts` | 任务开始、例行周期、跃迁就绪与关键报警触发舰长；例行周期由 Worker 在精确截止点原子冻结，同刻告警合并进该轮并消费截止点，相关部门在同一次决策内按需并行咨询，舰长命令队列完成后才释放 `llm-waiting`；例行调用失败不推进截止点；关键乘客以单并发只读后台任务运行，不冻结世界 |
+| 多 LLM 舰长闭环 | `app/mission-control.tsx`、`app/api/llm`、`lib/sim/worker.ts` | 任务开始、例行周期、跃迁就绪与关键报警触发舰长；例行周期由 Worker 在精确截止点原子冻结并打开可存档的 `llmOrchestration` pending（`llm-effect-request`），同刻告警合并进该轮；React 仍跑 HTTP 与 ship-command 工具队列，完成后经 `llm-effect-accept` / `llm-effect-finish` 由 Worker 释放 `llm-waiting`；例行调用失败不推进截止点；关键乘客以单并发只读后台任务运行，不冻结世界 |
 | 自动化验证 | `tests/sim`、`tests/llm`、`tests/rendered-html.test.mjs` | 覆盖核心确定性、守恒、人员、六个权威物理域、十时钟 Worker 耦合、TimeDirector pause/无补时、精确阻塞截止点、ProceduralWorld 精确事件时刻与无漂移、生存剂量/口粮、休眠供电暴露、热泵、火炬源能、旋转环动量/能量、水回收质量账、维修资源/任务账、舰长运营资源账、跨域恢复对账、命令权限/回滚、LLM 网关/路由、安全边界与生产页面 |
 
 界面已经不再以 React 自增时间冒充仿真时间。任务开始后的时钟、倍率与暂停由 Worker `SimulationTimeDirector` 权威裁决；舰体区矩阵使用 48 舱传感器遥测，“乘员”卡中的区域状态和压力同样只使用其固定舱位对应的延迟传感器投影，不读取舱区真值；人工干预会改变权威状态。界面仍保留静态星图坐标与说明文案，这些不能视为动态天体求解结果；乘员卡本身则来自固定关键人员名册，不是另造的展示人口。
@@ -71,13 +72,13 @@
 - 火灾、烟雾、污染、裂纹、疲劳、制造、医疗资源等事故与恢复过程；
 - 更多设备的状态机、维修配方与世界内命令覆盖；当前跃迁、推进控制、电网、冷却、休眠供电及首批冷却泵、空气处理、水回收、环轴承维修已有真实联锁或因果后果，命令总线也已提供权限、幂等、revision、审计和全域回滚，但尚未覆盖所有设备；
 - 人员位置与可达行动、持续生理演化、完整个体资源消费、工作任务、家庭/组织行为和长期社会涌现；
-- 通用跨部门收件箱与跨乘客长期记忆，以及任意合法通信边上的受限嵌套讨论；当前相关部门已能按舰长关键事件参与咨询，关键乘客也已有单人只读私人轮询，但这两者都不是通用消息系统或社会自治；
-- 把 LLM 外部效果请求、观察 revision、工具幂等键和已接受响应记录全部纳入 Worker 与运行时快照；当前已有 Worker 具名 pause tokens 和精确阻塞边界，但舰长—部门咨询、关键乘客轮询和舰长串行工具队列仍由 React 主线程协调；
-- 自动/轮换存档、增量日志、checksum、更完整版本迁移链、导入导出和待处理 API 调用恢复（**手动 IndexedDB 单槽已落地**）；
+- 部门自发消息总线、跨乘客长期记忆，以及任意合法通信边上的受限嵌套讨论；当前已有舰长→部门单向收件箱（B2-lite，`departmentInbox` snapshot v1）与部门会议内 `<peer_positions>`，关键乘客也已有单人只读私人轮询与申诉/传言，但这不是通用跨部门消息系统或社会自治；
+- 把工具队列自动落盘、在途 HTTP 正文与已接受响应完整重放全部纳入 Worker；当前舰长阻塞 `llmOrchestration` pending（含 `callId`/观察 revision）已随 Runtime `v21` 持久化，`awaiting-http` 可读档重放 `llm-effect-request`，但 `applying-tools` 因工具队列未落盘而 safe-fail，HTTP 与串行工具队列仍由 React 协调；
+- 增量日志、更完整版本迁移链、导入导出和待处理 API 调用 HTTP 正文恢复（**IndexedDB 手动槽 + 轮换自动槽与 checksum 已落地**）；
 - 真实星表/星历、多段路线规划、改道、安全港、常规推进与真实轨道/航路的衔接、全部失败结局和玩家主动终止；
 - 长航程守恒漂移、全年巡航、极端事故压力、完整回放一致性、端到端玩法和系统化视觉回归验证。
 
-当前的 LLM 闭环以舰长为决策中心，并会按事件主动调用相关部门；`32` 个不可替换的关键乘客槽位也已经进入生产轮询，但只对清醒且到期者逐人调用。运行时拓扑严格固定为 `8 + 32`，这不等于 `40` 路模型常驻并发，也不等于通用收件箱、跨乘客长期记忆、自由通信和完整社会自治已经实现。
+当前的 LLM 闭环以舰长为决策中心，并会按事件主动调用相关部门；`32` 个不可替换的关键乘客槽位也已经进入生产轮询，但只对清醒且到期者逐人调用。运行时拓扑严格固定为 `8 + 32`，这不等于 `40` 路模型常驻并发，也不等于部门自发消息总线、跨乘客长期记忆、自由通信和完整社会自治已经实现。
 
 ### 2.3 当前阶段的准确称呼
 
@@ -114,7 +115,7 @@ flowchart LR
 
 不引入微服务、消息中间件、Redux、通用 ECS、WASM、独立数据库服务或多进程仿真。只有实际性能数据证明 TypeScript Worker 无法满足预算时，才考虑局部 WASM。
 
-当前已经存在 UI、Sim Worker、本地 API 代理和云模型四个边界；Worker 已承载确定性核心、人员、48 舱大气、冷却、电力、六自由度导航、双反向旋转环、A/B 水回收、维修任务网络、舰长运营域、TimeDirector、程序化世界与生存账本，并把十个时钟作为同一事务推进。与目标图的主要差异是：舰长主决策、部门咨询、关键乘客轮询和串行工具队列目前仍由 React 协调，尚未成为 Worker 内可存档的外部效果（pause tokens 和阻塞边界已在 Worker）；`v21` 外层存档已保存乘客轮询调度与下一个舰长决策截止点，并在手动保存时建立 `save-barrier`；手动持久介质为 IndexedDB 单槽（可一次性迁移旧 `localStorage`）。
+当前已经存在 UI、Sim Worker、本地 API 代理和云模型四个边界；Worker 已承载确定性核心、人员、48 舱大气、冷却、电力、六自由度导航、双反向旋转环、A/B 水回收、维修任务网络、舰长运营域、TimeDirector、程序化世界与生存账本，并把十个时钟作为同一事务推进。与目标图的主要差异是：舰长阻塞决策的 pending/`callId`/观察 revision 已进入 Runtime `v21` 的 `llmOrchestration`，`passengerSociety` / `departmentInbox` 亦随 Runtime 持久化并由 Worker 在步进边界做邻区扩散与士气耦合，但 HTTP 本身与工具自动落盘仍由 React 协调（经 accept/finish 回写 Worker）；关键乘客轮询仍是异步只读效果；`v24` 外层存档以 Runtime sidecar 为权威并保留外层兼容副本；持久介质为 IndexedDB 手动槽 + 轮换自动槽（可一次性迁移旧 `localStorage`），写入密封 checksum。
 
 ## 4. 代码组织
 
@@ -553,7 +554,7 @@ interface NetworkEdge<TState> {
 
 普通舰体 UI 和 LLM 只获得控制器指令记录以及延迟、带噪的分环/分区压力与 CO₂ 传感结果；设备 `condition`、实际风量和捕集账只在权威快照及上帝真值面板出现。舰长、工程和生命保障可以发出风量/吸附器命令，但不能直接指定 CO₂ 分压。上帝模式的处理机跳停也只把设备置为 `stuck-off`，后续积累和混合仍由求解器产生。
 
-水回收机的固定额定输入各为 `900 kg/day`。每公斤废水先经 `85%` 主处理，剩余浓盐水再回收其中 `87%`，组合回收率为 `98.05%`；残余质量进入浓盐水库存，绝不会凭空消失。真实吞吐为额定值乘处理量指令、电力服务比例和设备工况倍率，并继续受本环废水库存与净水罐余量限制。生活用水从净水转移到废水；舱室代谢产生的水蒸气则先从对应 A/B 净水库存显式扣除，再跨域进入舱气，因此全船封闭质量仍闭合。湿度冷凝回流接口已经进入水域账本，但舱气冷凝器尚未接线，不能把尚未回收的舱内水蒸气提前算作净水。
+水回收机的固定额定输入各为 `900 kg/day`。每公斤废水先经 `85%` 主处理，剩余浓盐水再回收其中 `87%`，组合回收率为 `98.05%`；残余质量进入浓盐水库存，绝不会凭空消失。真实吞吐为额定值乘处理量指令、电力服务比例和设备工况倍率，并继续受本环废水库存与净水罐余量限制。生活用水从净水转移到废水；舱室代谢产生的水蒸气则先从对应 A/B 净水库存显式扣除，再跨域进入舱气，因此全船封闭质量仍闭合。舱区水汽超 AHU 舒适湿度设定（约 55% RH）时，按 `actualFlowFraction` 降阶冷凝：`condenseRecoverableWaterVapor` 从大气扣水汽，`collectCondensate` 入账环污水罐与 `ledger.condensateInflowKg`（AHU 停机则不主动冷凝）；冷凝进入废水侧，须经水回收机处理后才成净水，不得把舱内水蒸气直接算作净水。
 
 水域保存 `initial + condensate + external - metabolic = current inventory` 质量账，以及生活转移、处理输入、主回收、浓盐水回收和残余浓盐水累计量。基线两环合计净水约 `1.8e6 kg`。普通舰体 UI 和 LLM 只看到持久化、固定延迟 `5 s` 的 A/B 罐量/吞吐仪表帧和控制器指令；设备工况、即时吞吐和完整质量账只在权威快照及上帝真值面板出现。舰长、工程和生命保障可发出处理量命令，但不能直接生成净水；上帝模式可跳停实体回收机，也可通过带外部质量声明的 Force 改写总净水库存。
 
@@ -782,9 +783,9 @@ LLM 只能提交：
 2. 校验固定 ID/顺序、通信边、权限、提示、端点和周期；
 3. 建立不可增删的冻结注册表。
 
-把拓扑规范化哈希和完整外部调用状态写入存档仍是目标持久化步骤。当前 `v21` 本地存档中的 `v18` Runtime 快照保存 Worker 权威世界（含 TimeDirector、ProceduralWorld、Survival、CaptainOperations 与 `hullConsequence`）；外层另含关键乘客轮询快照 `v2` 与下一个舰长决策截止点。保存前会取消尚未形成设备命令的 HTTP 调用，并等待已经派发的物理事务完成，但这不等于已经持久化 LLM 注册表或在途 HTTP 调用。
+把拓扑规范化哈希和完整外部调用状态写入存档仍是目标持久化步骤。当前 `v24` 本地存档中的 `v21` Runtime 快照保存 Worker 权威世界（含 TimeDirector、ProceduralWorld、Survival、CaptainOperations、`hullConsequence`、舰长阻塞 `llmOrchestration` 与 `passengerSociety` / `departmentInbox`）；外层另含关键乘客轮询快照 `v2`。保存前会取消尚未形成设备命令的 HTTP 调用，并等待已经派发的物理事务完成；pending effect 可随 Runtime 恢复并重放 `llm-effect-request`，但在途 HTTP 正文本身仍不落盘。
 
-运行期间只能调整被允许的周期和讨论参数，不能增加、删除或克隆代理。当前调度明确分成两类：舰长是唯一具有独立阻塞决策周期的角色，部门只在舰长冻结的决策事务中按领域并行咨询；`32` 个关键乘客槽位以轮转方式逐人运行受限的异步 `passenger-self` 调用。目标中的嵌套咨询只能指向固定拓扑中的现有节点，并受深度、轮数和循环检测限制。当前既不是 `40` 路常驻并发，也尚未实现任意合法通信边上的通用收件箱、跨乘客长期记忆、自由嵌套讨论或完整社会自治。
+运行期间只能调整被允许的周期和讨论参数，不能增加、删除或克隆代理。当前调度明确分成两类：舰长是唯一具有独立阻塞决策周期的角色，部门只在舰长冻结的决策事务中按领域并行咨询；`32` 个关键乘客槽位以轮转方式逐人运行受限的异步 `passenger-self` 调用。目标中的嵌套咨询只能指向固定拓扑中的现有节点，并受深度、轮数和循环检测限制。当前既不是 `40` 路常驻并发，也尚未实现部门自发消息总线、跨乘客长期记忆、自由嵌套讨论或完整社会自治（舰长→部门单向收件箱与会议内同僚立场已落地）。
 
 关键乘客链路的当前边界是：
 
@@ -811,7 +812,7 @@ interface LlmEffectRequest {
 }
 ```
 
-主线程把请求交给本地 API 代理。成功响应作为外部结果被接受，合法舰长工具再在同一冻结时刻串行提交。当前实现仍由 React 捕获 Worker 只读状态、协调舰长/部门和关键乘客调用：舰长例行决策由 Worker 在精确截止点取得 `llm-waiting`，部门咨询、舰长研判和命令队列期间世界保持冻结；关键乘客是只读异步效果，等待期间心跳继续送入 Worker。外部 HTTP 请求本身尚未进入 `v18` Runtime 快照；关键乘客调度和下一个舰长截止点进入 `v21` 外层存档，但这仍不等于完整的 Worker 外部效果持久化。
+主线程把请求交给本地 API 代理。成功响应作为外部结果被接受，合法舰长工具再在同一冻结时刻串行提交。当前实现：Worker 在精确截止点取得 `llm-waiting` 并打开 `llmOrchestration` pending、发出 `llm-effect-request`；React 仍协调舰长/部门 HTTP 与 ship-command 工具队列，完成后经 `llm-effect-accept`/`llm-effect-finish`（或 fail）回写 Worker；关键乘客是只读异步效果，等待期间心跳继续送入 Worker。HTTP 正文本身不进 Runtime 快照；pending/`callId`/观察 revision、例行截止点、舰长 sidecar 与 `passengerSociety` / `departmentInbox` 进入 `v21` Runtime（外层 `v24`）。
 
 ### 12.3 暂停语义
 
@@ -842,7 +843,7 @@ interface PauseState {
 
 当前协调器一次只允许一个舰长阻塞事务；具名令牌仍保证保存、玩家暂停和任务结束等其他暂停原因不会被舰长事务误删。
 
-当前 Worker 已落地具名 pause tokens、无补时的线性时间和精确阻塞边界（`SimulationTimeDirector`，入 `v18` 快照）；React 协调舰长事务、保存屏障和玩家暂停，关键乘客路由另有 `30 s` 客户端取消上限但不冻结世界。仍缺的是：按 `llm:<callId>` 粒度由 Worker 自管外部效果、观察 revision 复核，以及阻塞请求的完整存档重放——不能把“已有 pause tokens”说成完整 LLM 外部效果编排。
+当前 Worker 已落地具名 pause tokens、无补时的线性时间、精确阻塞边界（`SimulationTimeDirector`），以及可存档的舰长阻塞 `llmOrchestration` pending（`callId` / 观察 revision，入 `v21` Runtime）；React 仍协调 HTTP、保存屏障、玩家暂停与串行工具队列，关键乘客路由另有 `30 s` 客户端取消上限但不冻结世界。读档时 `awaiting-http` 会重放 `llm-effect-request`；`applying-tools` 因工具队列未落盘而 safe-fail。仍缺的是：工具自动落盘、在途 HTTP 正文恢复，以及部门/乘客效果与舰长同等的完整 Worker 编排——不能把“已有 pause tokens + pending 重放”说成完整 LLM 外部效果编排。
 
 ### 12.4 异步只读模式
 
@@ -902,7 +903,7 @@ interface PauseState {
 - 适合本地单用户；
 - 支持导出/导入一个可移动存档包。
 
-当前可运行版本已用 IndexedDB 单槽（`farhorizon` / `saves` / `manual`）做手动保存，并在启动时一次性迁移旧 `localStorage` 键 `farhorizon-save`；写入失败时可回退 `localStorage`。自动/轮换槽、分块日志与崩溃恢复仍未实现。云端部署和多设备同步不在首版范围，API 密钥永远不进入任何游戏存档。
+当前可运行版本已用 IndexedDB（`farhorizon` / `saves` / `manual` + 轮换 `auto-0..2`）做手动与自动保存，写入密封 SHA-256 checksum，并在启动时一次性迁移旧 `localStorage` 键 `farhorizon-save`；手动写入失败时可回退 `localStorage`。分块日志与完整崩溃恢复 UI 仍未实现。云端部署和多设备同步不在首版范围，API 密钥永远不进入任何游戏存档。
 
 ### 13.2 存档结构
 
@@ -926,7 +927,7 @@ interface SaveEnvelope {
 
 墙钟时间只作文件元数据，不参与确定性世界推进。
 
-当前实际格式是本地存档封装 `version: 21`，其中的 `RuntimeSimulationSnapshot` 为 `snapshotVersion: 18`（含 `hullConsequence` 壳体威胁权威；仍接受恢复 `16`/`17`），另有关键乘客轮询快照 `v2` 和下一个舰长决策截止点。运行时快照继续负责十域权威世界与跨域账本；外层严格恢复 `32` 个固定轮询槽位。`v19` / `v20` 会按当前仿真时刻与舰长周期补出截止点；未知版本仍拒绝。任何轮询快照版本、时间单调性、槽位或调度状态非法都会整体拒绝加载。
+当前实际格式是本地存档封装 `version: 24`，其中的 `RuntimeSimulationSnapshot` 为 `snapshotVersion: 21`（含 `llmOrchestration`、例行截止点、舰长 sidecar 与 `passengerSociety` / `departmentInbox`；仍接受恢复 `16`/`17`/`18`/`19`/`20`），另有关键乘客轮询快照 `v2`。运行时快照继续负责十域权威世界与跨域账本；外层严格恢复 `32` 个固定轮询槽位。外层 `v19`–`v23` 会归一到 `v24`，Runtime sidecar 优先；若带 `checksum` 则校验 canonical JSON SHA-256，损坏拒绝；未知版本仍拒绝。任何轮询快照版本、时间单调性、槽位或调度状态非法都会整体拒绝加载。
 
 ### 13.3 安全点
 
@@ -940,7 +941,7 @@ interface SaveEnvelope {
 
 主线程不得读取 Worker 内部对象自行拼存档。
 
-当前版本已经由 Worker 生成原子 `v18` 快照，UI 在同一份 `v21` 外层封装中加入关键乘客轮询 `v2` 与下一个舰长决策截止点后写入 IndexedDB 手动槽；保存屏障会申请 `save-barrier` 暂停令牌、取消尚未落地的模型请求并等待已派发物理事务完成，再请求 Worker 安全点。TimeDirector / ProceduralWorld / Survival / CaptainOperations / `hullConsequence`、轮询调度、脱敏区域观测、私人 note 和舰长截止点可以恢复，但在途 HTTP 请求重放、自动/轮换存档与 checksum 仍未实现。
+当前版本已经由 Worker 生成原子 `v21` 快照，UI 在同一份 `v24` 外层封装中加入关键乘客轮询 `v2` 与 checksum 后写入 IndexedDB（手动槽或轮换自动槽）；保存屏障会申请 `save-barrier` 暂停令牌、取消尚未落地的模型请求并等待已派发物理事务完成，再请求 Worker 安全点。TimeDirector / ProceduralWorld / Survival / CaptainOperations / `hullConsequence` / `llmOrchestration` / `passengerSociety` / `departmentInbox`、轮询调度、脱敏区域观测、私人 note 和舰长截止点可以恢复；pending `awaiting-http` 恢复时会重放 `llm-effect-request`，`applying-tools` 因工具队列未落盘而 safe-fail（`llm-effect-aborted` / `restored-during-tool-apply`），但在途 HTTP 请求正文重放仍未实现。
 
 ### 13.4 自动与手动存档
 
@@ -973,7 +974,7 @@ interface SaveEnvelope {
 
 长期日志按模拟时间或大小切块并压缩。压缩只能改变存储表示，不能删除审计语义。
 
-当前全舰事件流在 UI 中显示为“舰桥日志”，硬限制为最近 `500` 条。关键乘客私人 note 不属于该事件流或舰内广播，只绑定本人并显示在对应“乘员”页条目；这项隔离不能解释为已经实现通用收件箱。
+当前全舰事件流在 UI 中显示为“舰桥日志”，硬限制为最近 `500` 条。关键乘客私人 note 不属于该事件流或舰内广播，只绑定本人并显示在对应“乘员”页条目；舰长→部门单向收件箱（B2-lite）也不等于部门自发消息总线或通用社会收件箱。
 
 ## 14. 上帝注入与审计
 
@@ -1175,7 +1176,7 @@ LLM 提示构建器只接收 `ObservationSnapshot`，类型层面禁止传入 `W
 - 长日志切块、压缩和读取；
 - 上帝审计与外部平衡总账一致。
 
-当前 `v21` 本地存档继续覆盖关键乘客轮询快照 `v2`，并保存下一个舰长决策截止点；运行时恢复还验证全部物理与人员账本。这不等于在途 HTTP 请求已可恢复。
+当前 `v24` 本地存档继续覆盖关键乘客轮询快照 `v2`；运行时 `v21` 另持久化 `llmOrchestration`、舰长 sidecar 与 `passengerSociety` / `departmentInbox`。这不等于在途 HTTP 请求正文已可恢复。
 
 ### 17.6 第六层：端到端场景
 
@@ -1205,13 +1206,15 @@ LLM 提示构建器只接收 `ObservationSnapshot`，类型层面禁止传入 `W
 
 当前命令边界为：
 
-- `npm run test:unit`：直接运行 Node 测试；
-- `npm test`：先执行生产构建，再运行 Node 测试；
+- `npm test` / `npm run test:fast` / `npm run test:unit`：日常快套件（排除 4 个超重 Worker / 长航程文件；`test:unit` 为别名）；
+- `npm run test:heavy`：上述超重文件串行运行；
+- `npm run test:full`：先生产构建，再跑全部 Node 测试（含超重）；
 - `npm run typecheck`：TypeScript 静态检查；
 - `npm run lint`：ESLint；
-- `npm run check`：依次运行类型检查、Lint、生产构建和全部 Node 测试。
+- `npm run check`：文档检查、类型检查、Lint、生产构建和 `test:fast`；
+- `npm run check:release`：在 `check` 之上再跑 `test:heavy`（发布前）。
 
-当前默认 Node 套件已经覆盖仿真核心、名册单一人口权威、人员、舱室/冷却/电力/导航/旋转/水六个权威物理域、Worker 十时钟原子耦合、舱区危险带剂量积分与口粮、休眠 A/B 储备、TimeDirector pause/无补时、精确阻塞截止点、ProceduralWorld 精确事件时刻与入快照、热泵闭合、逐负载废热、火炬双库存与源能分账、推进控制供电、双环人工重力与动量/能量闭合、A/B 水回收两级质量账/馈线/延迟仪表/上帝故障、维修任务的备件消耗/人员与供电阻塞/完成检修/恢复校验、舰长运营资源与任务、跃迁 frame epoch、跨域恢复对账、命令权限与回滚、固定 `40` 节点 LLM 拓扑、关键乘客隐私/节流/快照，以及网关和服务端安全边界，不再是早期启动骨架测试。真实云端 API 不进入默认套件，只使用注入的假 `fetch` 或本地运行时。
+日常快套件已覆盖仿真核心、名册单一人口权威、人员、舱室/冷却/电力/导航/旋转/水六个权威物理域、Worker 十时钟原子耦合、舱区危险带剂量积分与口粮、休眠 A/B 储备、TimeDirector pause/无补时、精确阻塞截止点、ProceduralWorld 精确事件时刻与入快照、热泵闭合、逐负载废热、火炬双库存与源能分账、推进控制供电、双环人工重力与动量/能量闭合、A/B 水回收两级质量账/馈线/延迟仪表/上帝故障、维修任务的备件消耗/人员与供电阻塞/完成检修/恢复校验、舰长运营资源与任务、跃迁 frame epoch、跨域恢复对账、命令权限与回滚、固定 `40` 节点 LLM 拓扑、关键乘客隐私/节流/快照，以及网关和服务端安全边界，不再是早期启动骨架测试。真实云端 API 不进入默认套件，只使用注入的假 `fetch` 或本地运行时。超重长航程与部分 Worker 综合场景放在 `test:heavy`，避免拖慢日常迭代。
 
 完整目标中的默认门禁仍必须包含：
 
@@ -1220,7 +1223,7 @@ LLM 提示构建器只接收 `ObservationSnapshot`，类型层面禁止传入 `W
 - Worker/存档关键集成测试；
 - 一条最短端到端烟雾测试。
 
-性能和长跑测试使用独立命令，避免拖慢日常迭代。
+性能和长跑测试继续使用独立命令（`test:heavy` / `check:release`）。
 
 ## 18. 纵切路线与完整目标边界
 
@@ -1243,14 +1246,14 @@ LLM 提示构建器只接收 `ObservationSnapshot`，类型层面禁止传入 `W
 - `SimulationEngine`、人员、舱室、冷却、电力、导航与旋转运行在权威 Worker；
 - UI 时钟和主要电力、热、大气、导航、旋转、水、人口、舱室与跃迁读数来自 Worker，其中六个物理域的普通读数来自传感器投影；
 - 上帝操作改变权威引擎，并把结果反馈到 UI；
-- Worker 生成并原子恢复运行时快照 `v18`（含 `hullConsequence`；可读 `v16`/`v17`）；核心、人员、舱室、冷却、电力、导航、旋转、水、维修和舰长运营十个时钟必须一致，并核对名册人口权威、分区风险/剂量状态、TimeDirector / ProceduralWorld / Survival、空气处理捕集账、水库存/处理账、维修任务/机器人/备件账、舰长命令/运营任务/远程资产账以及关键跨域能量与角动量账；读取 `v16` 时在旧世界时钟创建运营域基线；读取 `v17` 时补空 `hullConsequence` 注册表；
+- Worker 生成并原子恢复运行时快照 `v21`（含 `llmOrchestration` / sidecar / `passengerSociety` / `departmentInbox`；可读 `v16`/`v17`/`v18`/`v19`/`v20`）；核心、人员、舱室、冷却、电力、导航、旋转、水、维修和舰长运营十个时钟必须一致，并核对名册人口权威、分区风险/剂量状态、TimeDirector / ProceduralWorld / Survival、空气处理捕集账、水库存/处理账、维修任务/机器人/备件账、舰长命令/运营任务/远程资产账以及关键跨域能量与角动量账；读取 `v16` 时在旧世界时钟创建运营域基线；读取 `v17` 时补空 `hullConsequence` 注册表；读取 `v18` 时补空 `llmOrchestration` 与 sidecar；读取 `v19` 时补空 `passengerSociety`；读取 `v20` 时补空 `departmentInbox`；
 - 规范 `40` 节点拓扑中的舰长与相关部门通过真实本地 API 代理完成事件咨询；`32` 个关键乘客槽位也已通过单并发、只读且私人化的 `passenger-self` 链路进入生产轮询；
 - Worker 在舰长决策截止点精确冻结；部门咨询、舰长研判和每轮最多八条世界命令在同一时刻内完成并生成结构化回执。关键乘客只读轮询不申请暂停令牌，世界可在其等待期间继续推进。
 
 尚未达到本阶段目标架构的部分：
 
-- 手动存档已用 IndexedDB 单槽；自动/轮换存档、checksum 与待处理 LLM 效果恢复尚未完成；
-- LLM 外部效果、观察 revision 复核和已接受响应重放尚未全部进入 Worker 快照（pause tokens 与阻塞边界已落地）；命令总线本身已经具有幂等、revision、权限与审计。
+- IndexedDB 已支持手动槽、轮换自动槽与 checksum；待处理 LLM 效果 HTTP 正文恢复尚未完成；
+- 舰长阻塞 `llmOrchestration` pending/`callId`/观察 revision 已进入 Runtime `v21`，`awaiting-http` 可读档重放；工具队列落盘、在途 HTTP 正文与部门/乘客效果的同等 Worker 编排仍未完成；命令总线本身已经具有幂等、revision、权限与审计。
 
 因此当前可以称“可运行的系统仿真纵切”，仍不可称完整引擎。
 
@@ -1372,12 +1375,12 @@ LLM 提示构建器只接收 `ObservationSnapshot`，类型层面禁止传入 `W
 
 纵切 1、六个权威物理域和通用命令骨架已经接通。当前最小、风险最低的下一步是深化跨域后果，而不是再建立一套平行状态：
 
-1. 把现有舰长、部门咨询与关键乘客私人轮询建模为 Worker 可存档的外部效果，补齐稳定 `callId`、观察 revision 与已接受响应记录；保留已有 pause tokens、精确截止点、`v21` 调度/脱敏区域观测/私人 note 恢复、保存屏障和异步只读防迟到语义；
+1. 把部门咨询与关键乘客私人轮询也建模为 Worker 可存档的外部效果；在已有 `llmOrchestration` pending/`callId`/观察 revision/accept 去重与 `awaiting-http` 重放之上，补齐工具自动落盘与 HTTP 正文恢复（`applying-tools` 今日仍 safe-fail）；保留 pause tokens、精确截止点、`v24` 调度恢复、保存屏障和异步只读防迟到语义；
 2. 在现有逐负载服务、冷却泵/热泵、休眠 A/B 储备和推进控制联锁上，继续把失供后果接到更多局部设备与人员，并把汇总舰务热拆到对应热节点；
-3. 深化 48 舱通风、洗涤器、补气、湿度冷凝与局部热交换，把已预留的冷凝水入口接回 A/B 水环，并继续展开水管、阀、交叉供水、储备冰融化和过滤介质寿命；
+3. 深化 48 舱通风、洗涤器、补气与局部热交换；AHU 降阶冷凝→污水罐已接线，继续展开水管、阀、交叉供水、储备冰融化和过滤介质寿命；
 4. 在已接通的分环重力/振动阈值、舱区危险带剂量积分与口粮纵切基础上，加入治疗、真实位置移动与避险，使更多资源和任务结果继续写入受影响人员，而聚合人口仍只从名册派生；
-5. 在不削弱现有关键乘客私人边界的前提下，为舰长→部门通信补充目标中的通用收件箱、长期记忆、受限嵌套与循环检测；只调度既有 `40` 个节点，不增加运行时创建能力，也不把私人 note 当作社会自治；
-6. 在已有 IndexedDB 手动单槽之上增加自动/轮换存档、checksum、版本迁移和待处理 LLM 效果恢复；
+5. 在已有舰长→部门单向收件箱（B2-lite）与关键乘客私人边界之上，补充目标中的部门自发消息总线、长期记忆、受限嵌套与循环检测；只调度既有 `40` 个节点，不增加运行时创建能力，也不把私人 note 当作社会自治；
+6. 在已有 IndexedDB 手动/自动槽与 checksum 之上补齐更完整版本迁移链和待处理 LLM 效果 HTTP 正文恢复；
 7. 加入真实星历/轨道导航、恒星级坐标与局部 frame epoch 的真实变换，并把现有旋转环纵切深化为可移动配平、局部结构/裂纹、长期重力剂量和完整科里奥利行为后果；把首批维修纵切扩展到机器人路径、门禁、现场制造和通用备件替代；
 8. 增加长航程守恒漂移、十时钟与跨域能源/角动量恢复、跨域故障、完整航程和系统化视觉回归测试。
 

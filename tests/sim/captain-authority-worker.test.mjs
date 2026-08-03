@@ -198,7 +198,7 @@ test("captain world authority reaches durable operations and physical actuators 
     requestId: "captain-authority:snapshot",
   }).payload.snapshot;
 
-  assert.equal(saved.snapshotVersion, 18);
+  assert.equal(saved.snapshotVersion, 21);
   assert.equal(saved.engine.state.journey.destination, "天仓五");
   assert.equal(saved.operations.mission.disposition, "divert");
   assert.equal(saved.operations.departmentOrders.length, 1);

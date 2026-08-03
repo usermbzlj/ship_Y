@@ -13,7 +13,8 @@
  * - Water massClosureErrorKg / inventory−ledger: abs ≤ 1e-6 kg
  *   (worker-runtime band; hard restore gate is max(1e-4, inventory·1e-11)).
  * - Atmosphere species (zones + vented sink + scrubber capture) vs cumulative
- *   metabolism ledger: abs ≤ max(1e-6, |expected|·1e-10) kg per species —
+ *   metabolism ledger, minus water `condensateInflowKg` for recoverable vapor:
+ *   abs ≤ max(1e-6, |expected|·1e-10) kg per species —
  *   slightly looser than per-substep assertSpeciesBalance (1e-9 / 1e-12) for
  *   day-scale float drift; nitrogen must not be invented.
  * - Electrical stored vs ledger (incl. numericalResidualKWh): abs ≤ 1e-6 kWh
@@ -160,14 +161,20 @@ function accountedAtmosphereGasesKg(compartments) {
   return gases;
 }
 
-function expectedAtmosphereGasesKg(initialAccounted, metabolism) {
+function expectedAtmosphereGasesKg(
+  initialAccounted,
+  metabolism,
+  condensateRecoveredKg = 0,
+) {
   return {
     oxygen: initialAccounted.oxygen - metabolism.oxygenConsumedKg,
     nitrogen: initialAccounted.nitrogen,
     carbonDioxide:
       initialAccounted.carbonDioxide + metabolism.carbonDioxideProducedKg,
     waterVapor:
-      initialAccounted.waterVapor + metabolism.waterVaporProducedKg,
+      initialAccounted.waterVapor +
+      metabolism.waterVaporProducedKg -
+      condensateRecoveredKg,
   };
 }
 
@@ -225,11 +232,17 @@ function assertWaterClosure(waterSnap, label) {
   return { inventoryKg, closureKg: inventoryKg - expectedKg };
 }
 
-function assertAtmosphereClosure(initialAccounted, compartmentsSnap, label) {
+function assertAtmosphereClosure(
+  initialAccounted,
+  compartmentsSnap,
+  label,
+  condensateRecoveredKg = 0,
+) {
   const accounted = accountedAtmosphereGasesKg(compartmentsSnap);
   const expected = expectedAtmosphereGasesKg(
     initialAccounted,
     compartmentsSnap.metabolism,
+    condensateRecoveredKg,
   );
   for (const gas of GAS_SPECIES) {
     assertClose(
@@ -282,6 +295,7 @@ test("long-voyage smoke: ≥1 sim day keeps water/atmosphere/electrical within c
     initialAtmosphere,
     afterCoupled.compartments,
     "coupled-hour",
+    afterCoupled.water.ledger.condensateInflowKg,
   );
   assertElectricalClosure(afterCoupled.electrical, "coupled-hour");
   if (

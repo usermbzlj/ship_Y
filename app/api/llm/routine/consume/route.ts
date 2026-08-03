@@ -1,19 +1,17 @@
 import {
   assertTrustedLocalRequest,
   getLlmServerRuntime,
+  handleLlmRoute,
   jsonResponse,
   readStrictJsonBody,
-  routeErrorResponse,
 } from "../../_server";
 
 export async function POST(request: Request): Promise<Response> {
-  try {
+  return handleLlmRoute(request, "llm.routine.consume", async () => {
     assertTrustedLocalRequest(request);
     const input = await readStrictJsonBody(request);
     const routineChange =
       getLlmServerRuntime().consumeRoutineTicket(input);
     return jsonResponse({ routineChange });
-  } catch (error) {
-    return routeErrorResponse(error);
-  }
+  });
 }

@@ -28,6 +28,12 @@ function dispatch(command) {
   return emitted[0];
 }
 
+function dispatchAll(command) {
+  emitted.length = 0;
+  globalThis.onmessage({ data: command });
+  return [...emitted];
+}
+
 function initialize(requestId = "init") {
   const ready = dispatch({
     type: "initialize",
@@ -145,7 +151,7 @@ test("time director pause tokens freeze stepping and enter the runtime snapshot"
     requestId: "time-control-snapshot",
   });
   assert.equal(saved.type, "snapshot");
-  assert.equal(saved.payload.snapshot.snapshotVersion, 18);
+  assert.equal(saved.payload.snapshot.snapshotVersion, 21);
   assert.equal(saved.payload.snapshot.timeDirector.timeScale, 3_600);
   assert.deepEqual(saved.payload.snapshot.timeDirector.pauseTokens, []);
   assert.ok(saved.payload.snapshot.timeDirector.totalSimSecondsAdvanced > 0);
@@ -168,7 +174,7 @@ test("worker stops exactly at a blocking decision boundary without catch-up debt
   assert.equal(ready.type, "ready");
   releaseUiPause("release-exact-decision-boundary");
 
-  const stopped = dispatch({
+  const boundaryEvents = dispatchAll({
     type: "step",
     requestId: "step-to-exact-decision-boundary",
     realSeconds: 1,
@@ -179,7 +185,8 @@ test("worker stops exactly at a blocking decision boundary without catch-up debt
       pauseToken: "llm-waiting",
     },
   });
-  assert.equal(stopped.type, "stepped", stopped.message);
+  assert.equal(boundaryEvents[0].type, "stepped", boundaryEvents[0].message);
+  const stopped = boundaryEvents[0];
   assert.equal(stopped.payload.elapsedSeconds, 21_600);
   assert.equal(stopped.payload.timeControl.paused, true);
   assert.deepEqual(stopped.payload.timeControl.pauseTokens, ["llm-waiting"]);
@@ -191,6 +198,19 @@ test("worker stops exactly at a blocking decision boundary without catch-up debt
     },
   );
   assert.equal(stopped.payload.timeControl.owedSimSeconds, 0);
+  assert.equal(boundaryEvents[1]?.type, "llm-effect-request");
+  const pending = stopped.payload.llmOrchestration.pending;
+  assert.ok(pending);
+
+  // Worker owns llm-waiting while pending; finish clears it.
+  const finished = dispatch({
+    type: "llm-effect-finish",
+    requestId: "finish-exact-decision-boundary",
+    callId: pending.callId,
+    advancesRoutineSchedule: false,
+  });
+  assert.equal(finished.type, "ready", finished.message);
+  assert.equal(finished.payload.llmOrchestration.pending, null);
 
   const resumed = dispatch({
     type: "set-time-control",
@@ -363,7 +383,7 @@ test("worker couples 48 zones, population, aggregate state, and atomic saves", (
     requestId: "snapshot-coupling",
   });
   assert.equal(saved.type, "snapshot");
-  assert.equal(saved.payload.snapshot.snapshotVersion, 18);
+  assert.equal(saved.payload.snapshot.snapshotVersion, 21);
   assert.equal(saved.payload.snapshot.timeDirector.snapshotVersion, 1);
   assert.equal(saved.payload.snapshot.proceduralWorld.snapshotVersion, 1);
   assert.equal(saved.payload.snapshot.survival.snapshotVersion, 1);

@@ -6,17 +6,22 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "dev": "vinext dev",
+    "dev": "node scripts/start-development.mjs",
     "dev:deepseek": "node scripts/start-deepseek.mjs",
     "check:env": "node scripts/check-env.mjs",
     "check:docs": "node scripts/check-docs.mjs",
     "build": "vinext build",
     "start": "node scripts/start-production.mjs",
-    "test": "npm run build && node --test",
-    "test:unit": "node --test",
+    "logs:latest": "node scripts/show-latest-log.mjs",
+    "test": "node scripts/run-tests.mjs --suite=fast",
+    "test:unit": "node scripts/run-tests.mjs --suite=fast",
+    "test:fast": "node scripts/run-tests.mjs --suite=fast",
+    "test:heavy": "node scripts/run-tests.mjs --suite=heavy",
+    "test:full": "npm run build && node --test",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
-    "check": "npm run check:docs && npm run typecheck && npm run lint && npm test"
+    "check": "npm run check:docs && npm run typecheck && npm run lint && npm run build && npm run test:fast",
+    "check:release": "npm run check && npm run test:heavy"
   },
   "dependencies": {
     "@types/three": "^0.185.1",
