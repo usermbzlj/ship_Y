@@ -48,3 +48,38 @@ test("tampering payload fails verify", async () => {
     false,
   );
 });
+
+test("canonical form is stable across a JSON stringify/parse round-trip", () => {
+  // The IndexedDB -> localStorage fallback re-serializes with JSON.stringify,
+  // which drops `undefined` keys and maps NaN/Infinity to null. The canonical
+  // form must already match that so a valid save is not flagged corrupt.
+  const live = {
+    version: 24,
+    directive: "probe",
+    optional: undefined,
+    metrics: { a: NaN, b: Infinity, c: 1, d: undefined },
+    list: [1, undefined, 2],
+  };
+  const roundTripped = JSON.parse(JSON.stringify(live));
+  assert.equal(
+    canonicalJsonStringify(live),
+    canonicalJsonStringify(roundTripped),
+  );
+  // undefined keys omitted, non-finite numbers folded to null, array holes null.
+  assert.equal(
+    canonicalJsonStringify(live),
+    '{"directive":"probe","list":[1,null,2],"metrics":{"a":null,"b":null,"c":1},"version":24}',
+  );
+});
+
+test("checksum survives the localStorage fallback re-serialization", async () => {
+  const sealed = await withLocalSaveChecksum({
+    version: 24,
+    slotId: "manual",
+    optional: undefined,
+    runtime: { pendingCall: undefined, elapsed: 42 },
+  });
+  // Simulate IDB -> localStorage: JSON.stringify then reload.
+  const reloaded = JSON.parse(JSON.stringify(sealed));
+  assert.equal(await verifyLocalSaveChecksum(reloaded), true);
+});

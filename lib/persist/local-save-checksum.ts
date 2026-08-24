@@ -10,24 +10,66 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-/** Deterministic JSON: sorted object keys, recursive; arrays keep order. */
+/**
+ * Deterministic JSON: sorted object keys, recursive; arrays keep order.
+ *
+ * Mirrors `JSON.stringify` value semantics exactly so a checksum computed on a
+ * live object equals the checksum computed after a `JSON.stringify` →
+ * `JSON.parse` round-trip (the IndexedDB → localStorage fallback path). That
+ * means: object keys whose value is `undefined`/function/symbol are omitted,
+ * such values inside arrays become `null`, non-finite numbers (`NaN`,
+ * `Infinity`) become `null`, and `toJSON` (e.g. `Date`) is honored. Without
+ * this, a valid save could be flagged corrupt after the fallback re-serializes
+ * it and drops those keys.
+ */
 export function canonicalJsonStringify(value: unknown): string {
-  if (value === null || typeof value !== "object") {
+  const canonical = canonicalize(value);
+  return canonical === undefined ? "null" : canonical;
+}
+
+/** Returns the canonical string, or `undefined` for JSON-omitted values. */
+function canonicalize(value: unknown): string | undefined {
+  if (value === null) return "null";
+  const valueType = typeof value;
+  if (valueType === "number") {
+    return Number.isFinite(value) ? JSON.stringify(value) : "null";
+  }
+  if (valueType === "boolean" || valueType === "string") {
     return JSON.stringify(value);
   }
-  if (Array.isArray(value)) {
-    return `[${value.map((entry) => canonicalJsonStringify(entry)).join(",")}]`;
+  if (
+    valueType === "undefined" ||
+    valueType === "function" ||
+    valueType === "symbol"
+  ) {
+    return undefined;
   }
-  const keys = Object.keys(value as Record<string, unknown>).sort();
-  const body = keys
-    .map(
-      (key) =>
-        `${JSON.stringify(key)}:${canonicalJsonStringify(
-          (value as Record<string, unknown>)[key],
-        )}`,
-    )
-    .join(",");
-  return `{${body}}`;
+  if (valueType === "bigint") {
+    // JSON.stringify throws on bigint; match that so bad payloads never seal.
+    return JSON.stringify(value as never);
+  }
+  const objectValue = value as {
+    toJSON?: (key?: string) => unknown;
+  };
+  if (typeof objectValue.toJSON === "function") {
+    return canonicalize(objectValue.toJSON());
+  }
+  if (Array.isArray(value)) {
+    const items = value.map((entry) => {
+      const canonical = canonicalize(entry);
+      return canonical === undefined ? "null" : canonical;
+    });
+    return `[${items.join(",")}]`;
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  const parts: string[] = [];
+  for (const key of keys) {
+    const canonical = canonicalize(record[key]);
+    if (canonical === undefined) continue;
+    parts.push(`${JSON.stringify(key)}:${canonical}`);
+  }
+  return `{${parts.join(",")}}`;
 }
 
 export function stripChecksumField<T extends Record<string, unknown>>(
