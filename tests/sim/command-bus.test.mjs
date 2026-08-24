@@ -320,3 +320,45 @@ test("snapshot restore preserves bounded audit and idempotency history", () => {
     /fingerprint does not match/,
   );
 });
+
+test("a retried command never re-executes after its receipt is evicted", () => {
+  const bus = createBus({ historyCapacity: 3 });
+  let calls = 0;
+  for (let index = 0; index < 5; index += 1) {
+    const receipt = bus.dispatch(
+      command({
+        commandId: `cmd-${index + 1}`,
+        idempotencyKey: `voyage-17:cmd-${index + 1}`,
+        payload: { distanceLightYears: 0.5 + index / 10 },
+        issuedAt: 1_000 + index,
+        expectedRevision: index,
+      }),
+      () => {
+        calls += 1;
+        return { appliedIndex: index };
+      },
+    );
+    assert.equal(receipt.status, "succeeded");
+  }
+  assert.equal(calls, 5);
+  // cmd-1 has aged out of the bounded history (capacity 3), but retrying it —
+  // even with a refreshed, currently-valid expectedRevision — must not run the
+  // executor again. Before the fix this double-applied the command.
+  const replay = bus.dispatch(
+    command({
+      commandId: "cmd-1",
+      idempotencyKey: "voyage-17:cmd-1",
+      payload: { distanceLightYears: 0.5 },
+      issuedAt: 1_000,
+      expectedRevision: bus.revision,
+    }),
+    () => {
+      calls += 1;
+      return { shouldNotRun: true };
+    },
+  );
+  assert.equal(replay.status, "rejected");
+  assert.equal(replay.rejection.code, "IDEMPOTENCY_CONFLICT");
+  assert.equal(calls, 5);
+  assert.equal(bus.revision, 5);
+});
