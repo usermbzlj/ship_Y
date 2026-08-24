@@ -472,7 +472,8 @@ test("validateDepartmentStandingSnapshot is strict and deep-clones", () => {
     summary: "跃迁窗口过窄",
     captainDecisionOrdinal: null,
   }).snapshot;
-  assert.equal(withDissent.dissents[0].claimKind, "jump_completed");
+  // A bare jump mention has ambiguous polarity, so it is not auto-classified.
+  assert.equal(withDissent.dissents[0].claimKind, null);
   const badDissent = structuredClone(withDissent);
   badDissent.dissents[0].summary = "";
   assert.equal(validateDepartmentStandingSnapshot(badDissent), null);
@@ -552,6 +553,41 @@ test("autoResolveOpenDepartmentDissents moves counters off zero", () => {
   assert.ok((engineering?.vindicatedCount ?? 0) > 0);
   assert.ok((engineering?.overriddenCount ?? 0) > 0);
   assert.equal(openDissentsForCaptain(snapshot).length, 0);
+});
+
+test("a jump-opposing dissent is not auto-vindicated when a jump occurs", () => {
+  let snapshot = createDepartmentStandingSnapshot();
+  const opposed = recordDepartmentDissent(snapshot, {
+    departmentId: "navigation",
+    simulationSeconds: 100,
+    severity: "formal",
+    summary: "反对现在跃迁：前置条件不满足",
+    captainDecisionOrdinal: 3,
+  });
+  snapshot = opposed.snapshot;
+  // No claimKind is inferred from the ambiguous jump mention.
+  assert.equal(snapshot.dissents[0].claimKind, null);
+
+  snapshot = autoResolveOpenDepartmentDissents(
+    snapshot,
+    buildDissentWorldEvidence({
+      hullIntegrity: 1,
+      activeBreachCount: 0,
+      lowestZonePressureKpa: 101,
+      batteryStateOfChargeFraction: 0.9,
+      receipts: [{ toolName: "execute_jump", status: "accepted" }],
+    }),
+  );
+
+  const record = snapshot.dissents.find(
+    (entry) => entry.recordId === opposed.record.recordId,
+  );
+  // The captain jumped over their objection; do NOT record them as vindicated.
+  assert.equal(record?.resolution, "open");
+  const navigation = snapshot.standings.find(
+    (entry) => entry.departmentId === "navigation",
+  );
+  assert.equal(navigation?.vindicatedCount ?? 0, 0);
 });
 
 test("relative time formatting never goes negative", () => {

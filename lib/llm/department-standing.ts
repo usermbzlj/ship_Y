@@ -363,9 +363,11 @@ export function inferDissentClaimKind(
   ) {
     return "pressure_recovered";
   }
-  if (/跃迁|jump\b|execute_jump/.test(text)) {
-    return "jump_completed";
-  }
+  // Deliberately do NOT infer jump_completed from a bare 跃迁/jump mention:
+  // that keyword matches both "应立即跃迁" and "反对现在跃迁", so auto-resolving
+  // by "a jump happened" would vindicate a department that opposed the jump.
+  // Jump polarity is not reliably readable from free text, so leave such
+  // dissents open unless the filer sets claimKind explicitly.
   if (
     /电力|电源|电池|荷电|电网|soc|power\b|供电/.test(text)
   ) {
