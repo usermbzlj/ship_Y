@@ -197,6 +197,19 @@ test("GET /api/llm/status exposes all 40 fixed slots without prompts or secret n
   assert.doesNotMatch(JSON.stringify(body), /API_KEY|authorization/i);
 });
 
+test("GET /api/llm/status is refused when the Host is not loopback", async () => {
+  const workerUrl = new URL("../../dist/server/index.js", import.meta.url);
+  workerUrl.searchParams.set("llm-routes-nonloopback", `${process.pid}`);
+  const { default: worker } = await import(workerUrl.href);
+  const response = await worker.fetch(
+    new Request("http://192.168.1.50/api/llm/status"),
+    { ASSETS: { fetch: async () => new Response("nf", { status: 404 }) } },
+    { waitUntil() {}, passThroughOnException() {} },
+  );
+  assert.equal(response.status, 403);
+  assert.equal((await response.json()).error.code, "INVALID_HTTP_REQUEST");
+});
+
 test("POST /api/llm/invoke validates HTTP and invocation input before any provider call", async () => {
   const crossOrigin = await request("/api/llm/invoke", {
     method: "POST",
