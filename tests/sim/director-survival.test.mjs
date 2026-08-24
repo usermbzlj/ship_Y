@@ -36,6 +36,20 @@ describe("SimulationTimeDirector", () => {
     assert.equal(director.isPaused, false);
   });
 
+  it("releases a pause token even when the id has surrounding whitespace", () => {
+    const director = new SimulationTimeDirector(1800);
+    // acquire trims the id; release must trim too or the pause leaks forever.
+    assert.equal(director.acquirePauseToken("ui "), true);
+    assert.equal(director.isPaused, true);
+    assert.equal(director.releasePauseToken(" ui"), true);
+    assert.equal(director.isPaused, false);
+
+    director.acquirePauseToken(" llm-waiting ");
+    assert.equal(director.isPaused, true);
+    director.clearPauseTokens(["ui"]);
+    assert.equal(director.isPaused, false);
+  });
+
   it("records fidelity shortfall without replaying it as catch-up time", () => {
     const director = new SimulationTimeDirector(1800);
     const plan = director.planHeartbeat(1);
