@@ -81,6 +81,32 @@ test("value scan redacts bearer tokens and sk- secrets", () => {
   assert.doesNotMatch(encoded, /Bearer /);
 });
 
+test("secrets embedded in Error message and stack are redacted", () => {
+  const error = new Error(
+    "fetch https://api.example.com/v1?api_key=sk-LIVESECRETVALUE99 failed with Authorization: Bearer sk-anotherlivesecret",
+  );
+  error.stack =
+    "Error: leak sk-STACKSECRET12345\n    at https://api.example.com/v1?token=sk-QUERYSECRET99 (foo.js:1:1)";
+  const sanitized = sanitizeLogValue({ error });
+  const encoded = JSON.stringify(sanitized);
+  assert.doesNotMatch(encoded, /sk-[A-Za-z0-9]{8,}/);
+  assert.doesNotMatch(encoded, /Bearer\s+\S/);
+  assert.match(encoded, /\[REDACTED\]/);
+  // Non-secret context is preserved for diagnostics.
+  assert.match(encoded, /fetch https:\/\/api\.example\.com/);
+  assert.match(encoded, /api_key=\[REDACTED\]/);
+});
+
+test("secret substrings are redacted even when not the whole value", () => {
+  const sanitized = sanitizeLogValue({
+    detail: "connecting to https://host/v1?access_token=sk-embeddedsecret9 now",
+  });
+  const encoded = JSON.stringify(sanitized);
+  assert.doesNotMatch(encoded, /sk-embeddedsecret9/);
+  assert.match(encoded, /access_token=\[REDACTED\]/);
+  assert.match(encoded, /connecting to https:\/\/host/);
+});
+
 test("privateKey and setCookie keys are redacted", () => {
   const sanitized = sanitizeLogValue({
     privateKey: "pk-must-not-leak",
