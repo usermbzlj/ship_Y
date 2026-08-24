@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { splitInlineReasoning } from "../../lib/llm/reasoning-split.ts";
+import {
+  scrubReasoningFromValue,
+  splitInlineReasoning,
+} from "../../lib/llm/reasoning-split.ts";
 
 test("leaves ordinary content untouched", () => {
   const raw = "各部门共识：跃迁前置条件不满足，应先恢复关键传感器。";
@@ -63,4 +66,39 @@ test("is case-insensitive about the tag name", () => {
   const split = splitInlineReasoning("<THINKING>x</THINKING>正文");
   assert.equal(split.text, "正文");
   assert.equal(split.reasoning, "x");
+});
+
+test("nested reasoning tags do not leak the inner close into the answer", () => {
+  const split = splitInlineReasoning(
+    "<think>outer<think>inner</think>still hidden</think>可见正文",
+  );
+  assert.equal(split.text, "可见正文");
+  assert.doesNotMatch(split.text, /think|hidden|inner|outer/i);
+  assert.match(split.reasoning, /outer/);
+  assert.match(split.reasoning, /inner/);
+  assert.match(split.reasoning, /still hidden/);
+});
+
+test("a self-closing reasoning tag does not swallow the visible answer", () => {
+  const split = splitInlineReasoning("<think/>可见正文");
+  assert.equal(split.text, "可见正文");
+  assert.equal(split.reasoning, null);
+});
+
+test("scrubReasoningFromValue strips CoT from every string in tool arguments", () => {
+  const { value, reasoning } = scrubReasoningFromValue({
+    voice: "<think>should I be honest?</think>各位，我们必须改道。",
+    summary: "常规陈述，无思维链。",
+    nested: { note: "<thinking>secret</thinking>公开备注" },
+    list: ["<think>hidden</think>可见项", "普通项"],
+  });
+  assert.equal(value.voice, "各位，我们必须改道。");
+  assert.equal(value.summary, "常规陈述，无思维链。");
+  assert.equal(value.nested.note, "公开备注");
+  assert.deepEqual(value.list, ["可见项", "普通项"]);
+  assert.match(reasoning, /should I be honest\?/);
+  assert.match(reasoning, /secret/);
+  assert.match(reasoning, /hidden/);
+  const encoded = JSON.stringify(value);
+  assert.doesNotMatch(encoded, /think|secret|hidden|should I be honest/i);
 });

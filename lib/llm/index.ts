@@ -1,4 +1,7 @@
-import { splitInlineReasoning } from "./reasoning-split.ts";
+import {
+  scrubReasoningFromValue,
+  splitInlineReasoning,
+} from "./reasoning-split.ts";
 
 export {
   splitInlineReasoning,
@@ -2437,13 +2440,13 @@ async function parseJsonResponse(
   const split = splitInlineReasoning(
     textValue(getAtPath(payload, mapping.textPath)),
   );
+  const tools = scrubToolCallReasoning(
+    parseToolCalls(getAtPath(payload, mapping.toolCallsPath), mapping.toolCall),
+  );
   return {
     text: split.text,
-    reasoning: split.reasoning,
-    toolCalls: parseToolCalls(
-      getAtPath(payload, mapping.toolCallsPath),
-      mapping.toolCall,
-    ),
+    reasoning: mergeReasoning(split.reasoning, tools.reasoning),
+    toolCalls: tools.toolCalls,
     finishReason: nullableString(
       getAtPath(payload, mapping.finishReasonPath),
     ),
@@ -2542,10 +2545,13 @@ async function parseStreamResponse(
   }
 
   const split = splitInlineReasoning(text);
+  const tools = scrubToolCallReasoning(
+    [...streamTools.values()].map(finalizeStreamToolCall),
+  );
   return {
     text: split.text,
-    reasoning: split.reasoning,
-    toolCalls: [...streamTools.values()].map(finalizeStreamToolCall),
+    reasoning: mergeReasoning(split.reasoning, tools.reasoning),
+    toolCalls: tools.toolCalls,
     finishReason,
     usage,
   };
@@ -2585,6 +2591,39 @@ function stripStreamPrefix(
 
 function normalizeNewlines(value: string): string {
   return value.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function mergeReasoning(
+  first: string | null,
+  second: string | null,
+): string | null {
+  const parts = [first, second].filter(
+    (part): part is string => typeof part === "string" && part.length > 0,
+  );
+  return parts.length > 0 ? parts.join("\n\n") : null;
+}
+
+/**
+ * Strips inline chain-of-thought from every string inside each tool call's
+ * arguments. The gateway already scrubs message text; tool arguments flow into
+ * the captain journal, dissent ledger, rumors, persisted state, and the next
+ * round's prompts, so hidden reasoning smuggled into an argument must be
+ * removed here too. Returns the cleaned tool calls and any captured reasoning.
+ */
+function scrubToolCallReasoning(toolCalls: LlmToolCall[]): {
+  toolCalls: LlmToolCall[];
+  reasoning: string | null;
+} {
+  const captured: string[] = [];
+  const scrubbed = toolCalls.map((call) => {
+    const result = scrubReasoningFromValue(call.arguments);
+    if (result.reasoning) captured.push(result.reasoning);
+    return { ...call, arguments: result.value as JsonValue };
+  });
+  return {
+    toolCalls: scrubbed,
+    reasoning: captured.length > 0 ? captured.join("\n\n") : null,
+  };
 }
 
 function parseToolCalls(
