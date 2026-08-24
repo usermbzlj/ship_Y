@@ -88,7 +88,8 @@ export const handleReviseMission: CommandHandler<"revise-mission"> = (
     objective: command.objective,
     route: command.route,
   });
-  // 目的地/起点命中星表时轻触校验：若 LLM 航距像 |dSol| 差，改用欧氏；自由文本仍放行。
+  // 起点/终点命中星表时，航距以星表欧氏距离为权威事实，覆盖 LLM 自报值。
+  // 幻觉短航距会压低跃迁段数、单段充能与热负载；只有星表无法解析的自由文本才放行。
   let totalDistanceLightYears = command.totalDistanceLightYears;
   let totalLegs = command.totalLegs;
   if (command.disposition !== "abandon") {
@@ -99,17 +100,8 @@ export const handleReviseMission: CommandHandler<"revise-mission"> = (
     const fromEntry = findStarCatalogEntry(fromLabel);
     const toEntry = findStarCatalogEntry(destination);
     if (fromEntry && toEntry && fromEntry.id !== toEntry.id) {
-      const catalogDistanceLy = routeDistanceLy(fromEntry.id, toEntry.id);
-      const naiveSolDelta = Math.abs(
-        toEntry.distanceFromSolLy - fromEntry.distanceFromSolLy,
-      );
-      if (Math.abs(totalDistanceLightYears - naiveSolDelta) < 0.2) {
-        totalDistanceLightYears = catalogDistanceLy;
-      }
-      totalLegs = Math.max(
-        totalLegs,
-        estimateMinLegs(totalDistanceLightYears),
-      );
+      totalDistanceLightYears = routeDistanceLy(fromEntry.id, toEntry.id);
+      totalLegs = Math.max(totalLegs, estimateMinLegs(totalDistanceLightYears));
     }
   }
   const journey = engine.reviseJourneyPlan({
