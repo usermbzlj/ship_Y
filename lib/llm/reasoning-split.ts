@@ -18,17 +18,11 @@ const INLINE_REASONING_TAGS = ["think", "thinking"] as const;
 
 const TAG_ALTERNATION = INLINE_REASONING_TAGS.join("|");
 
-/** 成对出现：`<think ...> ... </think>`。 */
-const PAIRED_PATTERN = new RegExp(
-  `<(${TAG_ALTERNATION})\\b[^>]*>([\\s\\S]*?)<\\/\\1\\s*>`,
-  "gi",
-);
-
-/** 只有开标签、没有闭标签（响应被截断时常见），其后全部视为思维链。 */
-const UNTERMINATED_PATTERN = new RegExp(
-  `<(${TAG_ALTERNATION})\\b[^>]*>([\\s\\S]*)$`,
-  "i",
-);
+/**
+ * 匹配一个思维链标签：开标签 `<think ...>`、闭标签 `</think>` 或自闭合
+ * `<think/>`。`g` 用于逐个扫描，`i` 忽略大小写。
+ */
+const TAG_PATTERN = new RegExp(`<(/)?(?:${TAG_ALTERNATION})\\b([^>]*)>`, "gi");
 
 export interface SplitReasoningResult {
   /** 对外正文：已剥离内联思维链，可安全进入世界层、prompt 与存档。 */
@@ -40,39 +34,108 @@ export interface SplitReasoningResult {
 /**
  * 从模型正文中剥离内联思维链。
  *
+ * 用带深度计数的扫描器逐个处理标签，正确应对嵌套（`<think><think>…</think>…</think>`）、
+ * 自闭合（`<think/>` 视为零宽，不吞掉其后的正文）与被截断的开标签（其后全部视为思维链）。
  * 纯函数，不持有状态；输入非字符串时按空串处理，保证网关解析路径不抛错。
- * 若模型整条响应都是思维链，返回的 `text` 为空串——这是对「模型没有给出正文」
- * 的如实表示，不用思维链顶替正文。
+ * 若模型整条响应都是思维链，返回的 `text` 为空串——不用思维链顶替正文。
  */
 export function splitInlineReasoning(raw: string): SplitReasoningResult {
   if (typeof raw !== "string" || raw.length === 0) {
     return { text: typeof raw === "string" ? raw : "", reasoning: null };
   }
 
-  const captured: string[] = [];
+  const pattern = new RegExp(TAG_PATTERN.source, "gi");
+  const capturedBlocks: string[] = [];
+  let text = "";
+  let currentReasoning = "";
+  let depth = 0;
+  let lastIndex = 0;
+  let matchedAny = false;
+  let match: RegExpExecArray | null;
 
-  let stripped = raw.replace(PAIRED_PATTERN, (_match, _tag, inner: string) => {
-    captured.push(inner);
-    return "";
-  });
+  while ((match = pattern.exec(raw)) !== null) {
+    matchedAny = true;
+    const segment = raw.slice(lastIndex, match.index);
+    if (depth > 0) currentReasoning += segment;
+    else text += segment;
+    lastIndex = pattern.lastIndex;
 
-  const unterminated = UNTERMINATED_PATTERN.exec(stripped);
-  if (unterminated) {
-    captured.push(unterminated[2] ?? "");
-    stripped = stripped.slice(0, unterminated.index);
+    const isClose = match[1] === "/";
+    const attributes = match[2] ?? "";
+    const isSelfClose = attributes.trimEnd().endsWith("/");
+
+    if (isClose) {
+      // 深度为 0 时遇到落单的闭标签：直接丢弃标签本身。
+      if (depth > 0) {
+        depth -= 1;
+        if (depth === 0) {
+          capturedBlocks.push(currentReasoning);
+          currentReasoning = "";
+        }
+      }
+    } else if (!isSelfClose) {
+      depth += 1;
+    }
   }
 
-  if (captured.length === 0) {
+  if (!matchedAny) {
     return { text: raw, reasoning: null };
   }
 
-  const reasoning = captured
+  const tail = raw.slice(lastIndex);
+  if (depth > 0) {
+    // 开标签始终未闭合：其后（含 tail）全部计入思维链。
+    currentReasoning += tail;
+    capturedBlocks.push(currentReasoning);
+  } else {
+    text += tail;
+  }
+
+  const reasoning = capturedBlocks
     .map((part) => part.trim())
     .filter((part) => part.length > 0)
     .join("\n\n");
 
   return {
-    text: stripped.trim(),
+    text: text.trim(),
     reasoning: reasoning.length > 0 ? reasoning : null,
+  };
+}
+
+/**
+ * 递归地对任意 JSON 值内的每个字符串剥离内联思维链，返回清洗后的值与合并的思维链。
+ * 用于工具调用参数：思维链模型可能把 `<think>` 写进 `record_captain_log.voice`、
+ * `file_dissent.summary` 等字段，这些字段会进入玩家可见的航行志、异议账本、下一轮
+ * prompt 与本地存档，必须在网关解析层就剥离。不含标签的字符串保持原样。
+ */
+export function scrubReasoningFromValue(value: unknown): {
+  value: unknown;
+  reasoning: string | null;
+} {
+  const captured: string[] = [];
+
+  const walk = (input: unknown): unknown => {
+    if (typeof input === "string") {
+      const split = splitInlineReasoning(input);
+      if (split.reasoning) captured.push(split.reasoning);
+      return split.text;
+    }
+    if (Array.isArray(input)) {
+      return input.map((entry) => walk(entry));
+    }
+    if (input !== null && typeof input === "object") {
+      const output: Record<string, unknown> = {};
+      for (const [key, entry] of Object.entries(input)) {
+        output[key] = walk(entry);
+      }
+      return output;
+    }
+    return input;
+  };
+
+  const scrubbed = walk(value);
+  return {
+    value: scrubbed,
+    reasoning: captured.length > 0 ? captured.join("\n\n") : null,
   };
 }

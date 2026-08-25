@@ -162,11 +162,13 @@ export class SimulationTimeDirector {
   }
 
   releasePauseToken(token: PauseTokenId): boolean {
-    return this.pauseTokensValue.delete(String(token));
+    // Mirror the trimming acquirePauseToken applies, otherwise a padded id
+    // (e.g. "ui ") would fail to match the stored token and leak the pause.
+    return this.pauseTokensValue.delete(String(token).trim());
   }
 
   clearPauseTokens(except: readonly string[] = []): void {
-    const keep = new Set(except);
+    const keep = new Set(except.map((id) => String(id).trim()));
     for (const token of [...this.pauseTokensValue]) {
       if (!keep.has(token)) this.pauseTokensValue.delete(token);
     }

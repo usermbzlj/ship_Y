@@ -606,9 +606,13 @@ function normalizeGodAssistInvocation(
   };
 }
 
-export function assertTrustedLocalRequest(
-  request: Request,
-): void {
+/**
+ * Rejects any request whose Host is not loopback. Used by read routes (status)
+ * that must stay reachable by same-origin browser GETs (which omit the Origin
+ * header) yet must not serve local prompt/response summaries to a LAN peer when
+ * the server is bound to 0.0.0.0.
+ */
+export function assertLoopbackRequest(request: Request): void {
   const requestUrl = new URL(request.url);
   const loopbackHost =
     requestUrl.hostname === "localhost" ||
@@ -617,10 +621,17 @@ export function assertTrustedLocalRequest(
     requestUrl.hostname === "::1";
   if (!loopbackHost) {
     throw new HttpRequestValidationError(
-      "LLM mutation routes are restricted to this single-player loopback UI",
+      "LLM routes are restricted to this single-player loopback UI",
       403,
     );
   }
+}
+
+export function assertTrustedLocalRequest(
+  request: Request,
+): void {
+  assertLoopbackRequest(request);
+  const requestUrl = new URL(request.url);
   const origin = request.headers.get("origin");
   if (origin !== requestUrl.origin) {
     throw new HttpRequestValidationError(

@@ -424,6 +424,11 @@ export class DeterministicCommandBus<
   private auditValue: CommandAuditEntry[] = [];
   private readonly byIdempotency = new Map<string, ProcessedCommandRecord>();
   private readonly byCommandId = new Map<string, ProcessedCommandRecord>();
+  // Dedup memory retained even after a record's payload is evicted from the
+  // bounded history, so a retried command can never silently re-execute once
+  // its cached receipt has aged out.
+  private readonly seenIdempotencyKeys = new Set<string>();
+  private readonly seenCommandIds = new Set<string>();
   private executorActive = false;
 
   constructor(options: DeterministicCommandBusOptions<TRole, TKind>) {
@@ -530,6 +535,24 @@ export class DeterministicCommandBus<
         commandFingerprint,
         "COMMAND_ID_CONFLICT",
         `command id ${envelope.commandId} was already used`,
+      ) as CommandDispatchReceipt<TResult>;
+    }
+    // The cached receipt may have aged out of the bounded history, but the key
+    // is still remembered: reject the replay instead of executing it again.
+    if (this.seenIdempotencyKeys.has(envelope.idempotencyKey)) {
+      return this.reject(
+        envelope,
+        commandFingerprint,
+        "IDEMPOTENCY_CONFLICT",
+        `idempotency key ${envelope.idempotencyKey} was already processed; its receipt has been evicted from bounded history`,
+      ) as CommandDispatchReceipt<TResult>;
+    }
+    if (this.seenCommandIds.has(envelope.commandId)) {
+      return this.reject(
+        envelope,
+        commandFingerprint,
+        "COMMAND_ID_CONFLICT",
+        `command id ${envelope.commandId} was already used; its receipt has been evicted from bounded history`,
       ) as CommandDispatchReceipt<TResult>;
     }
 
@@ -757,6 +780,8 @@ export class DeterministicCommandBus<
       bus.processedValue.push(record);
       bus.byIdempotency.set(record.envelope.idempotencyKey, record);
       bus.byCommandId.set(record.envelope.commandId, record);
+      bus.seenIdempotencyKeys.add(record.envelope.idempotencyKey);
+      bus.seenCommandIds.add(record.envelope.commandId);
     }
 
     let previousSequence = 0;
@@ -847,6 +872,8 @@ export class DeterministicCommandBus<
     this.processedValue.push(record);
     this.byIdempotency.set(envelope.idempotencyKey, record);
     this.byCommandId.set(envelope.commandId, record);
+    this.seenIdempotencyKeys.add(envelope.idempotencyKey);
+    this.seenCommandIds.add(envelope.commandId);
     if (this.processedValue.length <= this.capacityValue) {
       return;
     }

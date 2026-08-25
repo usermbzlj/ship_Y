@@ -42,8 +42,26 @@ const MAX_STRING_LENGTH = 4_000;
 const REDACTED = "[REDACTED]";
 const SENSITIVE_KEY =
   /api[-_]?key|authorization|bearer|cookie|set[-_]?cookie|credential|password|secret|private[-_]?key|token(s)?$|system[-_]?prompt|prompt|messages|request[-_]?body|response[-_]?body|world[-_]?context|previous[-_]?rejection/i;
-const SENSITIVE_VALUE =
-  /^(?:Bearer\s+\S+|sk-[A-Za-z0-9]{8,}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9._-]+)/i;
+/**
+ * Redacts secret-looking substrings anywhere inside a string (not just when the
+ * whole value is a token). Covers bearer tokens, `sk-` keys, JWTs, and
+ * `secret=`/`token=` style query parameters that can ride along in URLs, error
+ * messages, and stack traces.
+ */
+function scrubSecretsFromString(value: string): string {
+  let out = value
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, REDACTED)
+    .replace(/\bsk-[A-Za-z0-9]{8,}\b/gi, REDACTED)
+    .replace(
+      /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)?/g,
+      REDACTED,
+    );
+  out = out.replace(
+    /\b(api[-_]?key|api[-_]?secret|access[-_]?token|refresh[-_]?token|token|secret|password)=([^&\s"'#]+)/gi,
+    (_match, key: string) => `${key}=${REDACTED}`,
+  );
+  return out;
+}
 
 declare global {
   // Deliberately exposed for local diagnostics. Entries are already sanitized.
@@ -76,8 +94,7 @@ function sanitizeInternal(
     return value;
   }
   if (typeof value === "string") {
-    if (SENSITIVE_VALUE.test(value.trim())) return REDACTED;
-    return truncate(value);
+    return truncate(scrubSecretsFromString(value));
   }
   if (typeof value === "bigint") return value.toString();
   if (typeof value === "undefined") return "[undefined]";
@@ -90,8 +107,10 @@ function sanitizeInternal(
     seen.add(value);
     const errorRecord: Record<string, unknown> = {
       name: value.name,
-      message: truncate(value.message),
-      ...(value.stack ? { stack: truncate(value.stack) } : {}),
+      message: truncate(scrubSecretsFromString(value.message)),
+      ...(value.stack
+        ? { stack: truncate(scrubSecretsFromString(value.stack)) }
+        : {}),
     };
     const errorWithCause = value as Error & { cause?: unknown; code?: unknown };
     if (errorWithCause.code !== undefined) {
