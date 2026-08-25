@@ -40,12 +40,27 @@ const selected = collectTestFiles(testsRoot)
   })
   .sort();
 
+// Test files import `.ts` sources directly and rely on TypeScript type
+// stripping. That is on by default from Node 22.18 / 23.6, but the project's
+// engines floor is 22.13.0, so enable it explicitly on older runtimes.
+function supportsDefaultTypeStripping([major, minor]) {
+  if (major > 23) return true;
+  if (major === 23) return minor >= 6;
+  if (major === 22) return minor >= 18;
+  return false;
+}
+const nodeVersion = process.versions.node.split(".").map(Number);
+const typeStrippingFlags = supportsDefaultTypeStripping(nodeVersion)
+  ? []
+  : ["--experimental-strip-types", "--no-warnings=ExperimentalWarning"];
+
 console.log(
   `Running ${suite} suite: ${selected.length} files (${suite === "heavy" ? "serial" : "concurrency=4"})`,
 );
 const result = spawnSync(
   process.execPath,
   [
+    ...typeStrippingFlags,
     "--test",
     `--test-concurrency=${suite === "heavy" ? 1 : 4}`,
     ...selected,
