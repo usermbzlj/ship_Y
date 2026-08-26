@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 export type AlertLevel = "watch" | "warning" | "critical";
 
@@ -38,6 +38,23 @@ export function AlertBanner({
 }) {
   const activeAlerts = alerts.filter((a) => !a.acknowledged);
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+  // This banner never unmounts and alert IDs are reused (e.g. thermal-critical),
+  // so a locally-dismissed ID would otherwise stay hidden across a mission
+  // restart/load or when the same condition re-fires. Prune dismissed to IDs
+  // that are still present so a fresh occurrence becomes visible again.
+  useEffect(() => {
+    setDismissed((prev) => {
+      if (prev.size === 0) return prev;
+      const presentIds = new Set(alerts.map((alert) => alert.id));
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (presentIds.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [alerts]);
   const visibleAlerts = activeAlerts.filter((a) => !dismissed.has(a.id));
 
   if (visibleAlerts.length === 0) return null;
