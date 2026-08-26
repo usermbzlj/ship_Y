@@ -59,12 +59,12 @@ test("idle-list empty states distinguish pre-launch from launched-but-idle", asy
   assert.match(aiView, /missionStarted: boolean/);
   assert.match(missionControl, /missionStarted=\{missionStarted\}/);
   assert.equal((aiView.match(/\{missionStarted \? \(/g) ?? []).length, 3);
-  // 三处「等待签发」必须与三处任务状态分支一一对应，不能有落在分支外的。
-  assert.equal((aiView.match(/等待签发/g) ?? []).length, 3);
+  // 「等待签发」空态（航行志 / 部门异议 / 观察哨 / 收件箱）都必须受任务状态门控。
+  assert.equal((aiView.match(/等待签发/g) ?? []).length, 4);
 
-  // 乘员页传言板同理；它的两个调用点分别落在离线分支与在线分支。
+  // 乘员页传言板同理；离线与在线两个调用点都传入真实的 missionStarted。
   assert.match(peopleView, /missionStarted: boolean/);
-  assert.match(peopleView, /missionStarted=\{false\}/);
+  assert.match(peopleView, /missionStarted=\{missionStarted\}/);
   assert.match(peopleView, /未经证实的传言会出现在这里/);
 });
 
@@ -80,6 +80,7 @@ test("production source contains a real worker-backed simulator, not starter UI"
     packageJson,
     css,
     peopleView,
+    useLocalSave,
   ] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
@@ -97,6 +98,10 @@ test("production source contains a real worker-backed simulator, not starter UI"
     readFile(new URL("../package.json", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
     readFile(new URL("../app/ui/views/people-view.tsx", import.meta.url), "utf8"),
+    readFile(
+      new URL("../app/mission-control/use-local-save.ts", import.meta.url),
+      "utf8",
+    ),
   ]);
 
   assert.match(page, /<MissionControl \/>/);
@@ -115,9 +120,10 @@ test("production source contains a real worker-backed simulator, not starter UI"
   assert.match(simulationInterventions, /environment:procedural/);
   assert.match(simulationWorker, /ProceduralWorldScheduler/);
   assert.match(simulationWorker, /SimulationTimeDirector/);
-  assert.match(missionControl, /local-save-idb/);
-  assert.match(missionControl, /putManualSave/);
-  assert.match(missionControl, /migrateLocalStorageSaveOnce/);
+  // Local-save I/O now lives in the extracted use-local-save hook.
+  assert.match(useLocalSave, /local-save-idb/);
+  assert.match(useLocalSave, /putManualSave/);
+  assert.match(useLocalSave, /migrateLocalStorageSaveOnce/);
   assert.match(missionControl, /TimeControlBar/);
   assert.match(missionControl, /sim-status-strip/);
   assert.match(missionControl, /showSecondarySimStatus/);
@@ -130,7 +136,7 @@ test("production source contains a real worker-backed simulator, not starter UI"
   assert.match(simulationInterventions, /passenger-emergency/);
   assert.match(godInterventions, /不支持的因果事件类型/);
   assert.match(
-    missionControl,
+    useLocalSave,
     /此外层存档格式为 LocalSave v18，已不再支持/,
   );
   assert.doesNotMatch(missionControl, /snapshot v16/);

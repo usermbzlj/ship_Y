@@ -2273,10 +2273,18 @@ function applyLlmEffectFail(
   ) {
     throw new Error("llm-effect-fail rejected: stale or unknown call");
   }
-  // Fail clears pending and releases pause; routine deadline is not advanced here.
   void command.retryable;
   void command.reason;
+  // Opening a routine boundary cleared the Worker-owned deadline; a (retryable)
+  // failure must restore it, otherwise the captain routine cadence stops for the
+  // rest of the voyage. This mirrors the abort-during-restore path.
+  const wasRoutineBoundary =
+    pending.triggerKey.startsWith("captain-routine:");
+  const frozenAtSimulationSeconds = pending.frozenAtSimulationSeconds;
   clearPendingAndReleaseLlmWaiting();
+  if (wasRoutineBoundary) {
+    nextCaptainRoutineAtSimulationSeconds = frozenAtSimulationSeconds;
+  }
   post({
     type: "ready",
     requestId: command.requestId,
@@ -3938,7 +3946,20 @@ function applyProceduralWorldEvents(
     }
     const request = buildProceduralInterventionRequest(event);
     if (request === null) continue;
-    applyWorkerIntervention(request);
+    try {
+      applyWorkerIntervention(request);
+    } catch (error) {
+      // A procedural injection that the current world rejects (e.g. duplicate
+      // id, already-max state) must not throw the whole step and stall the
+      // Worker. applyWorkerIntervention already rolled back its own domain
+      // checkpoint; record the event on the timeline and carry on.
+      workerLog.warn("procedural.intervention.failed", {
+        eventId: event.id,
+        eventType: event.type,
+        interventionEventType: event.interventionEventType,
+        error,
+      });
+    }
   }
   return triggered;
 }

@@ -1,4 +1,7 @@
-const DEADLINE_EPSILON_SECONDS = 1e-9;
+// Match the Worker's boundary-reached tolerance (its clock is integer
+// microseconds); a tighter epsilon here let a boundary the Worker treats as
+// reached read as not-yet-due, so the routine schedule was never advanced.
+const DEADLINE_EPSILON_SECONDS = 1e-6;
 
 export type CaptainDecisionCompletion = {
   simulationSeconds: number;
@@ -28,6 +31,8 @@ export function captainDecisionAdvancesRoutineSchedule(input: {
   return (
     input.triggerKey === "mission-start" ||
     input.triggerKey.startsWith("routine:") ||
+    // The Worker issues routine triggers as "captain-routine:<deadline>".
+    input.triggerKey.startsWith("captain-routine:") ||
     isCaptainRoutineDue(
       input.simulationSeconds,
       input.deadlineSimulationSeconds,

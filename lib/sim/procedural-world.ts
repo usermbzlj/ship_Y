@@ -144,6 +144,9 @@ const EVENT_SCHEDULE: EventScheduleEntry[] = [
   },
 ];
 
+/** Event types the live schedule knows how to trigger and consume. */
+const SCHEDULE_TYPES = new Set(EVENT_SCHEDULE.map((entry) => entry.type));
+
 function hashSeedString(seed: string): number {
   let h = 2166136261;
   for (let i = 0; i < seed.length; i += 1) {
@@ -184,7 +187,11 @@ export class ProceduralWorldScheduler {
 
   nextEventSimulationSeconds(): number | null {
     let earliest = Number.POSITIVE_INFINITY;
-    for (const value of this.nextTriggerAt.values()) {
+    for (const [type, value] of this.nextTriggerAt) {
+      // Only advertise types check() can actually consume. A restored snapshot
+      // may carry a renamed/removed key whose past due time would otherwise make
+      // the Worker's step loop spin forever (check() never clears it).
+      if (!SCHEDULE_TYPES.has(type)) continue;
       if (Number.isFinite(value)) earliest = Math.min(earliest, value);
     }
     return Number.isFinite(earliest) ? earliest : null;
@@ -257,7 +264,11 @@ export class ProceduralWorldScheduler {
     scheduler.rngState = snapshot.rngState >>> 0;
     scheduler.eventCounter = snapshot.eventCounter;
     scheduler.nextTriggerAt = new Map(
-      Object.entries(snapshot.nextTriggerAt).map(([k, v]) => [k, Number(v)]),
+      Object.entries(snapshot.nextTriggerAt)
+        // Drop keys the current schedule no longer defines so they cannot wedge
+        // the step loop; missing known keys are re-seeded by the constructor.
+        .filter(([key]) => SCHEDULE_TYPES.has(key))
+        .map(([key, value]) => [key, Number(value)]),
     );
     return scheduler;
   }

@@ -573,6 +573,7 @@ export function useLocalSave(deps: UseLocalSaveDeps) {
     simulationSeconds,
     isBlocked: isAutosaveBlocked,
     onRequestAutosave: requestAutosave,
+    worldGeneration: worldEpoch.current,
   });
 
   const requestLoadGame = () => {

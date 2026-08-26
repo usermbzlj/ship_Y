@@ -936,7 +936,10 @@ export class WaterRecoveryNetwork {
         throw new Error(`${loop.id} has insufficient potable water for operations`);
       }
       loop.potableKg = Math.max(0, loop.potableKg - attempted);
-      loop.lastDeliveryShortfallKg = spurShortfall;
+      // Accumulate onto the domestic shortfall set by step() this tick instead
+      // of overwriting it, so telemetry reflects total (domestic + operations)
+      // undelivered water rather than only the last writer.
+      loop.lastDeliveryShortfallKg += spurShortfall;
       this.stateValue.ledger.externallyAddedKg -= attempted;
       this.stateValue.ledger.undeliveredPotableKg += spurShortfall;
     }

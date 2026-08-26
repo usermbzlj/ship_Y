@@ -63,3 +63,10 @@ test("cabin to zone mapping is deterministic", () => {
   assert.equal(resolveZoneIdForCabin("CREW-01-0001"), "B-21");
   assert.equal(resolveZoneIdForCabin("HAB-01-0002"), "A-02");
 });
+
+test("resolveZoneIdForCabin rejects a zero cabin index instead of returning a bogus zone", () => {
+  // (0 - 1) % pool.length is negative in JS, which previously produced an
+  // undefined zone index (e.g. "A-undefined") behind a non-null assertion.
+  assert.throws(() => resolveZoneIdForCabin("HAB-01-0000"), /index must be >= 1/);
+  assert.throws(() => resolveZoneIdForCabin("CREW-02-0000"), /index must be >= 1/);
+});

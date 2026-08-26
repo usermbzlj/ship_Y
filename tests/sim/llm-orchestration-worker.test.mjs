@@ -172,6 +172,17 @@ test("fail clears pending and releases pause", () => {
   assert.equal(failed.payload.llmOrchestration.pending, null);
   assert.deepEqual(failed.payload.timeControl.pauseTokens, []);
 
+  // A retryable failure must re-arm the routine deadline the open cleared,
+  // otherwise the captain routine cadence would stop for the rest of the voyage.
+  const failSnap = dispatch({
+    type: "snapshot",
+    requestId: "llm-orch:fail-snap",
+  });
+  assert.equal(
+    failSnap.payload.snapshot.nextCaptainRoutineAtSimulationSeconds,
+    BOUNDARY_AT,
+  );
+
   const advanced = dispatch({
     type: "step",
     requestId: "llm-orch:after-fail",
