@@ -19,6 +19,14 @@ export type UseAutosaveParams = {
   isBlocked: () => boolean;
   /** Fire a quiet autosave into the rotating auto-* ring. */
   onRequestAutosave: () => void;
+  /**
+   * Increments whenever the active world is replaced — a new mission start, a
+   * god intervention epoch bump, or a load. A runtime load keeps missionStarted
+   * true, so this is what tells the hook to forget the previous world's autosave
+   * bookkeeping (otherwise loading an earlier clock suppresses periodic saves,
+   * and loading a later clock can fire a spurious save of the just-restored world).
+   */
+  worldGeneration: number;
 };
 
 /**
@@ -32,12 +40,14 @@ export function useAutosave({
   simulationSeconds,
   isBlocked,
   onRequestAutosave,
+  worldGeneration,
 }: UseAutosaveParams): void {
   const lastAutosaveSimSecondsRef = useRef<number | null>(null);
   const startSavedRef = useRef(false);
   const arrivalSavedRef = useRef(false);
   const onRequestRef = useRef(onRequestAutosave);
   const isBlockedRef = useRef(isBlocked);
+  const lastWorldGenerationRef = useRef(worldGeneration);
   onRequestRef.current = onRequestAutosave;
   isBlockedRef.current = isBlocked;
 
@@ -49,6 +59,18 @@ export function useAutosave({
       arrivalSavedRef.current = false;
     }
   }, [missionStarted]);
+
+  // Reset bookkeeping when the world is replaced in place (e.g. a load that
+  // keeps missionStarted true), so the new clock is not compared against the
+  // previous world's autosave timestamps.
+  useEffect(() => {
+    if (lastWorldGenerationRef.current !== worldGeneration) {
+      lastWorldGenerationRef.current = worldGeneration;
+      lastAutosaveSimSecondsRef.current = null;
+      startSavedRef.current = false;
+      arrivalSavedRef.current = false;
+    }
+  }, [worldGeneration]);
 
   // Light trigger: first time engine is ready after mission start.
   useEffect(() => {
