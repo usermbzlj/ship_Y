@@ -112,17 +112,14 @@ export function computeHullIntegrity(
 export function jumpBlockedByHull(
   breaches: readonly HullBreach[],
 ): { blocked: boolean; reason: string | null } {
+  // Hull integrity is derived purely from active breaches, so once every breach
+  // is sealed integrity is exactly 1. The interlock therefore blocks on any
+  // active breach; an integrity floor would be dead code without a separate
+  // persistent-scar source, so it is intentionally not applied here.
   if (breaches.length > 0) {
     return {
       blocked: true,
       reason: `活动船体破口 ${breaches.length} 处，壳体威胁联锁禁止跃迁`,
-    };
-  }
-  const integrity = computeHullIntegrity(breaches);
-  if (integrity + 1e-12 < HULL_JUMP_INTEGRITY_MINIMUM) {
-    return {
-      blocked: true,
-      reason: `壳体完整度 ${(integrity * 100).toFixed(1)}% 低于跃迁联锁下限 ${(HULL_JUMP_INTEGRITY_MINIMUM * 100).toFixed(0)}%`,
     };
   }
   return { blocked: false, reason: null };

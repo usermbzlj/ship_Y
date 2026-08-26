@@ -454,6 +454,11 @@ export function resolveZoneIdForCabin(cabinId: string): ZoneId {
   }
   const kind = match[1] as "CREW" | "HAB";
   const cabinIndex = Number(match[3]);
+  // Cabin indices are 1-based; index 0 would make (index - 1) % pool negative
+  // (JS keeps the sign), yielding pool[-1] === undefined and a bogus zone id.
+  if (cabinIndex < 1) {
+    throw new TypeError(`invalid cabin id (index must be >= 1): ${cabinId}`);
+  }
   const ring: "A" | "B" = cabinIndex % 2 === 0 ? "A" : "B";
   const pool = kind === "CREW" ? CREW_ZONE_INDICES : HAB_ZONE_INDICES;
   const zoneIndex = pool[(cabinIndex - 1) % pool.length]!;

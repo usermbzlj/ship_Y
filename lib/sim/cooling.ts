@@ -1933,10 +1933,22 @@ export class CoolingThermalNetwork {
     if (!loopId) {
       throw new Error(`unknown habitat thermal delivery spur: ${id}`);
     }
-    const loop = findById(this.stateValue.loops, loopId, "cooling loop");
+    const current = findById(this.stateValue.loops, loopId, "cooling loop");
+    // Nominal delivery reports zero every tick; skip the no-op so we neither
+    // churn the revision nor clone the snapshot during steady state.
+    if (current.lastHabitatThermalDeliveryShortfallJ === shortfallJ && shortfallJ === 0) {
+      return;
+    }
+    // Clone -> patch -> bump revision -> validate -> commit, matching every
+    // other mutator, so a validation failure cannot leave a partial write and
+    // revision-keyed restore/replay tracks the spur bookkeeping.
+    const next = this.snapshot();
+    const loop = findById(next.loops, loopId, "cooling loop");
     loop.lastHabitatThermalDeliveryShortfallJ = shortfallJ;
-    this.stateValue.ledger.undeliveredHabitatCoolingJ += shortfallJ;
-    validateCoolingSnapshot(this.stateValue);
+    next.ledger.undeliveredHabitatCoolingJ += shortfallJ;
+    next.revision += 1;
+    validateCoolingSnapshot(next);
+    this.stateValue = next;
   }
 
   habitatRingForSpur(id: HabitatThermalDeliverySpurId): CoolingHabitatRing {
