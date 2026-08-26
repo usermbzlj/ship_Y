@@ -427,6 +427,9 @@ export function MissionControl() {
   >([]);
   const discardedCaptainCommandRequests = useRef(new Set<string>());
   const finalReportRequested = useRef(false);
+  const missionStartRequestedRef = useRef(false);
+  const audioRef = useRef(audio);
+  audioRef.current = audio;
   const injectCausalEventRef = useRef<
     (
       eventType: string,
@@ -680,12 +683,28 @@ export function MissionControl() {
     activeCaptainDecision.current = null;
     captainCallInFlight.current = false;
     clearCaptainWorldCommandQueue();
+    // If the Worker still owns a pending LLM effect, releasing only the local
+    // pause leaves llm-waiting acquired in the Worker (it ignores UI releases
+    // while pending is set), which silently freezes the sim while the UI shows
+    // idle. Fail the pending effect so the Worker clears pending and releases
+    // llm-waiting; postLlmEffectFail also clears the local pending mirror.
+    const workerEffect = pendingWorkerLlmEffect.current;
+    if (workerEffect) {
+      postLlmEffectFail({
+        callId: workerEffect.callId,
+        observationRevision: workerEffect.observationRevision,
+        reason: "captain decision cancelled",
+        retryable: true,
+      });
+    }
     // 取消必须立刻清场，不能留下悬挂的演出阶段。
     emitDecisionTheater({ type: "abort", cycleToken: theaterToken });
     releaseCaptainDecisionPause();
   }, [
     clearCaptainWorldCommandQueue,
     emitDecisionTheater,
+    postLlmEffectFail,
+    pendingWorkerLlmEffect,
     releaseCaptainDecisionPause,
   ]);
   const cancelKeyPassengerCall = useCallback(() => {
@@ -982,8 +1001,8 @@ export function MissionControl() {
         const pendingSave = pendingSaves.current.get(
           event.requestId,
         );
-        pendingSaves.current.delete(event.requestId);
         if (!pendingSave) {
+          pendingSaves.current.delete(event.requestId);
           return;
         }
         const save: LocalSave = {
@@ -1001,19 +1020,27 @@ export function MissionControl() {
           },
         };
         void (async () => {
-          if (pendingSave.target === "auto") {
-            await persistAutoSave(save);
-          } else {
-            await persistManualSave(save, {
-              successToast: "完整本地存档已写入。",
-            });
-          }
-          sendTimeControl({ releasePauseTokens: ["save-barrier"] });
-          if (
-            !pendingSave.metadata.paused &&
-            !latestMissionEnded.current
-          ) {
-            setPaused(false);
+          try {
+            if (pendingSave.target === "auto") {
+              await persistAutoSave(save);
+            } else {
+              await persistManualSave(save, {
+                successToast: "完整本地存档已写入。",
+              });
+            }
+          } finally {
+            // Only now, after the write is durable, drop the pending entry and
+            // release the save-barrier. Autosave, manual save, and load all gate
+            // on pendingSaves.size / the barrier, so holding both until here
+            // prevents a concurrent op from racing (or hybridizing) the write.
+            pendingSaves.current.delete(event.requestId);
+            sendTimeControl({ releasePauseTokens: ["save-barrier"] });
+            if (
+              !pendingSave.metadata.paused &&
+              !latestMissionEnded.current
+            ) {
+              setPaused(false);
+            }
           }
         })();
         return;
@@ -1543,6 +1570,10 @@ export function MissionControl() {
     }
     if (missionEnded) {
       acquirePauseTokens.push("mission-ended");
+    } else {
+      // Explicitly release on restart/load paths that reuse the director
+      // instead of rebuilding it, so a prior end does not leave the sim paused.
+      releasePauseTokens.push("mission-ended");
     }
     sendTimeControl({
       timeScale,
@@ -1684,6 +1715,9 @@ export function MissionControl() {
           audio.playClick();
         }
       } else if (e.key >= "1" && e.key <= "7") {
+        // Match the Space gate and the disabled TimeControlBar: time-scale keys
+        // do nothing before launch or after the mission has ended.
+        if (!missionStarted || missionEnded) return;
         const index = Number(e.key) - 1;
         if (index < TIME_SCALE_PRESETS.length) {
           setTimeScale(TIME_SCALE_PRESETS[index]);
@@ -1694,6 +1728,16 @@ export function MissionControl() {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [missionStarted, missionEnded, llmCallPhase, audio]);
+
+  // Ambient drone is started on launch but was never stopped: silence it when
+  // the mission ends and on unmount so the module-level oscillator does not hum
+  // forever. audioRef keeps the latest (non-memoized) audio handle.
+  useEffect(() => {
+    if (missionEnded) {
+      audioRef.current.stopAmbient();
+    }
+  }, [missionEnded]);
+  useEffect(() => () => audioRef.current.stopAmbient(), []);
 
   useEffect(() => {
     if (!missionStarted || !engineState) {
@@ -2126,6 +2170,7 @@ export function MissionControl() {
     setEvents,
     setLlmStatus,
     latestStateRevision,
+    activePhysicsRequestId,
     pendingLoad,
     pendingSaveBarrier,
     pendingSaves,
@@ -2159,6 +2204,11 @@ export function MissionControl() {
   };
 
   const startMission = () => {
+    // A rapid double-click could post two initialize commands before the launch
+    // card unmounts, spawning two worlds that fight over UI state. This latch is
+    // set once we actually dispatch and never needs resetting: the launch card
+    // is gone for the rest of the session after the first successful start.
+    if (missionStartRequestedRef.current) return;
     if (
       pendingSaveBarrier.current !== null ||
       pendingSaves.current.size > 0
@@ -2214,6 +2264,7 @@ export function MissionControl() {
     knownAlertIds.current.clear();
     setActiveAlerts([]);
     setCaptainDecisionLog([]);
+    missionStartRequestedRef.current = true;
     workerRef.current.postMessage(command);
     captainInvocationKeys.current.clear();
     finalReportRequested.current = false;
@@ -2513,6 +2564,7 @@ export function MissionControl() {
               compartments={compartmentState}
               passengerSociety={passengerSocietySnapshot}
               simulationSeconds={simulationSeconds}
+              missionStarted={missionStarted}
             />
           )}
           {activeView === "ai" && (

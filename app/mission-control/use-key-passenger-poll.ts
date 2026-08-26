@@ -89,6 +89,7 @@ export type UseKeyPassengerPollParams = {
   setEvents: Dispatch<SetStateAction<TimelineEvent[]>>;
   setLlmStatus: Dispatch<SetStateAction<LlmRuntimeStatus | null>>;
   latestStateRevision: MutableRefObject<number | null>;
+  activePhysicsRequestId: MutableRefObject<string | null>;
   pendingLoad: { readonly current: unknown };
   pendingSaveBarrier: { readonly current: unknown };
   pendingSaves: { readonly current: { readonly size: number } };
@@ -130,6 +131,7 @@ export function useKeyPassengerPoll(params: UseKeyPassengerPollParams): void {
     setEvents,
     setLlmStatus,
     latestStateRevision,
+    activePhysicsRequestId,
     pendingLoad,
     pendingSaveBarrier,
     pendingSaves,
@@ -437,23 +439,33 @@ export function useKeyPassengerPoll(params: UseKeyPassengerPollParams): void {
             }
             const worker = workerRef.current;
             const expectedStateRevision = latestStateRevision.current;
-            if (!worker || expectedStateRevision === null) {
+            // A grievance carries expectedStateRevision; if a physics step (or
+            // another command) is in flight the Worker's revision has already
+            // moved past our latest known value and the command would be
+            // rejected. Only submit when the revision is settled, and hold the
+            // physics latch so a step cannot start mid-submit (the Worker clears
+            // the latch by requestId on its response, success or failure).
+            if (
+              !worker ||
+              expectedStateRevision === null ||
+              activePhysicsRequestId.current !== null
+            ) {
               const grievanceEventId = ++eventId.current;
               setEvents((current) =>
                 prependTimelineEvent(current, {
                   id: grievanceEventId,
                   at: formatDuration(latestSimulationSeconds.current),
                   source: `关键乘客 / ${candidate.observation.displayName}`,
-                  text: "file_passenger_grievance 未提交：世界状态尚不可用。",
+                  text: "file_passenger_grievance 未提交：世界状态忙，稍后重试。",
                   tone: "watch",
                 }),
               );
               continue;
             }
-            // 关键乘客申诉不申请暂停令牌、不阻塞轮询；世界继续推进。
             requestSequence.current += 1;
             const grievanceRequestId = `passenger-grievance-${requestSequence.current}`;
             const commandId = grievanceRequestId;
+            activePhysicsRequestId.current = grievanceRequestId;
             const command: SimulationWorkerCommand = {
               type: "ship-command",
               requestId: grievanceRequestId,

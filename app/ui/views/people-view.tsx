@@ -131,6 +131,7 @@ export function PeopleView({
   compartments = null,
   passengerSociety,
   simulationSeconds,
+  missionStarted,
 }: {
   state: ShipState | null;
   highlights: PassengerHighlightTelemetry[];
@@ -138,6 +139,7 @@ export function PeopleView({
   compartments?: CompartmentTelemetry | null;
   passengerSociety: PassengerSocietySnapshot;
   simulationSeconds: number;
+  missionStarted: boolean;
 }) {
   const privateNoteByPassengerId = new Map(
     privateNotes.map((note) => [note.passengerId, note]),
@@ -227,7 +229,7 @@ export function PeopleView({
           <RumorBoard
             passengerSociety={passengerSociety}
             simulationSeconds={simulationSeconds}
-            missionStarted={false}
+            missionStarted={missionStarted}
           />
           <div className="passenger-list">
             <div className="passenger-empty-note panel-note">
