@@ -145,15 +145,15 @@ export function useGodInterventions(deps: UseGodInterventionsDeps) {
       requestId,
       request,
     };
+    // A07修复:事故应使在途观察失效并触发新观察,但不清空长期记忆
+    // 航行志/观察哨/部门立场/乘客社会/收件箱应保留
+    // 只清除在途决策状态和临时观测
     cancelCaptainDecision();
     cancelKeyPassengerCall();
     keyPassengerScheduler.current.resetObservations();
     latestCaptainDeviceReceipts.current = [];
-    updateCaptainJournalSnapshot(createCaptainJournalSnapshot());
-    updateCaptainWatchSnapshot(createCaptainWatchSnapshot());
-    updateDepartmentStandingSnapshot(createDepartmentStandingSnapshot());
-    updatePassengerSocietySnapshot(createPassengerSocietySnapshot());
-    updateDepartmentInboxSnapshot(createDepartmentInboxSnapshot());
+    // 不调用 updateCaptainJournalSnapshot / updateCaptainWatchSnapshot 等
+    // 长期记忆保持不变,只更新决策phase
     setLlmCallPhase("idle");
     worldEpoch.current += 1;
     const settled = new Promise<void>((resolve, reject) => {

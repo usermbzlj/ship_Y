@@ -803,6 +803,7 @@ export function MissionControl() {
     commandRevision,
     finalReportRequested,
     timeControl,
+    missionStartRequestedRef,
     cancelCaptainDecision,
     cancelKeyPassengerCall,
     requestSaveSnapshotWhenQuiescent,
@@ -1059,6 +1060,23 @@ export function MissionControl() {
         } = pendingLoad.current;
         pendingLoad.current = null;
         sendTimeControl({ releasePauseTokens: ["save-barrier"] });
+        
+        // A02修复:只在Worker成功确认后才提交AI状态
+        // 此前use-local-save已经停在准备阶段,未修改活动世界
+        latestCaptainDeviceReceipts.current = [];
+        latestMissionEnded.current = false;
+        updateNextCaptainRoutineDeadline(
+          save.nextCaptainRoutineAtSimulationSeconds,
+        );
+        updateCaptainJournalSnapshot(save.captainJournal);
+        updateCaptainWatchSnapshot(save.captainWatch);
+        updateDepartmentStandingSnapshot(save.departmentStanding);
+        updatePassengerSocietySnapshot(save.passengerSociety);
+        updateDepartmentInboxSnapshot(save.departmentInbox);
+        setLlmCallPhase(llmStatus?.ready ? "idle" : "error");
+        worldEpoch.current += 1;
+        latestStateRevision.current = null;
+        
         knownMaintenanceCompletionIds.current = new Set(
           save.runtimeSnapshot?.maintenance.tasks
             .filter((task) => task.status === "completed")
