@@ -1488,22 +1488,61 @@ try {
     }
   }
   assertCurrentCaptainDecision();
-} catch (error) {
-  if (!isCurrentCaptainDecision()) {
-    return;
-  }
-  missionLog.error("captain.decision.failed", {
-    triggerKey,
-    simulationSeconds,
-    advancesRoutineSchedule,
-    error,
-  });
-  captainInvocationKeys.current.delete(triggerKey);
-  const message =
-    error instanceof Error ? error.message : String(error);
-  const scheduleNote = advancesRoutineSchedule
-    ? "本轮决策作废，日程未推进，解冻后将重试。"
-    : null;
+  } catch (error) {
+    if (!isCurrentCaptainDecision()) {
+      return;
+    }
+    
+    // A08.2修复:区分永久失败vs暂时失败
+    let retryable = true;
+    let isPermanentFailure = false;
+    
+    if (error instanceof Error) {
+      // LLM auth/config错误永久失败
+      const errorName = error.name || "";
+      const errorMessage = error.message || "";
+      
+      // LlmProviderHttpError 401/403 (已在gateway标记failed)
+      if (errorName === "LlmProviderHttpError" && !("retryable" in error && (error as any).retryable)) {
+        isPermanentFailure = true;
+        retryable = false;
+      }
+      // LlmEndpointUnavailableError (密钥缺失)
+      else if (errorName === "LlmEndpointUnavailableError") {
+        isPermanentFailure = true;
+        retryable = false;
+      }
+      // LlmConfigurationError (URL格式错误等)
+      else if (errorName === "LlmConfigurationError") {
+        isPermanentFailure = true;
+        retryable = false;
+      }
+      // 其他auth相关错误
+      else if (errorMessage.includes("authentication") || errorMessage.includes("auth") || errorMessage.includes("unauthorized")) {
+        isPermanentFailure = true;
+        retryable = false;
+      }
+    }
+    
+    missionLog.error("captain.decision.failed", {
+      triggerKey,
+      simulationSeconds,
+      advancesRoutineSchedule,
+      retryable,
+      isPermanentFailure,
+      error,
+    });
+    
+    // A08.2修复:永久失败不删triggerKey,避免立即重试
+    if (!isPermanentFailure) {
+      captainInvocationKeys.current.delete(triggerKey);
+    }
+    
+    const message =
+      error instanceof Error ? error.message : String(error);
+    const scheduleNote = advancesRoutineSchedule
+      ? (retryable ? "本轮决策作废，日程未推进，解冻后将重试。" : "决策失败(永久),需修复配置或密钥。")
+      : null;
   const timelineEventId = ++eventId.current;
   setEvents((current) =>
     prependTimelineEvent(current, {
@@ -1538,19 +1577,22 @@ try {
       : `舰长调用失败：${message}`,
   );
   if (advancesRoutineSchedule) {
-    // Do not advance past the failed cycle — restore the due deadline
-    // (or current sim time) so the routine retries after unpause.
-    updateNextCaptainRoutineDeadline(
-      routineDeadlineBeforeClear ??
-        latestSimulationSeconds.current,
-    );
+    // A08.2修复:永久失败不恢复due deadline,避免无限重试
+    // 暂时失败才恢复deadline以便重试
+    if (retryable) {
+      updateNextCaptainRoutineDeadline(
+        routineDeadlineBeforeClear ??
+          latestSimulationSeconds.current,
+      );
+    }
+    // 永久失败:保持deadline清空,需手动配置后才能再次触发
   }
   if (workerOwnedEffect) {
     postLlmEffectFail({
       callId: workerOwnedEffect.callId,
       observationRevision: workerOwnedEffect.observationRevision,
       reason: message,
-      retryable: true,
+      retryable, // A08.2修复:传递实际retryable值
     });
   }
   releaseCaptainDecisionPause("error");

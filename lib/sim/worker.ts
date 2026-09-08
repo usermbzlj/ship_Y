@@ -2275,14 +2275,16 @@ function applyLlmEffectFail(
   }
   void command.retryable;
   void command.reason;
-  // Opening a routine boundary cleared the Worker-owned deadline; a (retryable)
-  // failure must restore it, otherwise the captain routine cadence stops for the
-  // rest of the voyage. This mirrors the abort-during-restore path.
+  // A08.2修复:Opening a routine boundary cleared the Worker-owned deadline
+  // retryable failure must restore it; permanent failure (retryable=false) must NOT
+  // restore, otherwise the captain routine cadence infinite-retries for the rest of voyage
   const wasRoutineBoundary =
     pending.triggerKey.startsWith("captain-routine:");
   const frozenAtSimulationSeconds = pending.frozenAtSimulationSeconds;
+  const shouldRestoreDeadline = command.retryable !== false;
+  
   clearPendingAndReleaseLlmWaiting();
-  if (wasRoutineBoundary) {
+  if (wasRoutineBoundary && shouldRestoreDeadline) {
     nextCaptainRoutineAtSimulationSeconds = frozenAtSimulationSeconds;
   }
   post({
