@@ -239,7 +239,7 @@ export interface FixedAgentRuntimeStatus {
   role: string;
   canSendTo: readonly AgentId[];
   routine: RoutineSettings;
-  state: "ready" | "retrying" | "missing-secret";
+  state: "ready" | "retrying" | "missing-secret" | "failed";
 }
 
 export interface FixedLlmServerStatus {
@@ -324,25 +324,44 @@ export class LlmRequestAbortedError extends Error {
 export class LlmProviderHttpError extends Error {
   readonly status: number;
   readonly retryable: boolean;
+  readonly agentId?: string;
 
-  constructor(status: number) {
-    const detail =
+  constructor(statusOrAgentId: number | string, statusCodeArg?: number, messageArg?: string, retryableArg?: boolean) {
+    // A08修复:支持两种调用方式:旧(status)和新(agentId,status,message,retryable)
+    let status: number;
+    let agentId: string | undefined;
+    let customMessage: string | undefined;
+    let customRetryable: boolean | undefined;
+    
+    if (typeof statusOrAgentId === "string") {
+      agentId = statusOrAgentId;
+      status = statusCodeArg!;
+      customMessage = messageArg;
+      customRetryable = retryableArg;
+    } else {
+      status = statusOrAgentId;
+    }
+    
+    const detail = customMessage ?? (
       status === 400
         ? "rejected the request payload"
         : status === 401 || status === 403
           ? "rejected authentication"
           : status === 404
             ? "could not find the configured endpoint or model"
-            : "returned an error";
+            : "returned an error"
+    );
     super(`LLM provider ${detail} (HTTP ${status})`);
     this.name = "LlmProviderHttpError";
     this.status = status;
-    this.retryable =
+    this.agentId = agentId;
+    this.retryable = customRetryable ?? (
       status === 408 ||
       status === 409 ||
       status === 425 ||
       status === 429 ||
-      status >= 500;
+      status >= 500
+    );
   }
 }
 
@@ -1103,6 +1122,12 @@ export class FixedLlmServerRuntime {
     });
   }
 
+  /**
+   * A08: LLM状态持久化auth失败
+   * 401/403等非重试错误需持久标记,避免ready永真
+   */
+  #permanentFailures = new Map<string, { httpStatus: number; message: string; atEpochMs: number }>();
+
   status(): FixedLlmServerStatus {
     this.#cleanupRoutineTickets(this.#now());
     const agents = this.registry.list().map<FixedAgentRuntimeStatus>((agent) => {
@@ -1110,16 +1135,22 @@ export class FixedLlmServerRuntime {
         (reference) =>
           isUsableSecret(this.#readEnvironment(reference.secretRef)),
       );
+      // A08修复:永久失败(auth等)应标记为不可用
+      const hasPermanentFailure = this.#permanentFailures.has(agent.id);
+      const isRetrying = [...this.#retryingCalls.values()].includes(agent.id);
+      
       return deepFreeze({
         id: agent.id,
         role: agent.role,
         canSendTo: [...agent.canSendTo],
         routine: this.routines.get(agent.id),
-        state: hasEverySecret
-          ? ([...this.#retryingCalls.values()].includes(agent.id)
+        state: !hasEverySecret
+          ? "missing-secret"
+          : hasPermanentFailure
+            ? "failed"
+            : isRetrying
               ? "retrying"
-              : "ready")
-          : "missing-secret",
+              : "ready",
       });
     });
 
@@ -1189,13 +1220,39 @@ export class FixedLlmServerRuntime {
     ) {
       tools.push(this.#routineConfigurationTool());
     }
-    const result = await this.#gateway.invoke({
-      ...invocation,
-      tools,
-      signal,
-    });
-    const routineTickets = this.#stageRoutineToolCalls(result);
-    return deepFreeze({ ...result, routineTickets });
+    
+    // A08修复:永久失败检查
+    const permanentFailure = this.#permanentFailures.get(agent.id);
+    if (permanentFailure) {
+      throw new LlmProviderHttpError(
+        agent.id,
+        permanentFailure.httpStatus,
+        `LLM endpoint previously failed: ${permanentFailure.message}`,
+        false,
+      );
+    }
+    
+    try {
+      const result = await this.#gateway.invoke({
+        ...invocation,
+        tools,
+        signal,
+      });
+      // 成功时清除永久失败标记
+      this.#permanentFailures.delete(agent.id);
+      const routineTickets = this.#stageRoutineToolCalls(result);
+      return deepFreeze({ ...result, routineTickets });
+    } catch (error) {
+      // A08修复:401/403等非重试错误永久记录
+      if (error instanceof LlmProviderHttpError && !error.retryable) {
+        this.#permanentFailures.set(agent.id, {
+          httpStatus: error.status,
+          message: error.message,
+          atEpochMs: this.#now(),
+        });
+      }
+      throw error;
+    }
   }
 
   consumeRoutineTicket(input: unknown): RoutineTicketConsumptionResult {

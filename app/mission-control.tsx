@@ -803,6 +803,7 @@ export function MissionControl() {
     commandRevision,
     finalReportRequested,
     timeControl,
+    missionStartRequestedRef,
     cancelCaptainDecision,
     cancelKeyPassengerCall,
     requestSaveSnapshotWhenQuiescent,
@@ -1059,6 +1060,23 @@ export function MissionControl() {
         } = pendingLoad.current;
         pendingLoad.current = null;
         sendTimeControl({ releasePauseTokens: ["save-barrier"] });
+        
+        // A02修复:只在Worker成功确认后才提交AI状态
+        // 此前use-local-save已经停在准备阶段,未修改活动世界
+        latestCaptainDeviceReceipts.current = [];
+        latestMissionEnded.current = false;
+        updateNextCaptainRoutineDeadline(
+          save.nextCaptainRoutineAtSimulationSeconds,
+        );
+        updateCaptainJournalSnapshot(save.captainJournal);
+        updateCaptainWatchSnapshot(save.captainWatch);
+        updateDepartmentStandingSnapshot(save.departmentStanding);
+        updatePassengerSocietySnapshot(save.passengerSociety);
+        updateDepartmentInboxSnapshot(save.departmentInbox);
+        setLlmCallPhase(llmStatus?.ready ? "idle" : "error");
+        worldEpoch.current += 1;
+        latestStateRevision.current = null;
+        
         knownMaintenanceCompletionIds.current = new Set(
           save.runtimeSnapshot?.maintenance.tasks
             .filter((task) => task.status === "completed")
@@ -1126,25 +1144,72 @@ export function MissionControl() {
         };
       }
 
-      // ─── 警报检测 ─────────────────────────────────────────
-      const newAlerts = detectAlerts(
+      // ─── A01修复:告警对账 - 区分实例vs规则,支持解除和复发 ─────────────────────
+      const currentConditions = detectAlerts(
         event.payload.state,
         event.payload.electrical,
         event.payload.cooling,
         event.payload.compartments,
         event.payload.elapsedSeconds,
-        knownAlertIds.current,
         event.payload.rotation?.observed ?? null,
         event.payload.hullConsequence ?? null,
       );
-      if (newAlerts.length > 0) {
-        for (const alert of newAlerts) {
-          knownAlertIds.current.add(alert.id);
+      
+      // 对账当前活动规则集
+      const currentRuleIds = new Set(currentConditions.map((c) => c.ruleId));
+      const openAlertsByRule = new Map<string, ActiveAlert>();
+      
+      // 检查现有活动告警,解除已消失的条件
+      for (const alert of activeAlerts) {
+        if (currentRuleIds.has(alert.ruleId)) {
+          // 条件仍在,检查是否等级变化
+          const condition = currentConditions.find((c) => c.ruleId === alert.ruleId);
+          if (condition && condition.level !== alert.level) {
+            // 等级变化,升级同一实例
+            openAlertsByRule.set(alert.ruleId, {
+              ...alert,
+              level: condition.level,
+              source: condition.source,
+              message: condition.message,
+            });
+          } else {
+            // 保持现有实例
+            openAlertsByRule.set(alert.ruleId, alert);
+          }
         }
-        setActiveAlerts((prev) => [...newAlerts, ...prev].slice(0, 20));
-        const highest = newAlerts.some((a) => a.level === "critical")
+        // 条件消失的不再放入openAlertsByRule,即被解除
+      }
+      
+      // 添加新出现的条件作为新实例
+      const newInstances: ActiveAlert[] = [];
+      for (const condition of currentConditions) {
+        if (!openAlertsByRule.has(condition.ruleId)) {
+          const instanceId = `${condition.ruleId}:${event.payload.elapsedSeconds}`;
+          const instance: ActiveAlert = {
+            id: instanceId,
+            ruleId: condition.ruleId,
+            level: condition.level,
+            source: condition.source,
+            message: condition.message,
+            simulationSeconds: event.payload.elapsedSeconds,
+            acknowledged: false,
+            ...(condition.zoneId ? { zoneId: condition.zoneId } : {}),
+            ...(condition.ringId ? { ringId: condition.ringId } : {}),
+          };
+          newInstances.push(instance);
+          openAlertsByRule.set(condition.ruleId, instance);
+        }
+      }
+      
+      // 更新activeAlerts为当前打开集
+      const updatedAlerts = Array.from(openAlertsByRule.values());
+      setActiveAlerts(updatedAlerts);
+      
+      // 播报新实例
+      if (newInstances.length > 0) {
+        const highest = newInstances.some((a) => a.level === "critical")
           ? "critical"
-          : newAlerts.some((a) => a.level === "warning")
+          : newInstances.some((a) => a.level === "warning")
             ? "warning"
             : "watch";
         if (highest === "critical") playAlertCritical();
@@ -1699,15 +1764,40 @@ export function MissionControl() {
   // ─── 键盘快捷键 ─────────────────────────────────────────────
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // A04修复:不抢占按钮/链接/已处理事件/重复按键
+      if (e.defaultPrevented || e.repeat) return;
+      
       const target = e.target as HTMLElement;
+      
+      // 排除交互控件
       if (
         target.tagName === "INPUT" ||
         target.tagName === "TEXTAREA" ||
         target.tagName === "SELECT" ||
+        target.tagName === "BUTTON" ||
+        target.tagName === "A" ||
         target.isContentEditable
       ) {
         return;
       }
+      
+      // 排除role为交互控件的元素
+      const role = target.getAttribute("role");
+      if (
+        role === "button" ||
+        role === "link" ||
+        role === "checkbox" ||
+        role === "radio" ||
+        role === "menuitem"
+      ) {
+        return;
+      }
+      
+      // 排除模态对话框打开时
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) {
+        return;
+      }
+      
       if (e.code === "Space") {
         e.preventDefault();
         if (missionStarted && !missionEnded && llmCallPhase !== "waiting") {

@@ -191,6 +191,15 @@ export type RuntimeSimulationSnapshot =
 
 export interface LocalSave {
   version: 24;
+  /** A05修复:提交元数据,用于双后端选主 */
+  commitMeta?: {
+    /** 单调递增序号(可选,跨会话可比) */
+    seq?: number;
+    /** 提交时间戳(毫秒) */
+    timestampMs: number;
+    /** 后端标识 */
+    backend: "idb" | "localStorage";
+  };
   activeView: ViewId;
   missionStarted: boolean;
   paused: boolean;

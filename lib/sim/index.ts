@@ -1819,24 +1819,31 @@ export class SimulationEngine {
     const destination = input.destination.trim();
     if (!destination) throw new TypeError("journey destination must be non-empty");
     assertFiniteNumber(input.totalDistanceLightYears, "totalDistanceLightYears");
-    if (input.totalDistanceLightYears <= 0 || input.totalDistanceLightYears > 100_000) {
-      throw new RangeError("replanned journey distance must be within 100000 light-years");
+    // A09修复:允许零距离(已在目的地或return到当前位置)
+    if (input.totalDistanceLightYears < 0 || input.totalDistanceLightYears > 100_000) {
+      throw new RangeError("replanned journey distance must be non-negative and within 100000 light-years");
     }
-    if (!Number.isSafeInteger(input.totalLegs) || input.totalLegs < 1 || input.totalLegs > 10_000) {
-      throw new RangeError("replanned journey legs must be an integer from 1 to 10000");
+    // A09修复:零距离时totalLegs可以为0
+    if (!Number.isSafeInteger(input.totalLegs) || input.totalLegs < 0 || input.totalLegs > 10_000) {
+      throw new RangeError("replanned journey legs must be a non-negative integer within 10000");
     }
     const journey = this.stateValue.journey;
     journey.destination = destination;
     journey.totalDistanceLightYears = input.totalDistanceLightYears;
     journey.completedDistanceLightYears = 0;
-    journey.currentLeg = 1;
+    journey.currentLeg = input.totalLegs > 0 ? 1 : 0;
     journey.totalLegs = input.totalLegs;
     journey.jumpsCompleted = 0;
-    journey.status = input.abandoned
-      ? "stranded"
-      : journey.jumpDriveChargeKWh >= journey.requiredChargePerJumpKWh
-        ? "ready"
-        : "charging";
+    // A09修复:零距离时立即arrived
+    if (input.totalDistanceLightYears === 0) {
+      journey.status = "arrived";
+    } else {
+      journey.status = input.abandoned
+        ? "stranded"
+        : journey.jumpDriveChargeKWh >= journey.requiredChargePerJumpKWh
+          ? "ready"
+          : "charging";
+    }
     this.stateValue.revision += 1;
     validateShipState(this.stateValue);
     return cloneData(journey);

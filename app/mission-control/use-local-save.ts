@@ -129,6 +129,7 @@ export type UseLocalSaveDeps = {
   eventId: MutableRefObject<number>;
   commandRevision: MutableRefObject<number>;
   finalReportRequested: MutableRefObject<boolean>;
+  missionStartRequestedRef: MutableRefObject<boolean>;
   timeControl: SimulationWorkerTimeControlTelemetry | null;
   // Actions
   cancelCaptainDecision: () => void;
@@ -245,9 +246,10 @@ export function useLocalSave(deps: UseLocalSaveDeps) {
     eventId,
     commandRevision,
     finalReportRequested,
-    timeControl,
-    cancelCaptainDecision,
-    cancelKeyPassengerCall,
+  missionStartRequestedRef,
+  timeControl,
+  cancelCaptainDecision,
+  cancelKeyPassengerCall,
     requestSaveSnapshotWhenQuiescent,
     sendTimeControl,
     nextRequestId,
@@ -627,26 +629,17 @@ export function useLocalSave(deps: UseLocalSaveDeps) {
         const compatibleSave = normalized.save as LocalSave;
         const restoredKeyPassengerScheduler =
           KeyPassengerPollScheduler.restore(compatibleSave.keyPassengerLlm);
-        cancelCaptainDecision();
-        cancelKeyPassengerCall();
-        latestCaptainDeviceReceipts.current = [];
-        latestMissionEnded.current = false;
-        updateNextCaptainRoutineDeadline(
-          compatibleSave.nextCaptainRoutineAtSimulationSeconds,
-        );
-        updateCaptainJournalSnapshot(compatibleSave.captainJournal);
-        updateCaptainWatchSnapshot(compatibleSave.captainWatch);
-        updateDepartmentStandingSnapshot(compatibleSave.departmentStanding);
-        updatePassengerSocietySnapshot(compatibleSave.passengerSociety);
-        updateDepartmentInboxSnapshot(compatibleSave.departmentInbox);
-        setLlmCallPhase(llmStatusReady ? "idle" : "error");
-        worldEpoch.current += 1;
-        latestStateRevision.current = null;
+        
+        // A02修复:有运行时快照时,在Worker确认前不修改活动状态
+        // 只在Worker成功回执后才提交AI sidecar/epoch/日程
         if (compatibleSave.runtimeSnapshot) {
           if (!workerRef.current) {
             throw new Error("simulation worker is unavailable");
           }
           const requestId = nextRequestId("restore");
+          // 准备阶段:只停决策和获取屏障,不修改AI状态
+          cancelCaptainDecision();
+          cancelKeyPassengerCall();
           pendingLoad.current = {
             requestId,
             save: compatibleSave,
@@ -663,6 +656,23 @@ export function useLocalSave(deps: UseLocalSaveDeps) {
           showToast("正在原子校验并恢复完整运行时……");
           return;
         }
+        
+        // 无运行时快照:配置档立刻提交
+        cancelCaptainDecision();
+        cancelKeyPassengerCall();
+        latestCaptainDeviceReceipts.current = [];
+        latestMissionEnded.current = false;
+        updateNextCaptainRoutineDeadline(
+          compatibleSave.nextCaptainRoutineAtSimulationSeconds,
+        );
+        updateCaptainJournalSnapshot(compatibleSave.captainJournal);
+        updateCaptainWatchSnapshot(compatibleSave.captainWatch);
+        updateDepartmentStandingSnapshot(compatibleSave.departmentStanding);
+        updatePassengerSocietySnapshot(compatibleSave.passengerSociety);
+        updateDepartmentInboxSnapshot(compatibleSave.departmentInbox);
+        setLlmCallPhase(llmStatusReady ? "idle" : "error");
+        worldEpoch.current += 1;
+        latestStateRevision.current = null;
         knownMaintenanceCompletionIds.current.clear();
         knownProceduralEventIds.current.clear();
         knownAlertIds.current.clear();
@@ -673,7 +683,9 @@ export function useLocalSave(deps: UseLocalSaveDeps) {
           restoredKeyPassengerScheduler.listPrivateNotes(),
         );
         setActiveView(compatibleSave.activeView);
+        // A03修复:恢复配置档时重置启动锁,使签发按钮可用
         setMissionStarted(false);
+        missionStartRequestedRef.current = false;
         setPaused(true);
         setTimeScale(compatibleSave.timeScale);
         setSimulationSeconds(compatibleSave.simulationSeconds);

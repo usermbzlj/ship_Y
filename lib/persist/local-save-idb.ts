@@ -7,6 +7,7 @@
  */
 
 import { withLocalSaveChecksum } from "./local-save-checksum.ts";
+import type { LocalSave } from "@/app/ui/types";
 
 export const LOCAL_SAVE_STORAGE_KEY = "farhorizon-save";
 export const IDB_DB_NAME = "farhorizon";
@@ -334,11 +335,21 @@ export async function getLatestAutoSave<
   };
 }
 
+/**
+ * A05修复:写入时附加commitMeta
+ */
 export async function putManualSave<T extends LocalSavePayload>(
   save: T,
   adapters?: LocalSavePersistAdapters,
 ): Promise<void> {
-  await putSave(IDB_MANUAL_SLOT, save, adapters);
+  const withMeta = {
+    ...save,
+    commitMeta: {
+      timestampMs: Date.now(),
+      backend: "idb" as const,
+    },
+  } as T;
+  await putSave(IDB_MANUAL_SLOT, withMeta, adapters);
 }
 
 function readLocalStorageSave<T extends LocalSavePayload>(
@@ -367,14 +378,31 @@ function readLocalStorageSave<T extends LocalSavePayload>(
   }
 }
 
+/**
+ * A05修复:从IDB和localStorage读取,选择最新有效commit
+ * 不再无条件优先IDB
+ */
 export async function getManualSave<
   T extends LocalSavePayload = LocalSavePayload,
 >(adapters?: LocalSavePersistAdapters): Promise<T | null> {
   const fromIdb = await getSave<T>(IDB_MANUAL_SLOT, adapters);
-  if (fromIdb != null) {
-    return fromIdb;
+  const fromLs = await readLocalStorageSave<T>(adapters);
+  
+  // 都不存在
+  if (fromIdb == null && fromLs == null) {
+    return null;
   }
-  return readLocalStorageSave<T>(adapters);
+  
+  // 只有一个存在
+  if (fromIdb == null) return fromLs;
+  if (fromLs == null) return fromIdb;
+  
+  // 都存在:按commitMeta.timestampMs选主
+  const idbTime = (fromIdb as unknown as LocalSave).commitMeta?.timestampMs ?? 0;
+  const lsTime = (fromLs as unknown as LocalSave).commitMeta?.timestampMs ?? 0;
+  
+  // 优先选择时间戳更新的;相等时优先IDB(旧行为兼容)
+  return idbTime >= lsTime ? fromIdb : fromLs;
 }
 
 export async function hasManualSave(
@@ -440,6 +468,7 @@ export async function migrateLocalStorageSaveOnce(
 
 /**
  * Write to localStorage when IndexedDB put fails (optional fallback).
+ * A05修复:附加commitMeta标记localStorage后端和时间戳
  * Clears the IDB manual slot (best-effort) so later get/has prefer this
  * fresher LS copy instead of a stale IDB record.
  * Seals checksum before writing.
@@ -451,10 +480,17 @@ export async function putManualSaveToLocalStorageFallback<
   if (!storage) {
     throw new Error("localStorage is unavailable.");
   }
-  const sealed = await withLocalSaveChecksum({
+  const withMeta = {
     ...save,
+    commitMeta: {
+      timestampMs: Date.now(),
+      backend: "localStorage" as const,
+    },
+  } as T & { slotId: string };
+  const sealed = await withLocalSaveChecksum({
+    ...withMeta,
     slotId: IDB_MANUAL_SLOT,
-  } as T & { slotId: string });
+  });
   storage.setItem(LOCAL_SAVE_STORAGE_KEY, JSON.stringify(sealed));
 
   const factory = resolveIdbFactory(adapters);
