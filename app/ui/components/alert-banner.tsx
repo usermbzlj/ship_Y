@@ -7,7 +7,10 @@ export type AlertLevel = "watch" | "warning" | "critical";
 export type AlertRingId = "A" | "B";
 
 export interface ActiveAlert {
+  /** 唯一实例ID: ruleId:simulationSeconds */
   id: string;
+  /** 规则ID,用于对账当前是否仍故障 */
+  ruleId: string;
   level: AlertLevel;
   source: string;
   message: string;
@@ -116,6 +119,19 @@ export function AlertBanner({
   );
 }
 
+/**
+ * 本帧为真的告警条件(无副作用快照)
+ * detectAlerts返回当前所有活跃条件,不去重,不维护实例
+ */
+export interface AlertCondition {
+  ruleId: string;
+  level: AlertLevel;
+  source: string;
+  message: string;
+  zoneId?: string;
+  ringId?: AlertRingId;
+}
+
 type DetectZone = {
   zoneId: string;
   ring: AlertRingId;
@@ -131,8 +147,9 @@ type DetectRotationRing = {
 };
 
 /**
- * 从遥测数据中检测警报条件。
- * 在协调器中每步调用，返回新触发的警报列表。
+ * 从遥测数据中检测告警条件(无状态)。
+ * 返回本帧为真的条件,不去重,不维护实例。
+ * 协调器负责对账并管理故障实例生命周期。
  */
 export function detectAlerts(
   state: {
@@ -164,7 +181,6 @@ export function detectAlerts(
     zones?: DetectZone[];
   } | null,
   simulationSeconds: number,
-  existingAlertIds: Set<string>,
   rotation?: {
     rings: DetectRotationRing[];
   } | null,
@@ -174,47 +190,43 @@ export function detectAlerts(
     jumpBlockReason: string | null;
     events: Array<{ cascadeStage: number }>;
   } | null,
-): ActiveAlert[] {
-  const newAlerts: ActiveAlert[] = [];
+): AlertCondition[] {
+  const conditions: AlertCondition[] = [];
   const push = (
-    id: string,
+    ruleId: string,
     level: AlertLevel,
     source: string,
     message: string,
     target?: { zoneId?: string; ringId?: AlertRingId },
   ) => {
-    if (!existingAlertIds.has(id)) {
-      newAlerts.push({
-        id,
-        level,
-        source,
-        message,
-        simulationSeconds,
-        acknowledged: false,
-        ...(target?.zoneId ? { zoneId: target.zoneId } : {}),
-        ...(target?.ringId ? { ringId: target.ringId } : {}),
-      });
-    }
+    conditions.push({
+      ruleId,
+      level,
+      source,
+      message,
+      ...(target?.zoneId ? { zoneId: target.zoneId } : {}),
+      ...(target?.ringId ? { ringId: target.ringId } : {}),
+    });
   };
 
-  // 电力警报
+  // 电力警报 - 使用单一ruleId,等级由条件决定
   if (electrical?.observed.averageBusVoltageV !== null && electrical?.observed.averageBusVoltageV !== undefined) {
     if (electrical.observed.averageBusVoltageV < 10_000) {
-      push("power-voltage-critical", "critical", "电网保护", "母线电压严重偏低，负载切除可能已触发");
+      push("power-voltage", "critical", "电网保护", "母线电压严重偏低，负载切除可能已触发");
     } else if (electrical.observed.averageBusVoltageV < 10_450) {
-      push("power-voltage-watch", "watch", "电网监测", "母线电压低于标称范围");
+      push("power-voltage", "watch", "电网监测", "母线电压低于标称范围");
     }
   }
   if (electrical?.truth.unservedPowerKw != null && electrical.truth.unservedPowerKw > 1000) {
     push("power-unserved", "warning", "配电系统", `存在 ${(electrical.truth.unservedPowerKw / 1000).toFixed(0)} MW 未服务负载`);
   }
 
-  // 热管理警报
+  // 热管理警报 - 使用单一ruleId
   if (cooling?.observed.averageCoolantTemperatureK != null) {
     if (cooling.observed.averageCoolantTemperatureK > 380) {
-      push("thermal-critical", "critical", "热管理", "冷却母线温度超过安全阈值，设备过热风险");
+      push("thermal", "critical", "热管理", "冷却母线温度超过安全阈值，设备过热风险");
     } else if (cooling.observed.averageCoolantTemperatureK > 355) {
-      push("thermal-watch", "watch", "热管理", "冷却母线温度偏高");
+      push("thermal", "watch", "热管理", "冷却母线温度偏高");
     }
   }
 
@@ -303,7 +315,7 @@ export function detectAlerts(
     );
   }
 
-  // 旋转环重力 / 振感异常
+  // 旋转环重力 / 振感异常 - 使用单一ruleId per环
   for (const ring of rotation?.rings ?? []) {
     const ringId: AlertRingId | null =
       ring.id === "ring-a" ? "A" : ring.id === "ring-b" ? "B" : null;
@@ -312,7 +324,7 @@ export function detectAlerts(
     const vib = ring.vibrationMmPerS;
     if (vib != null && vib > 7.1) {
       push(
-        `ring-vibration-critical-${ringId}`,
+        `ring-vibration-${ringId}`,
         "critical",
         "旋转结构",
         `${label} 轴承振感 ${vib.toFixed(1)} mm/s，危险`,
@@ -320,7 +332,7 @@ export function detectAlerts(
       );
     } else if (vib != null && vib > 3.5) {
       push(
-        `ring-vibration-watch-${ringId}`,
+        `ring-vibration-${ringId}`,
         "watch",
         "旋转结构",
         `${label} 轴承振感 ${vib.toFixed(1)} mm/s，需关注`,
@@ -330,7 +342,7 @@ export function detectAlerts(
     const gravity = ring.artificialGravityG;
     if (gravity != null && (gravity < 0.8 || gravity > 1.15)) {
       push(
-        `ring-gravity-critical-${ringId}`,
+        `ring-gravity-${ringId}`,
         "critical",
         "旋转结构",
         `${label} 人工重力 ${gravity.toFixed(3)} g，严重偏离标称`,
@@ -338,7 +350,7 @@ export function detectAlerts(
       );
     } else if (gravity != null && (gravity < 0.92 || gravity > 1.08)) {
       push(
-        `ring-gravity-watch-${ringId}`,
+        `ring-gravity-${ringId}`,
         "watch",
         "旋转结构",
         `${label} 人工重力 ${gravity.toFixed(3)} g，偏离标称`,
@@ -347,7 +359,7 @@ export function detectAlerts(
     }
   }
 
-  // 跃迁就绪通知（ID 含已完成跃迁次数，便于下一充电周期再次触发）
+  // 跃迁就绪通知（按完成次数做实例，因为每次充电周期都要通知）
   if (state?.journey?.status === "ready") {
     const jumpCycle = state.journey.jumpsCompleted ?? 0;
     push(
@@ -358,5 +370,5 @@ export function detectAlerts(
     );
   }
 
-  return newAlerts;
+  return conditions;
 }
