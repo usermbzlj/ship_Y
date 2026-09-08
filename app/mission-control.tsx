@@ -1764,15 +1764,40 @@ export function MissionControl() {
   // ─── 键盘快捷键 ─────────────────────────────────────────────
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // A04修复:不抢占按钮/链接/已处理事件/重复按键
+      if (e.defaultPrevented || e.repeat) return;
+      
       const target = e.target as HTMLElement;
+      
+      // 排除交互控件
       if (
         target.tagName === "INPUT" ||
         target.tagName === "TEXTAREA" ||
         target.tagName === "SELECT" ||
+        target.tagName === "BUTTON" ||
+        target.tagName === "A" ||
         target.isContentEditable
       ) {
         return;
       }
+      
+      // 排除role为交互控件的元素
+      const role = target.getAttribute("role");
+      if (
+        role === "button" ||
+        role === "link" ||
+        role === "checkbox" ||
+        role === "radio" ||
+        role === "menuitem"
+      ) {
+        return;
+      }
+      
+      // 排除模态对话框打开时
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) {
+        return;
+      }
+      
       if (e.code === "Space") {
         e.preventDefault();
         if (missionStarted && !missionEnded && llmCallPhase !== "waiting") {
