@@ -32,9 +32,9 @@ function ringSpinPeriodSeconds(relativeRpm: number | null | undefined): number |
 }
 
 export function VoyageView({
-  origin,
-  destination,
-  missionStarted,
+  origin: contractOrigin,
+  destination: contractDestination,
+  missionStarted: missionStartedProp,
   directive,
   state,
   cooling,
@@ -56,13 +56,18 @@ export function VoyageView({
   rotation: RotationTelemetry["observed"] | null;
   survival: SimulationWorkerSurvivalTelemetry | null;
 }) {
+  // A10修复:活动路线 vs 契约路线
+  const missionStarted = state != null;
+  const activeOrigin = missionStarted ? state.journey.origin : contractOrigin;
+  const activeDestination = missionStarted ? state.journey.destination : contractDestination;
+  
   const [directiveExpanded, setDirectiveExpanded] = useState(false);
   const directiveIsLong = directive.length > 48;
-  const originSystem = STAR_SYSTEMS.find((system) => system.id === origin)!;
+  const originSystem = STAR_SYSTEMS.find((system) => system.id === activeOrigin)!;
   const destinationSystem = STAR_SYSTEMS.find(
-    (system) => system.id === destination,
+    (system) => system.id === activeDestination,
   )!;
-  const distanceLightYears = routeDistanceLy(origin, destination);
+  const distanceLightYears = routeDistanceLy(activeOrigin, activeDestination);
   const routeLegs = estimateMinLegs(distanceLightYears);
   const observedCoolantTemperatureK =
     cooling?.observed.averageCoolantTemperatureK ?? null;
@@ -345,8 +350,8 @@ export function VoyageView({
         </div>
         <div className="map-stage">
           <StarMap
-            originId={origin}
-            destinationId={destination}
+            originId={activeOrigin}
+            destinationId={activeDestination}
             running={missionStarted}
             completedDistanceLightYears={completedDistanceLightYears}
             totalDistanceLightYears={totalDistanceLightYears}
