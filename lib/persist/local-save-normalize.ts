@@ -258,9 +258,12 @@ export async function normalizeLoadedLocalSave(
 
     !Number.isFinite(save.simulationSeconds) ||
 
+    // A06修复:timeScale必须为正数
     typeof save.timeScale !== "number" ||
 
     !Number.isFinite(save.timeScale) ||
+
+    save.timeScale <= 0 ||
 
     ("nextCaptainRoutineAtSimulationSeconds" in save &&
 
@@ -278,6 +281,22 @@ export async function normalizeLoadedLocalSave(
 
     return { ok: false, code: "unsupported-schema" };
 
+  }
+
+  // A06修复:events数组不能含null或无效元素
+  for (const event of save.events) {
+    if (event === null || event === undefined || typeof event !== "object") {
+      return { ok: false, code: "unsupported-schema" };
+    }
+    // 基本字段校验
+    if (
+      typeof event.id !== "number" ||
+      typeof event.at !== "string" ||
+      typeof event.source !== "string" ||
+      typeof event.text !== "string"
+    ) {
+      return { ok: false, code: "unsupported-schema" };
+    }
   }
 
 
