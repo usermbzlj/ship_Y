@@ -88,23 +88,39 @@ export const handleReviseMission: CommandHandler<"revise-mission"> = (
     objective: command.objective,
     route: command.route,
   });
-  // 起点/终点命中星表时，航距以星表欧氏距离为权威事实，覆盖 LLM 自报值。
-  // 幻觉短航距会压低跃迁段数、单段充能与热负载；只有星表无法解析的自由文本才放行。
+  
+  // A09修复:return/divert必须从当前位置计算距离,不能用契约字段
+  // 起点/终点命中星表时,航距以星表欧氏距离为权威事实,覆盖 LLM 自报值。
   let totalDistanceLightYears = command.totalDistanceLightYears;
   let totalLegs = command.totalLegs;
   if (command.disposition !== "abandon") {
-    const fromLabel =
-      command.disposition === "return"
-        ? currentMission.destination
-        : currentMission.originalOrigin;
-    const fromEntry = findStarCatalogEntry(fromLabel);
+    // 计算当前位置:从journey的origin和destination按完成比例插值
+    const currentJourney = context.engine.getState().journey;
+    const currentOriginEntry = findStarCatalogEntry(currentJourney.origin);
+    const currentDestEntry = findStarCatalogEntry(currentJourney.destination);
+    
+    let fromEntry = currentOriginEntry;
+    // 如果已经有跃迁进度,尝试插值当前位置
+    // 简化实现:完成度>0时用当前destination作为from,否则用origin
+    if (currentJourney.completedDistanceLightYears > 0 && currentJourney.totalDistanceLightYears > 0) {
+      // 已经在途中,使用当前航段的destination作为粗略当前位置
+      // 完整实现需要日心坐标插值,这里用已完成航段的终点近似
+      fromEntry = currentDestEntry;
+    }
+    
     const toEntry = findStarCatalogEntry(destination);
-    if (fromEntry && toEntry && fromEntry.id !== toEntry.id) {
-      totalDistanceLightYears = routeDistanceLy(fromEntry.id, toEntry.id);
-      totalLegs = Math.max(totalLegs, estimateMinLegs(totalDistanceLightYears));
+    if (fromEntry && toEntry) {
+      if (fromEntry.id === toEntry.id) {
+        // 零距离:已经在目的地或return到当前位置
+        totalDistanceLightYears = 0;
+        totalLegs = 0;
+      } else {
+        totalDistanceLightYears = routeDistanceLy(fromEntry.id, toEntry.id);
+        totalLegs = Math.max(totalLegs, estimateMinLegs(totalDistanceLightYears));
+      }
     }
   }
-  const journey = engine.reviseJourneyPlan({
+  const journey = context.engine.reviseJourneyPlan({
     destination,
     totalDistanceLightYears,
     totalLegs,
