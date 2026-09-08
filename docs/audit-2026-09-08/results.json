@@ -1,0 +1,84 @@
+[
+  {
+    "id": "A01",
+    "firstAlert": "thermal-critical",
+    "recoveryNotifications": 0,
+    "repeatedCriticalAlerts": 0
+  },
+  {
+    "id": "A02",
+    "outerValidation": "accepted",
+    "sidecarUpdatedBeforeWorkerAck": true,
+    "epochBefore": 1,
+    "epochAfter": 2,
+    "workerReply": "error",
+    "workerMessage": "unsupported or malformed simulation snapshot"
+  },
+  {
+    "id": "A03",
+    "afterStartedMissionThenLoadingPrelaunchConfig": {
+      "initializeCommands": 0,
+      "feedbackMessages": 0
+    },
+    "scope": "executes exact start handler at its retained latch state; config-load source never resets latch"
+  },
+  {
+    "id": "A04",
+    "focusedElement": "BUTTON",
+    "buttonDefaultPrevented": true,
+    "simulationPauseToggles": 1
+  },
+  {
+    "id": "A05",
+    "oldIdbSeconds": 100,
+    "newFallbackSeconds": 200,
+    "readAfterIdbRecoversSeconds": 100
+  },
+  {
+    "id": "A06",
+    "negativeTimeScaleAndNullEventAccepted": true,
+    "scope": "legacy/unsealed or re-sealed malformed save"
+  },
+  {
+    "id": "A07",
+    "intervention": "micrometeoroid",
+    "workerReply": "intervention",
+    "sidecarsResetBeforeAcknowledgement": [
+      "CaptainJournal",
+      "CaptainWatch",
+      "DepartmentStanding",
+      "PassengerSociety",
+      "DepartmentInbox"
+    ],
+    "scope": "React memory reset verified; telemetry can subsequently restore society/inbox from Worker"
+  },
+  {
+    "id": "A08",
+    "simulatedProviderStatus": 401,
+    "readyBefore": true,
+    "readyAfter": true,
+    "providerCalls": 1,
+    "realNetworkRequests": 0
+  },
+  {
+    "id": "A09",
+    "completedJumpsBeforeReturn": 0,
+    "secondsBeforeReturn": 0,
+    "destinationAfterReturn": "太阳系",
+    "distanceToReturnLightYears": 11.89999474075514
+  },
+  {
+    "id": "A10",
+    "workerDestination": "太阳系",
+    "renderedHeading": "太阳系 <i>→</i> 鲸鱼座 τ",
+    "starMapDestinationId": "tau-ceti",
+    "scope": "actual VoyageView JSX rendered with leaf map/status widgets substituted; no visual/browser claim"
+  },
+  {
+    "id": "M01",
+    "initialSnapshotJsonBytes": 2624160,
+    "initialTelemetryJsonBytes": 85444,
+    "averageTelemetryCloneMs": 0.5558799999999792,
+    "scope": "Node serialization/clone diagnostic, not browser transfer or rendering measurement"
+  }
+]

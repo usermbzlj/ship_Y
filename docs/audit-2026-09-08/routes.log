@@ -1,0 +1,15 @@
+✔ GET /api/llm/status exposes all 40 fixed slots without prompts or secret names (60.9271ms)
+✔ GET /api/llm/status is refused when the Host is not loopback (25.9969ms)
+✔ POST /api/llm/invoke validates HTTP and invocation input before any provider call (30.7543ms)
+✔ passenger-self binds one fixed identity and sends only that passenger's redacted DTO (10.2854ms)
+✔ passenger-self allows only one provider call in flight (4.2471ms)
+✔ routine consume route accepts only the model-issued one-shot IDs (8.3317ms)
+✔ god-assist returns parsed intervention plan without expanding fixed topology (3.0918ms)
+ℹ tests 7
+ℹ suites 0
+ℹ pass 7
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 257.5843

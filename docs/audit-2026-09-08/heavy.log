@@ -1,0 +1,46 @@
+npm notice run far-horizon-ship-simulator@0.1.0 test:heavy
+npm notice run node scripts/run-tests.mjs --suite=heavy
+Running heavy suite: 4 files (serial)
+✔ captain world authority reaches durable operations and physical actuators but excludes player controls (14929.8744ms)
+{"seed":"long-voyage-conservation-smoke-v1","coupledSimSeconds":3600,"domainDaySeconds":86400,"wallMs":7824,"waterClosureKg":0,"waterInventoryKg":4920000,"atmosphereOxygenConsumedKg":160.09919999999994,"ventedGasKg":0,"electricalClosureKWh":0,"electricalNumericalResidualKWh":0.0000017872080206871033}
+✔ long-voyage smoke: ≥1 sim day keeps water/atmosphere/electrical within closure bands (7824.9152ms)
+✔ golden: pause tokens gate elapsed, ration ledger matches food, snapshot restores (207657.9476ms)
+✔ time director pause tokens freeze stepping and enter the runtime snapshot (7802.299ms)
+✔ worker stops exactly at a blocking decision boundary without catch-up debt (43095.2318ms)
+✔ worker couples 48 zones, population, aggregate state, and atomic saves (50095.5688ms)
+✔ one long command and repeated minute-aligned commands reach the same nine-domain state (85691.9005ms)
+✔ a split-step one-leg voyage closes both energy ledgers and reaches its final report (126889.6462ms)
+✔ a micrometeoroid creates a real zone breach without reducing the selected time scale (3200.6251ms)
+✔ direct oxygen Force reaches every compartment and is restored exactly (1694.0795ms)
+✔ cooling faults and thermal Force act on physical loop entities (519.8399ms)
+✔ maintenance consumes parts, blocks without workshop power, and repairs a real pump (50823.8289ms)
+✔ electrical Force after multi-hour coupling still reconciles both buses (56933.8557ms)
+✔ electrical generation force and fusion trip update authoritative state (237.4056ms)
+✔ procedural power-fluctuation and hibernation-complication inject electrical causality (443.8489ms)
+✔ per-load electrical service drives jump charging, scrubbers, and cooling pumps (628.1911ms)
+✔ air-handler commands, independent feeders, and God-mode trips remain causal and atomic (519.8124ms)
+✔ A/B water recovery obeys commands, feeder service, God faults, and snapshot validation (638.3232ms)
+✔ life-support configures water distribution spur open fraction and may repair to nominal (306.2928ms)
+✔ habitat thermal delivery spur faults scale ring cooling and ledger shortfall (444.1817ms)
+✔ powered feeders cannot remove cabin heat through commanded-off pumps (387.6499ms)
+✔ cabin heat pumps obey Qhot equals Qcold plus served compressor work (498.3229ms)
+✔ hibernation transitions consume service from their fixed A/B pod feeder (56858.4462ms)
+✔ jump execution requires thermal, electrical, and rigid-body interlocks (553.8926ms)
+✔ fixed AI roles issue causal navigation, electrical, and cooling controls (965.0863ms)
+✔ independent propulsion control feeders reject only the unpowered torch train (426.6889ms)
+✔ A/B habitat-ring drives close their electrical and thermal ledgers (563.6912ms)
+✔ captain and engineering ring commands are authorized, causal, and atomic (340.2428ms)
+✔ a feeder-capped historical rotation request does not block later commands (460.369ms)
+✔ single-ring coast, braking, and feeder loss exchange real carrier momentum (781.5222ms)
+✔ jump frame rebasing clears only frame ledgers and restores atomically (641.9943ms)
+✔ high-speed wake transitions change compartment metabolism at exact boundaries (43458.4681ms)
+✔ cross-domain intervention failure rolls every physical authority back (197.4924ms)
+✔ malformed nine-clock, cross-ledger, and command-bus restores are rejected atomically (1451.6462ms)
+ℹ tests 34
+ℹ suites 0
+ℹ pass 34
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 769143.3854

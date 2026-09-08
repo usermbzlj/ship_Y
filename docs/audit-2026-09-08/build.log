@@ -1,0 +1,58 @@
+npm notice run far-horizon-ship-simulator@0.1.0 build
+npm notice run vinext build
+
+  vinext build  (Vite 8.0.13)
+
+(node:15752) [DEP0205] DeprecationWarning: `module.register()` is deprecated. Use `module.registerHooks()` instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+▲ [WARNING] Proxy environment variables detected. We'll use your proxy for fetch requests.
+
+
+[1/5] analyze client references...
+[2K
+transforming...✓ 152 modules transformed.
+rendering chunks...
+✓ built in 687ms
+[2/5] analyze server references...
+[2K
+transforming...✓ 131 modules transformed.
+rendering chunks...
+✓ built in 316ms
+[3/5] build rsc environment...
+[2K
+transforming...✓ 158 modules transformed.
+rendering chunks...
+computing gzip size...
+✓ built in 595ms
+[4/5] build client environment...
+[2K
+[plugin rolldown:vite-resolve] Module "node:crypto" has been externalized for browser compatibility, imported by "C:/Users/youxi/Desktop/近期开发/ship-Y/lib/persist/local-save-checksum.ts". See https://vite.dev/guide/troubleshooting.html#module-externalized-for-browser-compatibility for more details.
+transforming...✓ 140 modules transformed.
+rendering chunks...
+computing gzip size...
+[plugin builtin:vite-reporter] 
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rolldownOptions.output.codeSplitting to improve chunking: https://rolldown.rs/reference/OutputOptions.codeSplitting
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.
+✓ built in 838ms
+[5/5] build ssr environment...
+[2K
+transforming...✓ 137 modules transformed.
+rendering chunks...
+computing gzip size...
+✓ built in 524ms
+[0m
+  Route (app)
+  ┌ ? /                       
+  ├ λ /api/llm/invoke         
+  ├ λ /api/llm/routine/consume
+  └ λ /api/llm/status         
+
+  λ API  ? Unknown
+
+  ? Some routes could not be classified. vinext currently uses static analysis
+    and cannot detect dynamic API usage (headers(), cookies(), etc.) at build time.
+    Automatic classification will be improved in a future release.
+  Build complete. Run `vinext start` to start the production server.
+
