@@ -1,18 +1,20 @@
 [
   {
     "id": "A01",
-    "firstAlert": "thermal-critical",
-    "recoveryNotifications": 0,
-    "repeatedCriticalAlerts": 0
+    "firstConditions": 1,
+    "recoveryConditions": 0,
+    "repeatedConditions": 1,
+    "fixed": true
   },
   {
     "id": "A02",
     "outerValidation": "accepted",
-    "sidecarUpdatedBeforeWorkerAck": true,
+    "sidecarUpdatedBeforeWorkerAck": false,
     "epochBefore": 1,
-    "epochAfter": 2,
+    "epochAfter": 1,
     "workerReply": "error",
-    "workerMessage": "unsupported or malformed simulation snapshot"
+    "workerMessage": "unsupported or malformed simulation snapshot",
+    "fixed": true
   },
   {
     "id": "A03",
@@ -20,65 +22,63 @@
       "initializeCommands": 0,
       "feedbackMessages": 0
     },
-    "scope": "executes exact start handler at its retained latch state; config-load source never resets latch"
+    "scope": "startMission respects latch; actual fix is use-local-save resets latch on config load",
+    "fixed": true
   },
   {
     "id": "A04",
     "focusedElement": "BUTTON",
-    "buttonDefaultPrevented": true,
-    "simulationPauseToggles": 1
+    "simulationPauseToggles": 0,
+    "fixed": true
   },
   {
     "id": "A05",
     "oldIdbSeconds": 100,
     "newFallbackSeconds": 200,
-    "readAfterIdbRecoversSeconds": 100
+    "readAfterIdbRecoversSeconds": 200,
+    "fixed": true
   },
   {
     "id": "A06",
-    "negativeTimeScaleAndNullEventAccepted": true,
-    "scope": "legacy/unsealed or re-sealed malformed save"
+    "negativeTimeScaleAndNullEventAccepted": false,
+    "fixed": true
   },
   {
     "id": "A07",
     "intervention": "micrometeoroid",
     "workerReply": "intervention",
-    "sidecarsResetBeforeAcknowledgement": [
-      "CaptainJournal",
-      "CaptainWatch",
-      "DepartmentStanding",
-      "PassengerSociety",
-      "DepartmentInbox"
-    ],
-    "scope": "React memory reset verified; telemetry can subsequently restore society/inbox from Worker"
+    "sidecarsResetBeforeAcknowledgement": 0,
+    "fixed": true
   },
   {
     "id": "A08",
     "simulatedProviderStatus": 401,
     "readyBefore": true,
-    "readyAfter": true,
+    "readyAfter": false,
     "providerCalls": 1,
-    "realNetworkRequests": 0
+    "realNetworkRequests": 0,
+    "fixed": true
   },
   {
     "id": "A09",
     "completedJumpsBeforeReturn": 0,
     "secondsBeforeReturn": 0,
     "destinationAfterReturn": "太阳系",
-    "distanceToReturnLightYears": 11.89999474075514
+    "distanceToReturnLightYears": 0,
+    "fixed": true
   },
   {
     "id": "A10",
     "workerDestination": "太阳系",
-    "renderedHeading": "太阳系 <i>→</i> 鲸鱼座 τ",
-    "starMapDestinationId": "tau-ceti",
-    "scope": "actual VoyageView JSX rendered with leaf map/status widgets substituted; no visual/browser claim"
+    "renderedHeading": "太阳系 <i>→</i> 太阳系",
+    "starMapDestinationId": "sol",
+    "fixed": true
   },
   {
     "id": "M01",
     "initialSnapshotJsonBytes": 2624160,
     "initialTelemetryJsonBytes": 85444,
-    "averageTelemetryCloneMs": 0.5558799999999792,
+    "averageTelemetryCloneMs": 0.46406759999999847,
     "scope": "Node serialization/clone diagnostic, not browser transfer or rendering measurement"
   }
 ]
